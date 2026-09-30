@@ -822,6 +822,10 @@ def main() -> int:
               re.search(r'id="\w+Status"[^>]*>\s*(OFF|ON|ALWAYS ON)\s*<', _drawer) is None)
         check("Drawer: the default-on pill (Internal Policy) is the green On pill",
               re.search(r'id="internalPolicyStatus"[^>]*bg-green-100 text-green-700[^>]*>\s*On\s*<', _drawer) is not None)
+        # One toggle accent for every card: an On switch looks the same whichever control it is.
+        _accents = set(re.findall(r"peer-checked:bg-[a-z]+-\d+|peer-focus:ring-[a-z]+-\d+", _drawer))
+        check("Drawer: every toggle uses the same On accent (green-600 / ring-green-300)",
+              _accents == {"peer-checked:bg-green-600", "peer-focus:ring-green-300"}, str(sorted(_accents)))
         # Pill classes come from ONE place (setPill) so no card can grow its own ON palette.
         check("chat.js: pill classes are only assigned by setPill()",
               "function setPill(" in _chat_js and "rounded-full bg-" not in _chat_js)

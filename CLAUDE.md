@@ -63,7 +63,9 @@ Color is reserved for **state**, never identity. These may stay colored:
   the pill's `title` tooltip.
 - live counters/timers beside the pill (`#autoPromptStats`, `#incidentRemaining`,
   `#sprayRemaining`)
-- the toggle's own `peer-checked:bg-*` / `peer-focus:ring-*` accent
+- the toggle switch — one accent for every card: `peer-checked:bg-green-600`
+  / `peer-focus:ring-green-300`. An On switch looks the same whichever control
+  it is; no per-card switch colors (`tests/test_api.py` pins this).
 
 Dark mode is handled centrally for the neutral classes (`html.dark .bg-gray-50`,
 `.border-gray-200`, `.text-gray-700`, `.text-gray-500`), so a card that follows
