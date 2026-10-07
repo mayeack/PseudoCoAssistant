@@ -226,10 +226,15 @@ def check_shape(token: str, lines: List[str]) -> str:
 
 
 # --------------------------------------------------------------------------- live check
-def _ssl_context() -> ssl.SSLContext:
-    """Same trust as the app: SSL_CERT_FILE if set, else the repo's ca-bundle.pem
-    (backend/config.py points SSL_CERT_FILE at it), else the system store."""
-    for cafile in (os.environ.get("SSL_CERT_FILE"), str(ROOT / "ca-bundle.pem")):
+def _ssl_context(env_dir: Optional[Path] = None) -> ssl.SSLContext:
+    """Same trust as the app: SSL_CERT_FILE if set, else the checkout's
+    ca-bundle.pem (backend/config.py points SSL_CERT_FILE at it) — next to the
+    script or next to the .env, so a copy run from elsewhere still finds it —
+    else the system store."""
+    candidates = [os.environ.get("SSL_CERT_FILE"), str(ROOT / "ca-bundle.pem")]
+    if env_dir is not None:
+        candidates.append(str(env_dir / "ca-bundle.pem"))
+    for cafile in candidates:
         if cafile and Path(cafile).is_file():
             return ssl.create_default_context(cafile=cafile)
     return ssl.create_default_context()
@@ -243,11 +248,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def verify(token: str, api_base: str, project: str, allow_new_project: bool) -> str:
+def verify(token: str, api_base: str, project: str, allow_new_project: bool,
+           env_dir: Optional[Path] = None) -> str:
     query = urllib.parse.urlencode({"project_name": project, "type": "gen_ai"})
     req = urllib.request.Request(f"{api_base}/projects?{query}", headers={"Accept": "application/json"})
     req.add_unredirected_header("X-SF-Token", token)
-    opener = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=_ssl_context()))
+    opener = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=_ssl_context(env_dir)))
     try:
         with opener.open(req, timeout=20) as resp:
             body = resp.read()
@@ -352,7 +358,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 raise Abort("cannot check the token: SPLUNK_AO_REALM is missing or invalid in .env "
                             "(it is the only realm the app uses). Set it, or use --no-verify")
             api_base = args.api_base or f"https://app.{realm}.observability.splunkcloud.com/ao/api"
-            print(f"live check: {verify(token, api_base, project, args.allow_new_project)}")
+            print(f"live check: {verify(token, api_base, project, args.allow_new_project, env_path.parent)}")
 
         # Re-read: the prompt may have been open for minutes. Keep any edit made
         # meanwhile (a Settings-page save rewrites .env), and abort if the realm

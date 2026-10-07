@@ -251,7 +251,7 @@ def main() -> int:
         reset()
         seen = {}
 
-        def fake_verify(token, api_base, project, allow_new_project):
+        def fake_verify(token, api_base, project, allow_new_project, env_dir=None):
             seen.update(api_base=api_base, project=project)
             return "accepted (stub)"
         mod.verify = fake_verify
