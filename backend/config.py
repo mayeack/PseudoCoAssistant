@@ -210,8 +210,10 @@ class Settings(BaseSettings):
     # Optional full base-URL override (takes precedence over region) for private
     # / hybrid deployments. Example: https://us.api.inspect.aidefense.security.cisco.com
     ai_defense_endpoint: str = ""
-    # Inspection request timeout in seconds.
-    ai_defense_timeout: float = 10.0
+    # Inspection request timeout in seconds (httpx: per connect/read/write, not
+    # a total). Kept generous: a timeout is an inspection error, so under
+    # fail-closed a merely slow call blocks a benign turn.
+    ai_defense_timeout: float = 30.0
     # Behavior when the Inspection API errors or returns a malformed response.
     # False = fail closed (block the prompt) — the documented secure default.
     # True  = fail open (allow the prompt through).
