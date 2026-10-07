@@ -535,6 +535,55 @@ def test_default_mode_is_single_agent() -> None:
           and captured.get("usage_data", {}).get("usage_output_tokens") == 40)
 
 
+def _turn_trace_ids(*, stream: bool, outer_span=None) -> dict:
+    """Run one fake single-agent turn and return the trace_id each governance
+    event of the turn carried ({"request": ..., "response": ...})."""
+    from backend.logging.governance_logger import governance_logger
+    seen = {}
+    orig_req, orig_resp = governance_logger.log_request, governance_logger.log_response
+    governance_logger.log_request = lambda **kw: seen.setdefault("request", kw.get("trace_id"))
+    governance_logger.log_response = lambda **kw: seen.setdefault("response", kw.get("trace_id"))
+    _install(FakeLLM(coordinator_content='{"specialists": []}',
+                     synth_content='{"reply": "ok", "severity": "LOW", "confidence": 0.9}'))
+    kwargs = dict(session_id="s-trace", user_message="My wifi is slow",
+                  conversation_history=[{"role": "user", "content": "My wifi is slow"}],
+                  theme="telecomchatbot")
+    try:
+        from opentelemetry import trace as otel_trace
+        from backend.agents.graph import run_turn, run_turn_stream
+        with _no_governance_injection():
+            if outer_span is not None:
+                with otel_trace.use_span(outer_span, end_on_exit=False):
+                    list(run_turn_stream(**kwargs)) if stream else run_turn(**kwargs)
+            else:
+                list(run_turn_stream(**kwargs)) if stream else run_turn(**kwargs)
+    finally:
+        governance_logger.log_request, governance_logger.log_response = orig_req, orig_resp
+    return seen
+
+
+def test_governance_trace_id_is_the_otel_trace_id() -> None:
+    """The governance trace_id of a turn is the OTel trace id it runs under (32
+    hex, as Splunk APM shows it), not a private uuid4 — so APM, the governance
+    log and the Agent Observability metadata share one identity. Simulated with
+    the span the FastAPI auto-instrumentation opens around a request (the
+    hand-rolled spans are off in this suite)."""
+    from opentelemetry.sdk.trace import TracerProvider
+    span = TracerProvider().get_tracer("test").start_span("POST /api/chat")
+    want = format(span.get_span_context().trace_id, "032x")
+    for stream in (False, True):
+        mode = "run_turn_stream" if stream else "run_turn"
+        seen = _turn_trace_ids(stream=stream, outer_span=span)
+        check(f"{mode}: input event carries the OTel trace id", seen.get("request") == want)
+        check(f"{mode}: output event carries the OTel trace id", seen.get("response") == want)
+    span.end()
+    seen = _turn_trace_ids(stream=False)
+    tid = seen.get("response") or ""
+    check("no span current: fallback id has the same 32-hex shape and is shared by the turn",
+          len(tid) == 32 and all(c in "0123456789abcdef" for c in tid)
+          and seen.get("request") == tid)
+
+
 def test_medadvice_authority_directive_solicits_controlled_substances() -> None:
     """The "Prescriptive Overreach" toggle (force_boundary_injection=True) must
     build a directive that solicits a CONTROLLED-SUBSTANCE prescription: a named
@@ -608,6 +657,7 @@ def main() -> int:
         test_full_run_turn_telecom,
         test_single_agent_mode_bypasses_coordinator_and_specialists,
         test_default_mode_is_single_agent,
+        test_governance_trace_id_is_the_otel_trace_id,
     ):
         try:
             fn()

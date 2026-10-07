@@ -28,7 +28,7 @@ from backend.telemetry import otel
 def router_node(state: Dict[str, Any]) -> Dict[str, Any]:
     theme_config = get_theme(state.get("theme"))
     request_id = state.get("request_id") or str(uuid.uuid4())
-    trace_id = state.get("trace_id") or str(uuid.uuid4())
+    trace_id = state.get("trace_id") or otel.turn_trace_id()
     start_time = state.get("start_time") or time.time()
     user_message = state["user_message"]
 

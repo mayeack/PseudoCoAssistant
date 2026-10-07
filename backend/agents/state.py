@@ -10,7 +10,8 @@ Notes on conventions:
   AI Defense block, clarifying question) that used to be early ``return``s.
 - Correlation fields (``request_id``, ``trace_id``) are generated once and
   reused across governance logs *and* OTel spans so logs and traces line up in
-  Splunk.
+  Splunk. ``trace_id`` is the OTel trace id of the turn (32 hex, as APM shows
+  it), adopted when the workflow span opens (``graph._adopt_otel_trace_id``).
 """
 
 from __future__ import annotations

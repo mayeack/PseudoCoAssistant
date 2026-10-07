@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import uuid
 from typing import Any, Dict, Iterator, Optional
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,41 @@ def init_telemetry(settings) -> None:
 
 def is_enabled() -> bool:
     return bool(_STATE["enabled"] and _STATE["tracer"] is not None)
+
+
+def current_trace_id() -> Optional[str]:
+    """The active span's OTel trace id as 32 lowercase hex — the form Splunk APM
+    and Agent Observability show — or None when no valid span is current.
+
+    Reads the global context rather than ``_STATE["tracer"]``, so it also sees a
+    span started by the auto-instrumentation (the FastAPI request span under
+    ``opentelemetry-instrument``) when the hand-rolled spans are off."""
+    try:
+        from opentelemetry import trace
+
+        ctx = trace.get_current_span().get_span_context()
+    except Exception:  # noqa: BLE001 - OTel missing or a broken context
+        return None
+    if ctx is None or not ctx.is_valid:
+        return None
+    return format(ctx.trace_id, "032x")
+
+
+def turn_trace_id() -> str:
+    """The trace id a turn's governance events carry: the OTel trace id when a
+    span is current, so ``trace_id`` in the governance log, the
+    ``pseudoco-assistant.trace_id`` span attribute and the APM trace are one
+    value. With no span (telemetry off, an in-process caller outside a request)
+    it falls back to a random id of the same 32-hex shape."""
+    return current_trace_id() or uuid.uuid4().hex
+
+
+def set_span_attributes(span, attributes: Optional[Dict[str, Any]]) -> None:
+    """Set attributes on a span from one of the helpers here; a no-op for the
+    ``None`` they yield when telemetry is off."""
+    if span is None:
+        return
+    _set_attrs(span, attributes)
 
 
 def _set_attrs(span, attributes: Optional[Dict[str, Any]]) -> None:

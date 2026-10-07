@@ -14,9 +14,12 @@ trace::
 
 or, for a turn without an ``agent_trace`` (legacy engine, blocked turns), the
 workflow span wrapping a single LLM span. Every span carries the governance
-metadata plus ``pseudoco_assistant_trace_id`` — the uuid that also rides on the app's own
-OTel spans as ``pseudoco-assistant.trace_id`` — so an Agent Observability trace can be joined
-back to Splunk APM and the governance logs. PseudoCo Assistant's ``session_id`` (one
+metadata plus ``pseudoco_assistant_trace_id`` — the turn's OTel trace id, the same value
+as the governance event's ``trace_id``, the span attribute ``pseudoco-assistant.trace_id``
+and the trace id Splunk APM shows — so an Agent Observability trace can be joined back
+to APM and the governance logs. (The Agent Observability trace's own id is minted by
+the SDK, which takes no trace id, so the join runs through that metadata field.)
+PseudoCo Assistant's ``session_id`` (one
 conversation) is mapped to an Agent Observability session, best-effort.
 
 Why the SDK logger and not the LangChain callback: the governance flags are
