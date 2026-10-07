@@ -5,7 +5,7 @@
 # collector, the Cloudflare tunnel, and the systemd units.
 #
 #   ./ec2-bootstrap.sh                      # payload at ~/demobot-payload
-#   ./ec2-bootstrap.sh --replica 2          # deployment.environment=pseudoco-assistant-ec2-2
+#   ./ec2-bootstrap.sh --replica 2          # deployment.environment=pseudoco-assistant-ec2-2 (= Agent stream)
 #   ./ec2-bootstrap.sh --env-name pseudoco-assistant-ec2-lab
 #   ./ec2-bootstrap.sh --gpu require        # abort unless inference lands on the GPU
 #   ./ec2-bootstrap.sh --num-parallel 4     # Ollama concurrent request slots
@@ -279,8 +279,9 @@ fi
 # special-casing one key.
 #
 #   deployment.environment  what separates this replica from every other one in
-#                           Splunk O11y and Agent Observability. Two boxes sharing a value
-#                           silently merge into one apparent service.
+#                           Splunk O11y. Two boxes sharing a value silently merge
+#                           into one apparent service. The same name becomes the
+#                           box's Agent Observability Agent stream.
 #   ACCESS_KEY              per-box Basic-auth gate.
 #   OLLAMA_MODEL            lets one box run the poisoned model and another the
 #                           clean one — impossible under a load balancer, which
@@ -302,7 +303,16 @@ if [ -z "$ENV_NAME" ]; then
     [ "$ENV_NAME" = "pseudoco-assistant-ec2-" ] && ENV_NAME="pseudoco-assistant-ec2-$(hostname -s)"
   fi
 fi
-log "deployment.environment = $ENV_NAME"
+log "deployment.environment = Agent stream = $ENV_NAME"
+
+# One name for the box's O11y environment AND its Agent Observability Agent
+# stream, stamped with this instance's id, so a later clone of this box (an AMI,
+# a reused payload) is caught at start and renamed rather than silently merged
+# with it (deploy/box_identity.py; run.sh / run-collector.sh call `ensure`).
+# Runs BEFORE the override pass, so --set SPLUNK_AO_AGENT_STREAM=... or
+# --set SPLUNK_AO_AGENT_STREAM_PER_THEME=True still wins.
+python3 "$REPO/deploy/box_identity.py" assign --name "$ENV_NAME" --env-file "$REPO/.env" \
+  || die "box identity: '$ENV_NAME' is not a usable environment / Agent stream name"
 
 OVERRIDES=$(mktemp); chmod 600 "$OVERRIDES"
 trap 'rm -f "$OVERRIDES"' EXIT

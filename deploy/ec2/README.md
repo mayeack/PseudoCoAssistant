@@ -195,6 +195,42 @@ numbers are taken. The IMDS default trades readability for a guarantee. Pick
 per situation; the bootstrap prints the value it settled on and echoes it again
 in the final summary.
 
+### The Agent stream follows it, and a cloned `.env` is caught at start
+
+An AI Trust dry run had three boxes reporting into one `demobot-ec2-1`: they
+were built from one source and nothing tied the `.env` to the instance. The
+bootstrap now hands the name to `deploy/box_identity.py assign`, which writes it
+to **both** places a box is told apart and stamps the instance:
+
+```
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment=pseudoco-assistant-ec2-2
+SPLUNK_AO_AGENT_STREAM=pseudoco-assistant-ec2-2
+SPLUNK_AO_AGENT_STREAM_PER_THEME=False      # every turn of the box in its one stream
+PSEUDOCO_ASSISTANT_BOX_ID=i-0883a0ddedf54e4e8
+```
+
+`--set SPLUNK_AO_AGENT_STREAM=…` or `--set SPLUNK_AO_AGENT_STREAM_PER_THEME=True`
+still wins; they are applied after. Agent Control on the `splunk_ao` backend
+binds controls to the stream a turn is logged to, so attach a box's controls to
+*its* stream.
+
+`run.sh` and `run-collector.sh` run `box_identity.py ensure` before they read
+`.env`. When the stamp names a **different** instance — an AMI of a configured
+box, a reused payload — the box renames itself to
+`pseudoco-assistant-ec2-<instance-id>` (environment and stream) and logs
+`box identity: cloned .env …`. An unstamped `.env` is adopted as-is (its name
+may be hand-picked; renaming a working box would split its history), and off EC2
+the check does nothing.
+
+To give an existing box a name by hand (the fix for boxes already sharing one):
+
+```bash
+cd ~/DemoBot && git pull --ff-only
+python3 deploy/box_identity.py assign --name pseudoco-assistant-lab-2
+sudo systemctl restart pseudoco-assistant-collector pseudoco-assistant-app
+python3 deploy/box_identity.py show
+```
+
 ### Verifying the split
 
 `tests/observability/verify_observability.sh` **hard-codes `pseudoco-assistant-local`** as
@@ -279,7 +315,7 @@ byte-identical:
 
 | Key | Source | Why per-box |
 |---|---|---|
-| `deployment.environment` | `--replica N` → `pseudoco-assistant-ec2-N` | telemetry split in O11y/Agent Observability |
+| `deployment.environment` + `SPLUNK_AO_AGENT_STREAM` | `--replica N` → `pseudoco-assistant-ec2-N` (both) | telemetry split in O11y and Agent Observability |
 | `ACCESS_KEY` | `deploy/ec2/access-keys.env` via `gen-access-keys.sh` | per-group credential, rotatable alone |
 | `OLLAMA_MODEL` (optional) | `--set OLLAMA_MODEL=…` | clean-vs-poisoned box splits |
 

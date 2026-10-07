@@ -37,6 +37,11 @@ if [ ! -f ".env" ]; then
     exit 1
 fi
 
+# Per-box identity (deploy/box_identity.py), before anything below reads .env:
+# an EC2 box whose .env was stamped on another instance gets its own
+# deployment.environment + Agent stream. No-op off EC2 and on a box that owns it.
+python3 deploy/box_identity.py ensure --env-file .env || true
+
 # Check AI provider configuration
 AI_PROVIDER=$(grep "^AI_PROVIDER=" .env 2>/dev/null | cut -d'=' -f2)
 if [ "$AI_PROVIDER" = "bedrock" ]; then

@@ -7,6 +7,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Per-box identity before anything reads .env: on an EC2 box whose .env was
+# stamped on another instance (cloned image / shared payload) this gives the box
+# its own deployment.environment + Agent stream. No-op off EC2. See the script.
+command -v python3 >/dev/null 2>&1 && python3 deploy/box_identity.py ensure --env-file .env || true
+
 export SPLUNK_REALM=$(grep '^SPLUNK_REALM=' .env 2>/dev/null | cut -d= -f2- || true)
 export O11Y_INGEST=$(grep '^O11Y_INGEST=' .env 2>/dev/null | cut -d= -f2- || true)
 # Splunk Agent Observability — optional second trace destination (same O11y org).
