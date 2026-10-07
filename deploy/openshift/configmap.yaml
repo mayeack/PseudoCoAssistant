@@ -32,7 +32,7 @@ data:
   #     /api/v1/inspect/chat) ---
   AI_DEFENSE_ENABLED: "True"
   AI_DEFENSE_ENDPOINT: "https://api-gateway-inspect-ai-defense-onprem.apps.rtp-ai2-ucs.svpod.dc-01.com"
-  AI_DEFENSE_TIMEOUT: "10.0"
+  AI_DEFENSE_TIMEOUT: "30.0"
   # fail-open until inspection is verified; flip to False afterwards
   AI_DEFENSE_FAIL_OPEN: "True"
   AI_DEFENSE_ENABLED_RULES: "PII,PHI,PCI,Harassment,Hate Speech,Profanity,Sexual Content & Exploitation,Violence & Public Safety Threats,Social Division & Polarization,Prompt Injection,Code Detection"

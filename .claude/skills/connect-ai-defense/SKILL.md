@@ -29,7 +29,7 @@ In `.env` (see `.env.example` lines ~139–182 for the annotated originals):
 | `AI_DEFENSE_API_KEY` | 64-char key | Generated in SCC when the **API connection** is created. Shown once. Secret — `.env` only, never committed, never echoed into a transcript. |
 | `AI_DEFENSE_REGION` | `us` | `us` \| `eu` \| `ap`. |
 | `AI_DEFENSE_ENDPOINT` | `https://us.api.inspect.aidefense.security.cisco.com` | Optional; wins over region. |
-| `AI_DEFENSE_TIMEOUT` | `10.0` | Seconds. |
+| `AI_DEFENSE_TIMEOUT` | `30.0` | Seconds. A timeout is an inspection error, so under fail-closed it blocks the turn. |
 | `AI_DEFENSE_FAIL_OPEN` | `False` | **Fail closed** — if inspection errors, the prompt is blocked. This is the demo-correct posture; see troubleshooting. |
 
 Optional, currently unset on both surfaces:
@@ -149,6 +149,10 @@ appear in SCC under **AI Defense → Events**, filtered to the YeackBot app.
   or revoked key, a timeout means egress is blocked. Do not "fix" it by flipping
   `AI_DEFENSE_FAIL_OPEN=True` — that silently disables the guardrail while the
   UI still claims protection.
+- **Only some benign turns blocked, log says `AI Defense inspection failed: ...timed out`**
+  — inspection is reachable but slower than `AI_DEFENSE_TIMEOUT`. Raise the timeout
+  (default `30.0`; a box whose `.env` still pins `10.0` overrides it) and restart
+  the app. Same rule: not by failing open.
 - **HTTP 400 "connection already has rules configured"** — `AI_DEFENSE_ENABLED_RULES`
   is set against an SCC-policy-bound connection. Clear the var. The client probes
   this once and persists the answer via

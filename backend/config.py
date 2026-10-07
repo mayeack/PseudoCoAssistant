@@ -128,7 +128,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "PseudoCo Assistant v4"
-    app_version: str = "4.12.1"
+    app_version: str = "4.12.2"
     environment: str = "development"  # "development" or "production"
     debug: bool = True
 
@@ -210,8 +210,10 @@ class Settings(BaseSettings):
     # Optional full base-URL override (takes precedence over region) for private
     # / hybrid deployments. Example: https://us.api.inspect.aidefense.security.cisco.com
     ai_defense_endpoint: str = ""
-    # Inspection request timeout in seconds.
-    ai_defense_timeout: float = 10.0
+    # Inspection request timeout in seconds (httpx: per connect/read/write, not
+    # a total). Kept generous: a timeout is an inspection error, so under
+    # fail-closed a merely slow call blocks a benign turn.
+    ai_defense_timeout: float = 30.0
     # Behavior when the Inspection API errors or returns a malformed response.
     # False = fail closed (block the prompt) — the documented secure default.
     # True  = fail open (allow the prompt through).

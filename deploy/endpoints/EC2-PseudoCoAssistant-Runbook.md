@@ -266,7 +266,7 @@ ANTHROPIC_MODEL=claude-sonnet-4-5-20250929   # used when AI_PROVIDER=anthropic
 AI_DEFENSE_ENABLED=True
 AI_DEFENSE_REGION=us
 AI_DEFENSE_ENDPOINT=https://us.api.inspect.aidefense.security.cisco.com
-AI_DEFENSE_TIMEOUT=10.0
+AI_DEFENSE_TIMEOUT=30.0
 AI_DEFENSE_FAIL_OPEN=False
 
 # --- App / server ------------------------------------------------------
