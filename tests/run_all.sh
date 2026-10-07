@@ -22,6 +22,7 @@ SUITES=(
   tests/test_ec2_scripts.py
   tests/test_box_identity.py
   tests/test_spray_sources.py
+  tests/test_set_ao_api_token.py
   tests/test_provider_setting.py
   tests/test_model_catalog.py
   tests/test_model_emitter.py
