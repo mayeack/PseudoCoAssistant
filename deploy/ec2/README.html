@@ -254,6 +254,33 @@ preserving any sibling attributes:</p>
 numbers are taken. The IMDS default trades readability for a guarantee. Pick
 per situation; the bootstrap prints the value it settled on and echoes it again
 in the final summary.</p>
+<h3 id="the-agent-stream-follows-it-and-a-cloned-env-is-caught-at-start">The Agent stream follows it, and a cloned <code>.env</code> is caught at start</h3>
+<p>An AI Trust dry run had three boxes reporting into one <code>demobot-ec2-1</code>: they
+were built from one source and nothing tied the <code>.env</code> to the instance. The
+bootstrap now hands the name to <code>deploy/box_identity.py assign</code>, which writes it
+to <strong>both</strong> places a box is told apart and stamps the instance:</p>
+<pre><code>OTEL_RESOURCE_ATTRIBUTES=deployment.environment=pseudoco-assistant-ec2-2
+SPLUNK_AO_AGENT_STREAM=pseudoco-assistant-ec2-2
+SPLUNK_AO_AGENT_STREAM_PER_THEME=False      # every turn of the box in its one stream
+PSEUDOCO_ASSISTANT_BOX_ID=i-0883a0ddedf54e4e8
+</code></pre>
+<p><code>--set SPLUNK_AO_AGENT_STREAM=…</code> or <code>--set SPLUNK_AO_AGENT_STREAM_PER_THEME=True</code>
+still wins; they are applied after. Agent Control on the <code>splunk_ao</code> backend
+binds controls to the stream a turn is logged to, so attach a box's controls to
+<em>its</em> stream.</p>
+<p><code>run.sh</code> and <code>run-collector.sh</code> run <code>box_identity.py ensure</code> before they read
+<code>.env</code>. When the stamp names a <strong>different</strong> instance — an AMI of a configured
+box, a reused payload — the box renames itself to
+<code>pseudoco-assistant-ec2-&lt;instance-id&gt;</code> (environment and stream) and logs
+<code>box identity: cloned .env …</code>. An unstamped <code>.env</code> is adopted as-is (its name
+may be hand-picked; renaming a working box would split its history), and off EC2
+the check does nothing.</p>
+<p>To give an existing box a name by hand (the fix for boxes already sharing one):</p>
+<pre><code class="language-bash">cd ~/DemoBot &amp;&amp; git pull --ff-only
+python3 deploy/box_identity.py assign --name pseudoco-assistant-lab-2
+sudo systemctl restart pseudoco-assistant-collector pseudoco-assistant-app
+python3 deploy/box_identity.py show
+</code></pre>
 <h3 id="verifying-the-split">Verifying the split</h3>
 <p><code>tests/observability/verify_observability.sh</code> <strong>hard-codes <code>pseudoco-assistant-local</code></strong> as
 the environment (line 76), so tier 3 queries the wrong replica and fails on any
@@ -348,9 +375,9 @@ byte-identical:</p>
 </thead>
 <tbody>
 <tr>
-<td><code>deployment.environment</code></td>
-<td><code>--replica N</code> → <code>pseudoco-assistant-ec2-N</code></td>
-<td>telemetry split in O11y/Agent Observability</td>
+<td><code>deployment.environment</code> + <code>SPLUNK_AO_AGENT_STREAM</code></td>
+<td><code>--replica N</code> → <code>pseudoco-assistant-ec2-N</code> (both)</td>
+<td>telemetry split in O11y and Agent Observability</td>
 </tr>
 <tr>
 <td><code>ACCESS_KEY</code></td>
@@ -506,12 +533,4 @@ wants a 150 GB volume.</p>
   Node ≥ 22.19 from NodeSource) are installed by <code>--with-nemoclaw</code>; both keys are
   checked in the payload preflight (step 0), not twenty minutes in.</li>
 </ul>
-</main>
-<h2>NVIDIA options: local NIM and the NemoClaw runtime</h2>
-<pre># provider=nvidia = a NIM on THIS box (loopback :8000). Default image fits one A10G.
-./ec2-bootstrap.sh --with-nim                                   # nvidia/nvidia-nemotron-nano-9b-v2
-./ec2-bootstrap.sh --with-nim nvidia/nemotron-3-super-120b-a12b # needs 8x H100 (p5-class), not g5
-# NemoClaw runtime (OpenClaw in an OpenShell sandbox, governed by /api/toolguard)
-./ec2-bootstrap.sh --with-nemoclaw</pre>
-<p><code>--with-nim</code> installs Docker + the NVIDIA Container Toolkit (the DL base AMI has both), logs into <code>nvcr.io</code> with <code>NGC_API_KEY</code> (from <code>.env</code> or the payload overrides), runs <code>pseudoco-assistant-nim.service</code> and sets <code>AI_PROVIDER=nvidia</code>, <code>NVIDIA_BASE_URL</code>, <code>NVIDIA_MODEL</code> (an explicit <code>--set</code> still wins). First start pulls the image + weights (minutes). <code>--with-nemoclaw</code> runs <code>run-nemoclaw.sh</code> once (needs <code>NVIDIA_INFERENCE_API_KEY</code> in <code>.env</code> for the sandbox's provider) and installs <code>pseudoco-assistant-nemoclaw</code> + <code>pseudoco-assistant-nemoclaw-forwarder</code> units — NemoClaw restarts nothing after a reboot by itself. Details: <code>docs/nvidia-integration.md</code>.</p>
-</body></html>
+</main></body></html>

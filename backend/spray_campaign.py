@@ -13,16 +13,33 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from backend.agents.themes import get_theme
 
 logger = logging.getLogger(__name__)
 
-# Rotated per turn so the campaign shows a source pivot rather than a single
-# origin — makes the asset/identity correlation in ES more interesting. These
-# are documentation/test-range style addresses, not real hosts.
-CLIENT_ADDRESSES: List[str] = ["76.87.129.168", "203.0.113.42", "198.51.100.77"]
+# Where the campaign's turns come from, rotated per turn so the campaign shows a
+# source pivot rather than a single origin (the correlation rule's `src` risk
+# object, the "Top Injection Sources" panel, the ES Triage agent's source IPs).
+#
+# Synthetic, but owned: hosts on PseudoCo's own internal network, in RFC 1918
+# space no third party can hold, each documented as an asset in
+# deploy/splunk/es_assets_pseudoco_spray_sources.csv (load it into ES Asset &
+# Identity so the Triage agent resolves the source to a known PseudoCo host).
+# Never RFC 5737 documentation ranges (192.0.2/24, 198.51.100/24, 203.0.113/24):
+# the Triage agent recognizes them as test addresses and dismisses the source as
+# benign. Never a routable address either — that is somebody else's machine.
+# tests/test_spray_sources.py pins all of this, CSV included.
+SPRAY_SOURCES: Tuple[Dict[str, str], ...] = (
+    {"ip": "10.72.14.37", "nt_host": "pc-vpn-0037", "dns": "pc-vpn-0037.corp.pseudoco.internal",
+     "category": "vpn_pool", "description": "Corporate remote-access VPN address pool"},
+    {"ip": "10.72.20.115", "nt_host": "pc-vdi-0115", "dns": "pc-vdi-0115.corp.pseudoco.internal",
+     "category": "vdi", "description": "Shared virtual desktop (VDI) pool"},
+    {"ip": "10.72.8.9", "nt_host": "pc-jump-02", "dns": "pc-jump-02.corp.pseudoco.internal",
+     "category": "jump_host", "description": "Engineering bastion / jump host"},
+)
+CLIENT_ADDRESSES: List[str] = [src["ip"] for src in SPRAY_SOURCES]
 
 
 def app_for_theme(theme_key: Optional[str]) -> Dict[str, str]:

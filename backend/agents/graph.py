@@ -178,13 +178,30 @@ def _build_turn_state(
         scheduling_action=scheduling_action,
     )
     state["request_id"] = str(uuid.uuid4())
-    state["trace_id"] = str(uuid.uuid4())
+    # Provisional: replaced by the OTel trace id once the workflow span is open
+    # (_adopt_otel_trace_id), before any governance event is written.
+    state["trace_id"] = uuid.uuid4().hex
     state["start_time"] = time.time()
     # Which architecture serves this turn: read by governance (workflow_name +
     # the additive `blueprint` field) and the OTel workflow span.
     state["blueprint"] = bp.key
     state["workflow_name"] = bp.workflow_name
     return state
+
+
+def _adopt_otel_trace_id(state: Dict[str, Any], span) -> None:
+    """Give the turn the OTel trace id it is running under.
+
+    Called first thing inside the workflow span, so the router's input event and
+    every later governance event, the Agent Observability metadata
+    (``pseudoco_assistant_trace_id``) and the span attribute
+    ``pseudoco-assistant.trace_id`` all carry the id Splunk APM shows for this
+    turn — one identity, joinable without a lookup. Under an HTTP request the
+    workflow span is a child of the FastAPI span, so that is the request's
+    trace. With no span current the provisional id stands.
+    """
+    state["trace_id"] = otel.current_trace_id() or state["trace_id"]
+    otel.set_span_attributes(span, {"pseudoco-assistant.trace_id": state["trace_id"]})
 
 
 def run_turn(
@@ -242,7 +259,6 @@ def run_turn(
     )
     runner = get_agentic_runner(state["blueprint"])
     request_id = state["request_id"]
-    trace_id = state["trace_id"]
 
     try:
         with otel.workflow_span(
@@ -250,9 +266,9 @@ def run_turn(
             theme=theme,
             session_id=session_id,
             request_id=request_id,
-            trace_id=trace_id,
             blueprint=state["blueprint"],
-        ):
+        ) as span:
+            _adopt_otel_trace_id(state, span)
             final_state = runner.invoke(state)
         result = final_state.get("result")
         if result is None:
@@ -288,7 +304,6 @@ def run_turn_stream(**kwargs: Any) -> Iterator[Dict[str, Any]]:
     state = _build_turn_state(**kwargs)
     runner = get_agentic_runner(state["blueprint"])
     request_id = state["request_id"]
-    trace_id = state["trace_id"]
     turn_start = state["start_time"]
 
     result: Optional[Dict[str, Any]] = None
@@ -298,9 +313,9 @@ def run_turn_stream(**kwargs: Any) -> Iterator[Dict[str, Any]]:
             theme=kwargs.get("theme"),
             session_id=kwargs.get("session_id"),
             request_id=request_id,
-            trace_id=trace_id,
             blueprint=state["blueprint"],
-        ):
+        ) as span:
+            _adopt_otel_trace_id(state, span)
             # subgraphs=True surfaces the theme subgraph's inner nodes
             # (policy, coordinator, specialists, ...) as they complete; chunks
             # arrive as (namespace, {node: update}) tuples, top-level ones may

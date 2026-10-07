@@ -272,9 +272,11 @@ _INTEGRATION_FIELDS: Dict[str, List[_CredField]] = {
         _CredField("o11y_api_token", "API token (sessions, optional)", secret=True,
                    env="SPLUNK_AO_O11Y_API_TOKEN", env_file=True,
                    placeholder="optional — O11y API token with Agent Observability access",
-                   help="Only used to group turns into Agent Observability sessions "
-                        "(the ingest token cannot call that API). Leave blank to log "
-                        "turns without sessions."),
+                   help="Only used to group turns into Agent Observability sessions — the "
+                        "Session level of the AO views and evaluators (the ingest token cannot "
+                        "call that API). Observability Cloud > Settings > Access Tokens > "
+                        "Create Token, type API token, role agent_observability_admin. Leave "
+                        "blank to log turns without sessions."),
         _CredField("project", "Project", env="SPLUNK_AO_PROJECT", env_file=True, restart="collector",
                    placeholder="PseudoCo Assistant", help="Created on first ingest if it does not exist."),
         _CredField("agent_stream", "Agent stream", env="SPLUNK_AO_AGENT_STREAM", env_file=True,

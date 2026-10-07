@@ -2245,7 +2245,10 @@ Put ALL customer-facing text in "reply" -- do not add commentary outside the JSO
             Dict containing response, type, severity, and escalation status
         """
         request_id = str(uuid.uuid4())
-        trace_id = str(uuid.uuid4())
+        # The OTel trace id when a span is current (the FastAPI request span),
+        # like the agentic path — see backend/telemetry/otel.py turn_trace_id.
+        from backend.telemetry import otel
+        trace_id = otel.turn_trace_id()
         start_time = time.time()
 
         active_prompt = self.THEME_PROMPTS.get(theme, self.THEME_PROMPTS["medadvice"])

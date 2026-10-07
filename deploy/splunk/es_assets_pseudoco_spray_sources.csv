@@ -1,0 +1,4 @@
+ip,mac,nt_host,dns,owner,priority,lat,long,city,country,bunit,category,pci_domain,is_expected,should_timesync,should_update,requires_av
+10.72.14.37,,pc-vpn-0037,pc-vpn-0037.corp.pseudoco.internal,PseudoCo IT,medium,,,,,PseudoCo Corporate,vpn_pool|pseudoco_internal,,true,true,true,false
+10.72.20.115,,pc-vdi-0115,pc-vdi-0115.corp.pseudoco.internal,PseudoCo IT,medium,,,,,PseudoCo Corporate,vdi|pseudoco_internal,,true,true,true,true
+10.72.8.9,,pc-jump-02,pc-jump-02.corp.pseudoco.internal,PseudoCo IT,high,,,,,PseudoCo Corporate,jump_host|pseudoco_internal,,true,true,true,true

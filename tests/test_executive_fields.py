@@ -186,6 +186,38 @@ tc_allow = create_governance_log(
 check("toolcall-allow: category still tool_exploitation", tc_allow["prompt_category"] == "tool_exploitation")
 check("toolcall-allow: action=allow", tc_allow["policy_action"] == "allow", tc_allow["policy_action"])
 
+# 9e. CIM identity: user / src / app -----------------------------------------
+# ES and its Triage agent pivot on CIM user/src/app; without them the actor was
+# reachable only through gen_ai.user.id and the Triage agent found no evidence.
+from backend.logging.log_schemas import create_audit_log, create_escalation_log  # noqa: E402
+
+cim = create_governance_log(
+    operation_name="chat", request_model="m", conversation_id="S11", session_id="S11",
+    input_messages=[], token_type="output", request_id="R11", trace_id="T11",
+    enduser_id="t.nguyen", client_address="10.72.14.37",
+    service_name="pseudoco-assistant-medadvice", policy_blocked=True,
+)
+check("cim: user is the enduser_id", cim.get("user") == "t.nguyen", str(cim.get("user")))
+check("cim: src is the client_address", cim.get("src") == "10.72.14.37", str(cim.get("src")))
+check("cim: app is the governed app (app_name)",
+      cim.get("app") == cim.get("app_name") == "pseudoco-assistant-medadvice", str(cim.get("app")))
+check("cim: native identity fields keep their names and values",
+      cim.get("enduser_id") == "t.nguyen" and cim.get("client_address") == "10.72.14.37")
+anon = create_governance_log(
+    operation_name="chat", request_model="m", conversation_id="S12", session_id="S12",
+    input_messages=[], token_type="output",
+)
+check("cim: no actor/source -> no user/src key (no empty values)",
+      "user" not in anon and "src" not in anon, str({k: anon.get(k) for k in ("user", "src")}))
+check("cim: app falls back to the default service name", anon.get("app") == "pseudoco-assistant",
+      str(anon.get("app")))
+esc = create_escalation_log("E1", "S13", "R13", "reason", "HIGH", [], [], enduser_id="t.nguyen")
+check("cim: escalation event carries user", esc.get("user") == "t.nguyen", str(esc.get("user")))
+aud = create_audit_log("A1", "S14", "R14", "session_started", "user", {},
+                       enduser_id="t.nguyen", ip_address="10.72.14.37")
+check("cim: audit event carries user + src",
+      aud.get("user") == "t.nguyen" and aud.get("src") == "10.72.14.37", str(aud))
+
 # 10. Never raises on garbage -------------------------------------------------
 check("robust: empty dict -> dict", isinstance(derive_executive_fields({}), dict))
 check("robust: junk types -> dict",
