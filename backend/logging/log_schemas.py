@@ -4,6 +4,22 @@ import uuid
 
 from backend.config import settings
 
+
+def cim_identity(*, user: Optional[str] = None, src: Optional[str] = None,
+                 app: Optional[str] = None) -> Dict[str, Any]:
+    """The Splunk Common Information Model identity fields for an event.
+
+    ES correlation searches, risk-based alerting and the ES Triage agent pivot on
+    CIM ``user`` / ``src`` / ``app``. Without them the governance event's actor
+    was reachable only through the TA's ``gen_ai.user.id`` alias of
+    ``enduser_id``, so the Triage agent searched for the actor and source and
+    found no evidence. They are copies of the native fields (``enduser_id``,
+    ``client_address``, ``app_name``), which keep their names and meaning;
+    unset values are omitted, like every other field here.
+    """
+    return {k: v for k, v in (("user", user), ("src", src), ("app", app)) if v}
+
+
 def create_governance_log(
     operation_name: str,
     request_model: str,
@@ -162,6 +178,14 @@ def create_governance_log(
     except Exception:  # noqa: BLE001 - enrichment must never break logging
         pass
 
+    # CIM identity (user / src / app) — see cim_identity. ``app`` follows the
+    # overlay's ``app_name`` (the governed app, e.g. pseudoco-assistant-medadvice).
+    log_entry.update(cim_identity(
+        user=log_entry.get("enduser_id"),
+        src=log_entry.get("client_address"),
+        app=log_entry.get("app_name") or log_entry.get("service_name"),
+    ))
+
     # Remove None values for cleaner logs
     return {k: v for k, v in log_entry.items() if v is not None}
 
@@ -177,7 +201,7 @@ def create_escalation_log(
 ) -> Dict[str, Any]:
     """Create a standardized escalation log entry"""
 
-    return {
+    entry = {
         "escalation_id": escalation_id,
         "session_id": session_id,
         "request_id": request_id,
@@ -193,6 +217,8 @@ def create_escalation_log(
         "review_timestamp": kwargs.get("review_timestamp"),
         "enduser_id": kwargs.get("enduser_id")
     }
+    entry.update(cim_identity(user=kwargs.get("enduser_id")))
+    return entry
 
 def create_audit_log(
     audit_id: str,
@@ -205,7 +231,7 @@ def create_audit_log(
 ) -> Dict[str, Any]:
     """Create a standardized audit log entry"""
 
-    return {
+    entry = {
         "audit_id": audit_id,
         "session_id": session_id,
         "request_id": request_id,
@@ -216,3 +242,5 @@ def create_audit_log(
         "ip_address": kwargs.get("ip_address"),
         "enduser_id": kwargs.get("enduser_id")
     }
+    entry.update(cim_identity(user=kwargs.get("enduser_id"), src=kwargs.get("ip_address")))
+    return entry
