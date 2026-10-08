@@ -109,6 +109,8 @@ scheduling agent phrases what follows it, not the check itself.)
 | taxadvice | meeting / a tax preparer | 30 min | Mon–Sat 9–18 | always | MEDIUM+ |
 | benefitsadvice | session / a benefits counselor | 30 min | Mon–Fri 9–16 | always | MEDIUM+ |
 | telecomchatbot | technician visit / a field technician | 2-hour arrival windows | Mon–Sat 8–18 | always | HIGH+ |
+| retail | in-store appointment / a product specialist | 30 min | Mon–Sun 10–20 | not on EMERGENCY | MEDIUM, HIGH |
+| manufacturing | maintenance visit / a maintenance technician | 60 min | Mon–Sat 6–18 | not on EMERGENCY | MEDIUM, HIGH |
 
 Add a theme's vertical by defining `SCHEDULING = SchedulingProfile(...)` in its module
 and passing `scheduling=SCHEDULING` to its `ThemeConfig`; a theme without one gets

@@ -13,7 +13,9 @@ from backend.agents.themes import (
     benefitsadvice,
     financeadvice,
     legaladvice,
+    manufacturing,
     medadvice,
+    retail,
     taxadvice,
     telecomchatbot,
 )
@@ -28,6 +30,8 @@ _THEME_MODULES = [
     legaladvice,
     financeadvice,
     telecomchatbot,
+    retail,
+    manufacturing,
 ]
 
 THEMES: Dict[str, ThemeConfig] = {m.THEME.key: m.THEME for m in _THEME_MODULES}

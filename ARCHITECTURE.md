@@ -47,7 +47,8 @@
 │    Agent Control block, clarifying question, generation error)  │
 │                                                                 │
 │   Themes: medadvice · taxadvice · benefitsadvice · legaladvice  │
-│           · financeadvice · telecomchatbot                      │
+│           · financeadvice · telecomchatbot · retail             │
+│           · manufacturing                                       │
 └───────────────────────────────┬───────────────────────────────┘
                                  │ nodes delegate to ▼
 ┌─────────────────▼─────────────────────────────────────────────┐
@@ -195,8 +196,9 @@ policy -> prompt_defense -> intake -> domain(theme) -> safety
   - `compliance` - final display formatting
   - `governance` - emits the Splunk governance log events
 - **Themes** (`themes/`): `medadvice` (default), `taxadvice`, `benefitsadvice`,
-  `legaladvice`, `financeadvice`, `telecomchatbot`. Each is a `ThemeConfig` sourcing
-  its prompt/patterns from the content library.
+  `legaladvice`, `financeadvice`, `telecomchatbot`, `retail`, `manufacturing`. Each is
+  a `ThemeConfig` sourcing its prompt/patterns from the content library;
+  `telecomchatbot` and `retail` are conversational (free-text `reply`).
 - **LLM factory** (`llm.py`): builds `ChatAnthropic` / `ChatBedrockConverse` /
   `ChatOpenAI` from `settings.ai_provider` and normalizes responses (text, usage,
   metadata) for the governance logger.

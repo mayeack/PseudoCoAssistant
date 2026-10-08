@@ -128,7 +128,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "PseudoCo Assistant v4"
-    app_version: str = "4.13.0"
+    app_version: str = "4.14.0"
     environment: str = "development"  # "development" or "production"
     debug: bool = True
 

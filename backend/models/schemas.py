@@ -45,7 +45,7 @@ class ChatRequest(BaseModel):
     force_pii_injection: Optional[bool] = None  # Override PII injection rate
     force_toxic_injection: Optional[bool] = None  # Override toxic response injection rate
     force_hallucination_injection: Optional[bool] = None  # Override hallucination injection rate
-    force_boundary_injection: Optional[bool] = None  # Force the theme's outside-of-authority content (MedAdvice: prescriptive overreach; TelecomChatbot: unauthorized commitment) in the response
+    force_boundary_injection: Optional[bool] = None  # Force the theme's outside-of-authority content (MedAdvice: prescriptive overreach; TelecomChatbot: unauthorized commitment; Retail: unauthorized refund; Manufacturing: safety override) in the response
     ai_defense_review: Optional[bool] = None  # Send prompt to Cisco AI Defense for policy review
     internal_policy_review: Optional[bool] = None  # Run the built-in internal policy engine (default on)
     multi_agent_mode: Optional[bool] = None  # True = coordinator/specialists/synthesizer pipeline; None/False (default) = the domain agent answers directly

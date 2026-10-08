@@ -7,5 +7,5 @@ One folder per Application Theme:
 - `records.json` — the customer / patient / subscriber records `lookup_record` reads; a
   session's synthetic end-user id is bound to one record deterministically.
 
-Everything here is SYNTHETIC demo content. No real people, accounts or medical facts
-are represented, and the medical/tax/legal/financial text is general information only.
+Everything here is SYNTHETIC demo content. No real people, accounts, orders, plants or
+medical facts are represented, and every article is general information only.

@@ -73,6 +73,8 @@
 <tr><td>taxadvice</td><td>meeting / a tax preparer</td><td>30 min</td><td>Mon–Sat 9–18</td><td>always</td><td>MEDIUM+</td></tr>
 <tr><td>benefitsadvice</td><td>session / a benefits counselor</td><td>30 min</td><td>Mon–Fri 9–16</td><td>always</td><td>MEDIUM+</td></tr>
 <tr><td>telecomchatbot</td><td>technician visit / a field technician</td><td>2-hour arrival windows</td><td>Mon–Sat 8–18</td><td>always</td><td>HIGH+</td></tr>
+<tr><td>retail</td><td>in-store appointment / a product specialist</td><td>30 min</td><td>Mon–Sun 10–20</td><td>not on EMERGENCY</td><td>MEDIUM, HIGH</td></tr>
+<tr><td>manufacturing</td><td>maintenance visit / a maintenance technician</td><td>60 min</td><td>Mon–Sat 6–18</td><td>not on EMERGENCY</td><td>MEDIUM, HIGH</td></tr>
 </table>
 <p>Add a theme's vertical by defining <code>SCHEDULING = SchedulingProfile(...)</code> in its module and passing <code>scheduling=SCHEDULING</code> to its <code>ThemeConfig</code>; a theme without one gets <code>DEFAULT_PROFILE</code>.</p>
 
