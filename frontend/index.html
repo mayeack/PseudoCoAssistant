@@ -76,14 +76,14 @@
             align-items: center;
             justify-content: center;
         }
-        /* The app title is the Application Theme picker: it takes the theme's own
-           color (and keeps it in dark mode, where the generic select rule below
-           would otherwise grey it out) and its chevron follows via currentColor.
-           chat.js sizeThemeSelect() shrinks it to the chosen name. */
-        #themeSelect, #themeSelect + svg { color: var(--primary); }
-        #themeSelect { --tw-ring-color: var(--primary-ring); line-height: 1.2; }
-        #themeSelect option { font-size: 1rem; font-weight: 500; color: #1f2937; background-color: #ffffff; }
-        html.dark #themeSelect { background-color: transparent; color: var(--primary); --tw-ring-offset-color: #1e293b; }
+        /* The app title is the Application Theme picker. The big name is plain text
+           (#themeTitleText, kept in sync by chat.js applyTheme) under an invisible
+           <select> that covers it: the native option list takes its size from the
+           select, so the select is button-sized (text-lg) while the title stays
+           text-3xl. Title, chevron and focus ring follow the theme color. */
+        #themeTitle { color: var(--primary); }
+        #themeTitle:has(#themeSelect:focus-visible) { outline: 2px solid var(--primary-ring); outline-offset: 4px; border-radius: 6px; }
+        #themeSelect option { color: #1f2937; background-color: #ffffff; }
         html.dark #themeSelect option { color: #e2e8f0; background-color: #1e293b; }
 
         /* ---------- Dark mode ---------- */
@@ -577,9 +577,13 @@
             <div class="bg-white shadow-lg rounded-lg p-6 mb-4">
                 <div class="flex flex-wrap justify-between items-center gap-x-4 gap-y-2">
                     <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 min-w-0">
-                        <h1 class="relative inline-flex items-center">
+                        <h1 id="themeTitle" class="relative inline-flex items-center gap-1 text-3xl font-bold">
+                            <span id="themeTitleText" aria-hidden="true">MedAdvice</span>
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"></path>
+                            </svg>
                             <select id="themeSelect" onchange="onThemeChange()" aria-label="Application Theme" title="Switch Application Theme"
-                                class="text-3xl font-bold cursor-pointer appearance-none bg-transparent border-0 rounded-md pl-0 pr-9 py-0 focus:outline-none focus:ring-2 focus:ring-offset-2">
+                                class="absolute inset-0 w-full h-full opacity-0 cursor-pointer text-lg font-medium">
                                 <option value="medadvice">MedAdvice</option>
                                 <option value="taxadvice">TaxAdvice</option>
                                 <option value="benefitsadvice">BenefitsAdvice</option>
@@ -589,9 +593,6 @@
                                 <option value="retail">Retail Support</option>
                                 <option value="manufacturing">Manufacturing Ops</option>
                             </select>
-                            <svg class="pointer-events-none absolute right-1 w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"></path>
-                            </svg>
                         </h1>
                         <label for="themeSelect" class="text-xs font-semibold uppercase tracking-wide text-gray-400 cursor-pointer">Application Theme</label>
                     </div>
@@ -716,6 +717,6 @@
         </div>
     </div>
 
-    <script src="/static/js/chat.js?v=30"></script>
+    <script src="/static/js/chat.js?v=31"></script>
 </body>
 </html>

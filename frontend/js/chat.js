@@ -319,7 +319,7 @@ function applyTheme(themeKey) {
     document.title = theme.pageTitle;
 
     // App header. The title is the Application Theme picker itself
-    // (index.html #themeSelect, synced and sized below), so only the subtitle is set here.
+    // (index.html #themeTitle, synced below), so only the subtitle is set here.
     const appSubtitle = document.getElementById('appSubtitle');
     if (appSubtitle) appSubtitle.textContent = theme.subtitle;
 
@@ -404,23 +404,14 @@ function applyTheme(themeKey) {
     if (themeSelect && themeSelect.value !== themeKey) {
         themeSelect.value = themeKey;
     }
-    sizeThemeSelect();
+    // The big title is the selected option's text; the invisible select over it
+    // (index.html #themeTitle) opens the button-sized option list.
+    const themeTitleText = document.getElementById('themeTitleText');
+    if (themeSelect && themeTitleText && themeSelect.selectedIndex >= 0) {
+        themeTitleText.textContent = themeSelect.options[themeSelect.selectedIndex].text;
+    }
 
     prevTailwindColor = newColor;
-}
-
-// The title picker is a <select>, which renders as wide as its LONGEST option;
-// shrink it to the chosen name so the "Application Theme" label sits beside it.
-let themeSelectMeasure = null;
-function sizeThemeSelect() {
-    const select = document.getElementById('themeSelect');
-    if (!select || select.selectedIndex < 0) return;
-    const style = getComputedStyle(select);
-    themeSelectMeasure = themeSelectMeasure || document.createElement('canvas').getContext('2d');
-    themeSelectMeasure.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-    const text = select.options[select.selectedIndex].text;
-    const pad = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
-    select.style.width = `${Math.ceil(themeSelectMeasure.measureText(text).width + pad) + 2}px`;
 }
 
 function onThemeChange() {
@@ -454,8 +445,6 @@ document.addEventListener('DOMContentLoaded', function() {
     currentTheme = savedTheme;
     prevTailwindColor = (THEMES[savedTheme] || THEMES.medadvice).tailwindColor;
     applyTheme(savedTheme);
-    // Inter arrives after first paint; re-measure the title picker in it.
-    if (document.fonts && document.fonts.ready) document.fonts.ready.then(sizeThemeSelect);
 
     // Restore saved light/dark color scheme (the no-flash script in index.html
     // already set the class; this syncs the toggle buttons' active state).

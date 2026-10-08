@@ -133,7 +133,18 @@ check("My Appointments labels every theme", sorted(re.findall(r"(\w+): '", label
 header = _block(INDEX, '<div class="container mx-auto p-4">', 'id="emergencyBanner"')
 check("no separate Application Theme box above the header", header.count('id="themeSelect"') == 1
       and "Application Theme:</label>" not in INDEX)
-check("the app title is the theme picker", re.search(r"<h1[^>]*>\s*<select id=\"themeSelect\"", header) is not None)
+h1 = _block(header, "<h1", "</h1>")
+_send_at = INDEX.index('id="sendButton"')
+_send_button = INDEX[INDEX.rindex("<button", 0, _send_at):INDEX.index(">", _send_at)]
+check("the app title is the theme picker", 'id="themeSelect"' in h1 and "text-3xl" in h1.split(">", 1)[0])
+# The native option list takes the select's font size, so the select is the
+# buttons' size (text-lg) and invisible over a text-3xl title that shows the choice.
+select_tag = _block(h1, '<select id="themeSelect"', ">")
+check("the option list is button-sized, the title stays large",
+      "text-lg" in select_tag and "opacity-0" in select_tag and "absolute inset-0" in select_tag
+      and 'id="themeTitleText"' in h1 and "text-lg" in _send_button)
+check("applyTheme writes the chosen name into the title",
+      "themeTitleText.textContent = themeSelect.options[themeSelect.selectedIndex].text" in CHAT_JS)
 check("no static title left for applyTheme to overwrite",
       'id="appTitle"' not in INDEX and "getElementById('appTitle')" not in CHAT_JS)
 label_at = header.find('>Application Theme</label>')
@@ -145,7 +156,6 @@ check("New Session sits on the title row", 'id="newSessionBtn"' in row1)
 sub_row = header[header.index('id="appSubtitle"') - 200:header.index('id="sessionId"')]
 check("Session ID shares the subtitle's row, under New Session",
       'id="sessionId"' not in row1 and "justify-between" in sub_row and sub_row.count("<div") == 1)
-check("chat.js sizes the picker to the chosen name", "function sizeThemeSelect()" in CHAT_JS)
 
 print()
 if _fails:
