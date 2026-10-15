@@ -8,6 +8,7 @@ from backend.agents.themes.base import (
     prompt_for,
 )
 from backend.services.scheduling import SchedulingProfile
+from backend.services.mcp_thrash import build_profile
 
 SPECIALISTS = (
     SpecialistSpec(
@@ -82,6 +83,8 @@ GUARDRAILS = GuardrailCopy(
     ),
 )
 
+THRASH = build_profile("patient-records-mcp", "patient_record")
+
 THEME = ThemeConfig(
     key="medadvice",
     label="MedAdvice",
@@ -90,4 +93,5 @@ THEME = ThemeConfig(
     specialists=SPECIALISTS,
     scheduling=SCHEDULING,
     guardrails=GUARDRAILS,
+    thrash=THRASH,
 )

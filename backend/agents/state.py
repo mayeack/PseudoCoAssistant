@@ -88,6 +88,15 @@ class PseudoCoAssistantState(TypedDict, total=False):
     specialist_outputs: List[Dict[str, Any]]
     agent_trace: List[Dict[str, Any]]
 
+    # ---- Synthetic MCP tool-thrash (backend/services/mcp_thrash.py) ----
+    # One record per redundant tool call the "MCP Tool Thrash" Demo Control ran
+    # this turn (hidden from the user; rebuilt as tool spans on the Agent
+    # Observability trace by backend/agent_observability.py). Produced entirely
+    # by the shared chain (mcp_thrash launch/join nodes), not by a blueprint
+    # core, so it is NOT part of CORE_STATE_CONTRACT. Empty / unset on an
+    # ordinary turn.
+    tool_thrash_trace: List[Dict[str, Any]]
+
     # ---- LLM messages + raw model output (synthesizer; tokens summed) ----
     messages: List[Dict[str, Any]]
     recommendation: Dict[str, Any]

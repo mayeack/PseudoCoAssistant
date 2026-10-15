@@ -119,6 +119,7 @@ class _FakeLogger:
     def add_agent_span(self, **k): self._rec("add_agent_span", k)
     def add_llm_span(self, **k): self._rec("add_llm_span", k)
     def add_control_span(self, **k): self._rec("add_control_span", k)
+    def add_tool_span(self, **k): self._rec("add_tool_span", k)
     def conclude(self, **k): self._rec("conclude", k)
 
     def flush(self, on_error=None):
@@ -383,6 +384,60 @@ check("an errored evaluation is a status-500 observe span carrying the error",
 fake = _FakeLogger()
 ao._build_turn(fake, _turn())
 check("additive: a turn without verdicts emits no control span", "add_control_span" not in _names(fake.calls))
+
+# MCP tool-thrash records (tool_thrash on the governance event) become an agent
+# FAILING TO CONVERGE: a mcp_tool_broker agent span that ends ABANDONED (status
+# 500), wrapping an alternating reasoning-LLM / tool loop — the floundering
+# narrative Signals mines as a tool-loop failure.
+_THRASH = [
+    {"name": "patient_record.lookup", "call_id": "mcp-thrash-0", "arguments": "query=x, iteration=0",
+     "output": "Ambiguous: 7 candidates", "status": "ok", "duration_ms": 140.0, "step": 0,
+     "iteration": 0, "converged": False, "reasoning": "I need the record. Calling lookup."},
+    {"name": "patient_record.refine", "call_id": "mcp-thrash-1", "arguments": "query=x, iteration=0",
+     "output": "Narrowed to 4, conflicts", "status": "ok", "duration_ms": 140.0, "step": 1,
+     "iteration": 0, "converged": False, "reasoning": "Ambiguous — refining again."},
+    {"name": "patient_record.cross_check", "call_id": "mcp-thrash-2", "arguments": "query=x, iteration=1",
+     "output": "record of truth disagrees", "status": "error", "duration_ms": 140.0, "step": 2,
+     "iteration": 1, "converged": False, "reasoning": "Still conflicting — cross-checking."},
+]
+fake = _FakeLogger()
+ao._build_turn(fake, dict(_turn(agent_trace=None), tool_thrash=_THRASH))
+names = _names(fake.calls)
+_broker = [c[1] for c in fake.calls if c[0] == "add_agent_span"]
+_tools = [c[1] for c in fake.calls if c[0] == "add_tool_span"]
+_reason = [c[1] for c in fake.calls if c[0] == "add_llm_span" and c[1].get("name") == "mcp_reasoning"]
+check("tool_thrash -> one mcp_tool_broker agent span wrapping one tool span per record",
+      len(_broker) == 1 and _broker[0].get("name") == "mcp_tool_broker" and len(_tools) == 3)
+check("the broker ends ABANDONED: status 500 and a give-up output",
+      _broker[0].get("status_code") == 500
+      and "abandon" in str(_broker[0].get("output", "")).lower()
+      and _broker[0].get("metadata", {}).get("mcp_thrash_abandoned") is True)
+check("one reasoning LLM span per call plus a closing give-up span (the floundering Signals reads)",
+      len(_reason) == 4 and _reason[-1].get("output") == _broker[0].get("output")
+      and all(r.get("model") == "m" for r in _reason))
+check("tool spans carry the tool name, step_number and the call id, in order",
+      [c.get("name") for c in _tools] == ["patient_record.lookup", "patient_record.refine", "patient_record.cross_check"]
+      and [c.get("step_number") for c in _tools] == [0, 1, 2]
+      and [c.get("tool_call_id") for c in _tools] == ["mcp-thrash-0", "mcp-thrash-1", "mcp-thrash-2"])
+check("an errored tool call is a status-500 span; a successful one is 200",
+      [c.get("status_code") for c in _tools] == [200, 200, 500])
+_seq = [(n, k.get("name")) for n, k in fake.calls]
+_bi = _seq.index(("add_agent_span", "mcp_tool_broker"))
+_ri = next(i for i, (n, nm) in enumerate(_seq) if n == "add_llm_span" and nm == "mcp_reasoning")
+_ti = next(i for i, (n, _nm) in enumerate(_seq) if n == "add_tool_span")
+check("the loop interleaves reasoning then tool, back-dated, nested under the broker",
+      _bi < _ri < _ti
+      and [c.get("created_at") for c in _tools]
+      == [_t0 + timedelta(milliseconds=140), _t0 + timedelta(milliseconds=420), _t0 + timedelta(milliseconds=700)])
+check("the broker agent span is concluded (back to the workflow): conclude balanced at 3 (broker+workflow+trace)",
+      names.count("conclude") == 3 and names[-2:] == ["conclude", "conclude"])
+check("every tool span carries the governance metadata and marks non-convergence",
+      all(c.get("metadata", {}).get("pii_detected") is True for c in _tools)
+      and all(c.get("metadata", {}).get("mcp_thrash_converged") is False for c in _tools))
+
+fake = _FakeLogger()
+ao._build_turn(fake, _turn())
+check("additive: a turn without tool_thrash emits no tool span", "add_tool_span" not in _names(fake.calls))
 
 fake = _FakeLogger()
 fake.fail_start = True

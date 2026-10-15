@@ -273,6 +273,12 @@ def _scenario(kind: str):
             fail_agents = ("*",)
         elif kind == "multi_agent":
             kwargs["multi_agent_mode"] = True
+        elif kind == "mcp_thrash":
+            # The "MCP Tool Thrash" Demo Control is server-side (not a ChatRequest
+            # flag): enable it on the live settings so every blueprint's shared
+            # chain runs the synthetic thrash. Restored in finally.
+            saved["thrash"] = settings.mcp_tool_thrash_enabled
+            settings.mcp_tool_thrash_enabled = True
         elif kind.startswith("scheduling_"):
             # Appointment scheduling (docs/scheduling.md): an in-memory store so no
             # scenario writes ./medadvice.db; the LLM stub answers the scheduling
@@ -296,6 +302,8 @@ def _scenario(kind: str):
                 kwargs.update(user_message="what's on my schedule?")
         yield kwargs, fail_agents
     finally:
+        if "thrash" in saved:
+            settings.mcp_tool_thrash_enabled = saved["thrash"]
         if "store" in saved:
             from backend.agents.nodes import scheduling as sched_mod
             sched_mod.store = saved["store"]
@@ -353,13 +361,17 @@ def _run(bp_key: str, theme: str, kind: str) -> Dict[str, Any]:
         "workflow_name": last.get("workflow_name"),
         "blueprint": last.get("blueprint"),
         "agents": list(dict.fromkeys(fake.calls)),
+        # The synthetic MCP tool-thrash call sequence (tool names) the shared
+        # chain ran this turn, so parity can assert both blueprints run it
+        # identically. Empty when the toggle is off.
+        "tool_thrash": [r.get("name") for r in (last.get("tool_thrash") or [])],
     }
 
 
 SCENARIOS = ("benign", "policy_block", "ai_defense_prompt_block", "ai_defense_response_block",
              "nemo_input_block", "nemo_output_block", "agent_control_deny", "agent_control_prompt_deny",
              "forced_injection",
-             "generation_error", "multi_agent",
+             "generation_error", "multi_agent", "mcp_thrash",
              "scheduling_offer", "scheduling_book", "scheduling_list")
 
 
@@ -453,6 +465,25 @@ def test_dynamic_parity() -> None:
         check("generation error degrades to the safe reply", r["medadvice/generation_error"]["result"]["type"] == "safety_warning")
         check("benign turn passes the whole POST chain",
               r["medadvice/benign"]["guardrail_stages"][-1] == "governance")
+        # MCP Tool Thrash: the shared chain's launch/join nodes run on every turn,
+        # the thrash fires only while the toggle is on, and it is identical across
+        # blueprints (shared chain). The per-theme profile shapes the tool names.
+        check("mcp thrash: the launch/join nodes are in the guardrail frames (both blueprints get them)",
+              {"mcp_thrash_launch", "mcp_thrash_join"} <= set(r["medadvice/benign"]["guardrail_stages"]))
+        check("mcp thrash: a thrash turn runs the non-converging lookup/refine loop on the theme's MCP server",
+              r["medadvice/mcp_thrash"]["tool_thrash"][:4]
+              == ["patient_record.lookup", "patient_record.refine", "patient_record.lookup", "patient_record.refine"]
+              and len(r["medadvice/mcp_thrash"]["tool_thrash"]) == 10,
+              str(r["medadvice/mcp_thrash"]["tool_thrash"]))
+        check("mcp thrash: it is verticalized per theme (telecom gets its own entity)",
+              r["telecomchatbot/mcp_thrash"]["tool_thrash"][0] == "subscriber_account.lookup")
+        check("mcp thrash: the toggle gates it — a benign turn runs no tool thrash",
+              r["medadvice/benign"]["tool_thrash"] == [])
+        for key in keys:
+            check(f"[{key}] mcp thrash: both blueprints run the identical thrash sequence",
+                  outcomes[key]["medadvice/mcp_thrash"]["tool_thrash"]
+                  == r["medadvice/mcp_thrash"]["tool_thrash"],
+                  str(outcomes[key]["medadvice/mcp_thrash"]["tool_thrash"]))
     finally:
         settings.active_blueprint = orig_active
         graph.clear_compiled()

@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
+from backend.services.mcp_thrash import DEFAULT_THRASH, McpThrashProfile
 from backend.services.recommendation_engine import RecommendationEngine
 from backend.services.scheduling import DEFAULT_PROFILE, SchedulingProfile
 
@@ -99,6 +100,11 @@ class ThemeConfig:
     # Defaulted for the same reason as ``scheduling``; every shipped theme sets
     # its own.
     guardrails: GuardrailCopy = field(default=DEFAULT_GUARDRAIL_COPY)
+    # The theme's synthetic MCP tool-thrash profile (backend/services/mcp_thrash.py):
+    # the server name, entity and non-converging call script the "MCP Tool Thrash"
+    # Demo Control runs on every turn. Defaulted so a ThemeConfig built without one
+    # keeps working; never branch on the theme key in the thrash nodes.
+    thrash: McpThrashProfile = field(default=DEFAULT_THRASH)
 
     @property
     def agent_name(self) -> str:

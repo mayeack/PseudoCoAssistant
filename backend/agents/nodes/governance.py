@@ -137,6 +137,10 @@ def governance_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # Splunk Agent Observability SDK path can rebuild the multi-agent trace;
             # see backend/agent_observability.py and log_schemas.create_governance_log.
             agent_trace=state.get("agent_trace"),
+            # Synthetic MCP tool-thrash records (backend/services/mcp_thrash.py);
+            # the Agent Observability path rebuilds them as tool spans on the
+            # turn's trace. None (dropped) when the toggle is off.
+            tool_thrash=state.get("tool_thrash_trace"),
             trace_id=trace_id,
             client_address=client_address,
             enduser_id=enduser_id,

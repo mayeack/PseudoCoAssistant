@@ -362,6 +362,28 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- MCP Tool Thrash (server-side toggle: every turn runs a scripted, non-converging
+                         loop of redundant calls against a synthetic in-process MCP server, hidden from
+                         the user — it surfaces only as tool spans on the Agent Observability trace, where
+                         Signals detects the thrash) -->
+                    <div class="bg-gray-50 border border-gray-200 rounded-lg p-3" data-control="mcp_tool_thrash">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center space-x-3">
+                                <label class="relative inline-flex items-center cursor-pointer">
+                                    <input type="checkbox" id="mcpThrashToggle" class="sr-only peer" onchange="toggleMcpThrash()">
+                                    <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-green-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600"></div>
+                                </label>
+                                <div>
+                                    <span class="text-sm font-semibold text-gray-700">MCP Tool Thrash</span>
+                                    <p id="mcpThrashDesc" class="text-xs text-gray-500">Every turn runs a scripted loop of redundant lookup→refine tool calls on a synthetic MCP server that never converges — hidden from the chat, visible only as tool spans in Splunk Agent Observability for Signals to detect</p>
+                                </div>
+                            </div>
+                            <div id="mcpThrashStatus" class="px-3 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-600">
+                                Off
+                            </div>
+                        </div>
+                    </div>
                 </section>
 
                 <section data-group="synthetic" class="space-y-3">
@@ -717,6 +739,6 @@
         </div>
     </div>
 
-    <script src="/static/js/chat.js?v=31"></script>
+    <script src="/static/js/chat.js?v=32"></script>
 </body>
 </html>

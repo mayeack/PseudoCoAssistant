@@ -820,6 +820,7 @@ def _build_turn(lg, log_data: Dict[str, Any]) -> None:
                         num_output_tokens=log_data.get("usage_output_tokens"),
                         total_tokens=log_data.get("usage_total_tokens"),
                         duration_ns=turn_ns, created_at=turn_start, metadata=meta)
+    _add_tool_spans(lg, log_data.get("tool_thrash"), inp, meta, turn_start, model)
     _add_control_spans(lg, log_data.get("agent_control_verdicts"), inp, out, meta, turn_start, turn_ns)
     lg.conclude(output=out, duration_ns=turn_ns)      # pop the workflow span
     lg.conclude(output=out, duration_ns=turn_ns)      # pop the trace envelope
@@ -843,6 +844,114 @@ def _add_agent_spans(lg, agent_trace, inp: str, model: str, meta: Dict[str, Any]
         lg.conclude(output=agent_out, duration_ns=dur_ns)      # pop the agent span
         if cursor is not None and dur_ns:
             cursor = cursor + timedelta(microseconds=dur_ns / 1000)
+
+
+_MCP_BROKER_NAME = "mcp_tool_broker"
+
+
+_DEFAULT_STEP_NS = 140_000_000   # fallback per-span duration when a record has none
+
+
+def _add_tool_spans(lg, records: Any, inp: str, meta: Dict[str, Any], turn_start, model: str) -> None:
+    """Rebuild the synthetic MCP tool-thrash (backend/services/mcp_thrash.py) as
+    an agent **failing to converge** on the Agent Observability trace, so Splunk
+    Agent Observability **Signals** reads it as a recurring tool-loop failure
+    (not a silent row of tool calls). The thrash runs hidden during the turn (the
+    chat answer is unchanged); the records ride in on the governance event
+    (``tool_thrash``), the ``agent_control_verdicts`` precedent.
+
+    The shape, under a dedicated ``mcp_tool_broker`` agent span:
+
+        agent mcp_tool_broker            (status 500 — ABANDONED, output = give-up)
+          llm  mcp_reasoning  step 0     (the scripted thought that calls the tool)
+          tool <entity>.lookup step 0    (ambiguous result)
+          llm  mcp_reasoning  step 1     ("still conflicting — re-looking up …")
+          tool <entity>.refine step 1
+          ...
+          llm  mcp_reasoning  (final)    (the give-up: "going in circles … abandoning")
+
+    The reasoning spans carry the floundering narrative Signals clusters on; the
+    broker ends status 500 so the loop reads as a failure, not a success. Both
+    ``add_llm_span`` and ``add_tool_span`` are leaves (no ``conclude``), so they
+    stay siblings under the broker, which is concluded to pop back to the
+    workflow. A logger / SDK without ``add_tool_span``, or a turn with no thrash,
+    adds nothing."""
+    if not records or not hasattr(lg, "add_tool_span"):
+        return
+    clean = [r for r in records if isinstance(r, dict)]
+    if not clean:
+        return
+    entity = str(clean[0].get("name") or "record").split(".")[0]
+    abandon = _abandonment(entity, len(clean))
+    # Two spans (reasoning + tool) per record, plus one closing give-up span.
+    step_ns = [(_ms_to_ns(r.get("duration_ms")) or _DEFAULT_STEP_NS) for r in clean]
+    total_ns = sum(step_ns) * 2 + _DEFAULT_STEP_NS
+    broker_meta = dict(meta)
+    broker_meta.update({
+        "mcp_thrash_calls": len(clean),
+        "mcp_thrash_converged": False,
+        "mcp_thrash_abandoned": True,
+    })
+    broker_meta = {k: _coerce(v) for k, v in broker_meta.items() if v is not None}
+    lg.add_agent_span(input=inp, output=abandon, name=_MCP_BROKER_NAME,
+                      agent_type=_agent_type("tool_broker"), metadata=broker_meta,
+                      created_at=turn_start, duration_ns=total_ns, status_code=500)
+
+    cursor = turn_start
+    prior = inp
+    for rec, dur_ns in zip(clean, step_ns):
+        span_meta = {k: _coerce(v) for k, v in {
+            **meta,
+            "mcp_thrash_step": rec.get("step"),
+            "mcp_thrash_iteration": rec.get("iteration"),
+            "mcp_thrash_converged": False,
+            "mcp_thrash_status": str(rec.get("status") or ""),
+        }.items() if v is not None}
+        reasoning = str(rec.get("reasoning") or "")
+        if reasoning:
+            lg.add_llm_span(input=prior, output=reasoning, model=model, name="mcp_reasoning",
+                            num_input_tokens=_approx_tokens(prior), num_output_tokens=_approx_tokens(reasoning),
+                            created_at=cursor, duration_ns=dur_ns, metadata=span_meta)
+            cursor = _advance(cursor, dur_ns)
+        lg.add_tool_span(
+            input=str(rec.get("arguments") or ""),
+            output=str(rec.get("output") or ""),
+            name=str(rec.get("name") or "mcp.tool"),
+            tool_call_id=rec.get("call_id"),
+            step_number=rec.get("step"),
+            status_code=500 if rec.get("status") == "error" else 200,
+            created_at=cursor, duration_ns=dur_ns, metadata=span_meta,
+        )
+        cursor = _advance(cursor, dur_ns)
+        prior = str(rec.get("output") or "")
+    # The closing give-up: the agent abandons the lookup without a result.
+    give_up_meta = {k: _coerce(v) for k, v in {**meta, "mcp_thrash_abandoned": True}.items() if v is not None}
+    lg.add_llm_span(input=prior, output=abandon, model=model, name="mcp_reasoning",
+                    num_input_tokens=_approx_tokens(prior), num_output_tokens=_approx_tokens(abandon),
+                    created_at=cursor, duration_ns=_DEFAULT_STEP_NS, metadata=give_up_meta)
+    lg.conclude(output=abandon, duration_ns=total_ns)      # pop the broker agent span
+
+
+def _advance(cursor, dur_ns):
+    if cursor is not None and dur_ns:
+        return cursor + timedelta(microseconds=dur_ns / 1000)
+    return cursor
+
+
+def _approx_tokens(text: Any) -> int:
+    return max(1, len(str(text or "")) // 4)
+
+
+def _abandonment(entity: str, n: int) -> str:
+    """The agent's give-up line (output of the closing reasoning span and the
+    abandoned broker). Sourced from mcp_thrash so the scripted voice lives in one
+    place; a local fallback keeps the emitter defensive."""
+    try:
+        from backend.services.mcp_thrash import abandonment_text
+        return abandonment_text(entity, n)
+    except Exception:  # noqa: BLE001 - emitter must never raise into the worker
+        return (f"Called the {entity} tools {n} times without converging; "
+                f"going in circles and abandoning the lookup without a result.")
 
 
 def _add_control_spans(lg, records: Any, inp: str, out: str, meta: Dict[str, Any],

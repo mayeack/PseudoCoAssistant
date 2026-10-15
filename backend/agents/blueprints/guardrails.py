@@ -26,6 +26,7 @@ from backend.agents.nodes.compliance import compliance_node
 from backend.agents.nodes.defense import prompt_defense_node, response_defense_node
 from backend.agents.nodes.governance import governance_node
 from backend.agents.nodes.injection import injection_node
+from backend.agents.nodes.mcp_thrash import mcp_thrash_join_node, mcp_thrash_launch_node
 from backend.agents.nodes.nemo_rails import nemo_input_rails_node, nemo_output_rails_node
 from backend.agents.nodes.policy import policy_block_node
 from backend.agents.nodes.safety import safety_node
@@ -38,8 +39,12 @@ from backend.agents.state import PseudoCoAssistantState
 # Defense keeps the first and last word), NeMo's input rails last.
 # scheduling_intake (docs/scheduling.md) runs after the screens: it reads the
 # already-vetted message, never calls a model, never terminates.
+# mcp_thrash_launch (backend/agents/nodes/mcp_thrash.py) is LAST so it only fires
+# on a turn that cleared every prompt screen; it spawns a daemon thread that runs
+# the synthetic MCP tool-thrash concurrently with generation and returns at once.
 PRE_NODES: List[str] = [
     "policy", "prompt_defense", "agent_control_prompt", "nemo_input_rails", "scheduling_intake",
+    "mcp_thrash_launch",
 ]
 # Screen / shape the ANSWER. Cisco AI Defense (response_defense) stays the last
 # word on output; governance logs the outcome. scheduling sits before
@@ -47,7 +52,7 @@ PRE_NODES: List[str] = [
 # screened by agent_control / NeMo / AI Defense.
 POST_NODES: List[str] = [
     "safety", "injection", "scheduling", "compliance", "agent_control",
-    "nemo_output_rails", "response_defense", "governance",
+    "nemo_output_rails", "response_defense", "mcp_thrash_join", "governance",
 ]
 GUARDRAIL_NODES: List[str] = PRE_NODES + POST_NODES
 
@@ -57,6 +62,7 @@ _NODE_FNS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "agent_control_prompt": agent_control_prompt_node,
     "nemo_input_rails": nemo_input_rails_node,
     "scheduling_intake": scheduling_intake_node,
+    "mcp_thrash_launch": mcp_thrash_launch_node,
     "safety": safety_node,
     "injection": injection_node,
     "scheduling": scheduling_node,
@@ -64,6 +70,7 @@ _NODE_FNS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "agent_control": agent_control_node,
     "nemo_output_rails": nemo_output_rails_node,
     "response_defense": response_defense_node,
+    "mcp_thrash_join": mcp_thrash_join_node,
     "governance": governance_node,
 }
 

@@ -216,6 +216,10 @@ class DemoControlsSettings(BaseModel):
     visible: Dict[str, StrictBool] = Field(default_factory=dict)
 
 
+class McpThrashToggle(BaseModel):
+    enabled: bool
+
+
 @router.get("/settings/demo-controls")
 async def get_demo_controls():
     """Every Demo Controls card (key, label, group, kind, visible) in drawer order
@@ -223,6 +227,19 @@ async def get_demo_controls():
     page reads it to hide cards (chat.js applyDemoControlVisibility); the Settings
     page renders its Demo Controls panel from it."""
     return settings_store.get_demo_controls()
+
+
+@router.get("/settings/mcp-thrash")
+async def get_mcp_thrash():
+    """The "MCP Tool Thrash" server-side toggle state ({enabled}). The chat page's
+    drawer card polls it; the state lives on the server (settings_store), applied
+    to every chat turn by the shared mcp_thrash nodes."""
+    return settings_store.get_mcp_tool_thrash()
+
+
+@router.put("/settings/mcp-thrash")
+async def set_mcp_thrash(body: McpThrashToggle):
+    return settings_store.set_mcp_tool_thrash(body.enabled)
 
 
 @router.put("/settings/demo-controls")
