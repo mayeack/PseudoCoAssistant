@@ -46,6 +46,9 @@ _DEFAULTS: Dict[str, Any] = {
     # The "NemoClaw Guardrails" drawer toggle (server-side: tool calls are not
     # chat requests). Persisted so the demo posture survives a restart.
     "nemoclaw_guardrails": {"enabled": False},
+    # The "MCP Tool Thrash" drawer toggle (server-side: every turn runs the
+    # synthetic MCP tool-thrash, hidden from the user). Persisted like NemoClaw.
+    "mcp_tool_thrash": {"enabled": False},
     # Which Demo Controls drawer cards the chat page shows: {key: bool} holding
     # OVERRIDES only (an unlisted key is visible). Edited on the Settings page;
     # the registry of keys is DEMO_CONTROLS below. Never mutate this dict —
@@ -492,6 +495,36 @@ def apply_nemoclaw_guardrails_from_store() -> None:
 
 
 # ---------------------------------------------------------------------------
+# MCP Tool Thrash toggle (server-side: every turn runs the synthetic MCP
+# tool-thrash, hidden from the user — backend/services/mcp_thrash.py)
+# ---------------------------------------------------------------------------
+def get_mcp_tool_thrash() -> Dict[str, Any]:
+    from backend.config import settings
+
+    # The live setting is the truth (startup applies the stored value over .env).
+    return {"enabled": bool(settings.mcp_tool_thrash_enabled)}
+
+
+def set_mcp_tool_thrash(enabled: bool) -> Dict[str, Any]:
+    from backend.config import settings
+
+    data = load()
+    data["mcp_tool_thrash"] = {"enabled": bool(enabled)}
+    _persist(data)
+    settings.mcp_tool_thrash_enabled = bool(enabled)
+    return get_mcp_tool_thrash()
+
+
+def apply_mcp_tool_thrash_from_store() -> None:
+    """Startup hook: the persisted toggle wins over the .env default."""
+    from backend.config import settings
+
+    cfg = load().get("mcp_tool_thrash")
+    if isinstance(cfg, dict) and "enabled" in cfg:
+        settings.mcp_tool_thrash_enabled = bool(cfg["enabled"])
+
+
+# ---------------------------------------------------------------------------
 # Demo Controls visibility (which cards the chat page's Demo Controls drawer
 # shows; edited on the Settings page, persisted so the posture survives a restart)
 # ---------------------------------------------------------------------------
@@ -525,6 +558,7 @@ DEMO_CONTROLS: List[Dict[str, str]] = [
     _control("nemoclaw_guardrails", "NemoClaw Guardrails", "guardrails", "server"),
     _control("internal_policy", "Internal Policy Engine", "guardrails", "request"),
     _control("multi_agent", "Multi-Agent Mode", "pipeline", "request"),
+    _control("mcp_tool_thrash", "MCP Tool Thrash", "pipeline", "server"),
     _control("synthetic_pii", "Include Synthetic PII/PHI in Responses", "synthetic", "request"),
     _control("synthetic_toxic", "Include Toxic Content in Responses", "synthetic", "request"),
     _control("synthetic_hallucination", "Include Hallucinated Content in Responses", "synthetic", "request"),

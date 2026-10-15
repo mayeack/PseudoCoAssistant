@@ -128,7 +128,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "PseudoCo Assistant v4"
-    app_version: str = "4.14.0"
+    app_version: str = "4.15.0"
     environment: str = "development"  # "development" or "production"
     debug: bool = True
 
@@ -305,6 +305,13 @@ class Settings(BaseSettings):
     # by the drawer toggle (settings_store), so .env only seeds the default.
     nemoclaw_guardrails_enabled: bool = False
     nemoclaw_policy_path: str = "guardrails/nemoclaw/policy.yaml"
+    # "MCP Tool Thrash" Demo Control (server-side, persisted by settings_store):
+    # when ON, every chat turn runs a scripted, non-converging loop of redundant
+    # calls against a synthetic in-process MCP server (backend/services/mcp_thrash.py),
+    # hidden from the user. It surfaces only as tool spans on the turn's Agent
+    # Observability trace, where Signals can detect the thrash. .env only seeds
+    # the default; the drawer toggle is the source of truth.
+    mcp_tool_thrash_enabled: bool = False
     # Also run a NeMo Guardrails input rail over sensitive/suspicious tool calls
     # (NemoClaw pairs OpenShell policy with NeMo rails). Needs the NeMo master
     # switch on; otherwise silently skipped.

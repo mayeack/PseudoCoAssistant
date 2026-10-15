@@ -551,6 +551,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // Same for the spray campaign, so a refresh mid-run shows it running
         checkSprayStatus();
         startNemoClawPolling();
+        startMcpThrashPolling();
     }
     
     // Add event listener to new session button as fallback
@@ -1622,6 +1623,57 @@ function startNemoClawPolling() {
     if (nemoClawPollInterval) clearInterval(nemoClawPollInterval);
     // Poll so a runtime denial (RUNTIME) or a toggle flipped elsewhere reflects here.
     nemoClawPollInterval = setInterval(checkNemoClawStatus, 10000);
+}
+
+// ---- MCP Tool Thrash: a SERVER-SIDE toggle (every turn runs the synthetic MCP
+// tool-thrash, hidden from the user; it surfaces only as tool spans in Agent
+// Observability). PUT /api/settings/mcp-thrash persists it. The pill is the
+// uniform On/Off; what it does while On rides in the pill's tooltip (CLAUDE.md).
+let mcpThrashPollInterval = null;
+
+async function toggleMcpThrash() {
+    const toggle = document.getElementById('mcpThrashToggle');
+    const on = toggle.checked;
+    try {
+        const resp = await fetch('/api/settings/mcp-thrash', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: on })
+        });
+        if (!resp.ok) throw new Error('mcp thrash toggle failed');
+        updateMcpThrashStatus(await resp.json());
+        console.log('MCP Tool Thrash', on ? 'enabled' : 'disabled');
+    } catch (e) {
+        console.error('Error toggling MCP Tool Thrash:', e);
+        toggle.checked = !on;
+        alert('Failed to toggle MCP Tool Thrash. Please try again.');
+    }
+}
+
+function updateMcpThrashStatus(data) {
+    const statusElement = document.getElementById('mcpThrashStatus');
+    const toggle = document.getElementById('mcpThrashToggle');
+    if (!statusElement || !data) return;
+    if (toggle && document.activeElement !== toggle) toggle.checked = !!data.enabled;
+    const title = data.enabled
+        ? 'Every turn runs a redundant MCP lookup→refine loop that never converges (Agent Observability Signals demo)'
+        : '';
+    setPill(statusElement, !!data.enabled, null, title);
+}
+
+async function checkMcpThrashStatus() {
+    try {
+        const resp = await fetch('/api/settings/mcp-thrash');
+        if (!resp.ok) return;
+        updateMcpThrashStatus(await resp.json());
+    } catch (e) { /* best-effort: never break the chat */ }
+}
+
+function startMcpThrashPolling() {
+    checkMcpThrashStatus();
+    if (mcpThrashPollInterval) clearInterval(mcpThrashPollInterval);
+    // Poll so a toggle flipped elsewhere (Settings, another tab) reflects here.
+    mcpThrashPollInterval = setInterval(checkMcpThrashStatus, 10000);
 }
 
 function toggleInternalPolicy() {

@@ -820,6 +820,7 @@ def _build_turn(lg, log_data: Dict[str, Any]) -> None:
                         num_output_tokens=log_data.get("usage_output_tokens"),
                         total_tokens=log_data.get("usage_total_tokens"),
                         duration_ns=turn_ns, created_at=turn_start, metadata=meta)
+    _add_tool_spans(lg, log_data.get("tool_thrash"), inp, meta, turn_start)
     _add_control_spans(lg, log_data.get("agent_control_verdicts"), inp, out, meta, turn_start, turn_ns)
     lg.conclude(output=out, duration_ns=turn_ns)      # pop the workflow span
     lg.conclude(output=out, duration_ns=turn_ns)      # pop the trace envelope
@@ -843,6 +844,71 @@ def _add_agent_spans(lg, agent_trace, inp: str, model: str, meta: Dict[str, Any]
         lg.conclude(output=agent_out, duration_ns=dur_ns)      # pop the agent span
         if cursor is not None and dur_ns:
             cursor = cursor + timedelta(microseconds=dur_ns / 1000)
+
+
+_MCP_BROKER_NAME = "mcp_tool_broker"
+
+
+def _add_tool_spans(lg, records: Any, inp: str, meta: Dict[str, Any], turn_start) -> None:
+    """Rebuild the synthetic MCP tool-thrash (backend/services/mcp_thrash.py) as
+    tool spans under a dedicated ``mcp_tool_broker`` agent span, so the Agent
+    Observability trace shows one agent looping on tool calls that never converge
+    — the recurring pattern Splunk Agent Observability **Signals** mines from the
+    stream. The thrash runs hidden during the turn; the records ride in on the
+    governance event (``tool_thrash``), the ``agent_control_verdicts`` precedent.
+
+    A tool span is a leaf (``add_tool_span`` does not push a parent), so the
+    calls stay siblings under the broker agent span, which is concluded to pop
+    back to the workflow. Durations are back-dated sequentially from turn start
+    (the thrash overlaps generation) so the oscillation interleaves on the
+    waterfall. A logger / SDK without ``add_tool_span``, or a turn with no
+    thrash, adds nothing."""
+    if not records or not hasattr(lg, "add_tool_span"):
+        return
+    clean = [r for r in records if isinstance(r, dict)]
+    if not clean:
+        return
+    total_ns = sum((_ms_to_ns(r.get("duration_ms")) or 0) for r in clean) or None
+    summary = _broker_summary(clean)
+    broker_meta = dict(meta)
+    broker_meta.update({
+        "mcp_thrash_calls": len(clean),
+        "mcp_thrash_converged": False,
+        "mcp_thrash_server": str((meta.get("mcp_thrash_server") or "")) or None,
+    })
+    broker_meta = {k: v for k, v in broker_meta.items() if v is not None}
+    lg.add_agent_span(input=inp, output=summary, name=_MCP_BROKER_NAME,
+                      agent_type=_agent_type("tool_broker"), metadata=broker_meta,
+                      created_at=turn_start, duration_ns=total_ns)
+    cursor = turn_start
+    for rec in clean:
+        dur_ns = _ms_to_ns(rec.get("duration_ms"))
+        span_meta = dict(meta)
+        span_meta.update({
+            "mcp_thrash_step": rec.get("step"),
+            "mcp_thrash_iteration": rec.get("iteration"),
+            "mcp_thrash_converged": bool(rec.get("converged")),
+            "mcp_thrash_status": str(rec.get("status") or ""),
+        })
+        span_meta = {k: _coerce(v) for k, v in span_meta.items() if v is not None}
+        lg.add_tool_span(
+            input=str(rec.get("arguments") or ""),
+            output=str(rec.get("output") or ""),
+            name=str(rec.get("name") or "mcp.tool"),
+            tool_call_id=rec.get("call_id"),
+            step_number=rec.get("step"),
+            status_code=500 if rec.get("status") == "error" else 200,
+            created_at=cursor, duration_ns=dur_ns, metadata=span_meta,
+        )
+        if cursor is not None and dur_ns:
+            cursor = cursor + timedelta(microseconds=dur_ns / 1000)
+    lg.conclude(output=summary, duration_ns=total_ns)      # pop the broker agent span
+
+
+def _broker_summary(records: List[Dict[str, Any]]) -> str:
+    tools = list(dict.fromkeys(str(r.get("name") or "") for r in records if r.get("name")))
+    return (f"{len(records)} MCP tool calls across {len(tools)} tool(s) "
+            f"({', '.join(tools)}); no convergence")
 
 
 def _add_control_spans(lg, records: Any, inp: str, out: str, meta: Dict[str, Any],

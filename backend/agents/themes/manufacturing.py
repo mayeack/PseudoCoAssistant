@@ -14,6 +14,7 @@ from backend.agents.themes.base import (
     prompt_for,
 )
 from backend.services.scheduling import SchedulingProfile
+from backend.services.mcp_thrash import build_profile
 
 SPECIALISTS = (
     SpecialistSpec(
@@ -99,6 +100,8 @@ GUARDRAILS = GuardrailCopy(
     ),
 )
 
+THRASH = build_profile("mes-mcp", "work_order")
+
 THEME = ThemeConfig(
     key="manufacturing",
     label="Manufacturing",
@@ -107,4 +110,5 @@ THEME = ThemeConfig(
     specialists=SPECIALISTS,
     scheduling=SCHEDULING,
     guardrails=GUARDRAILS,
+    thrash=THRASH,
 )

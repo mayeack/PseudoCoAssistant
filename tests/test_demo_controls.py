@@ -109,8 +109,8 @@ def test_registry_matches_markup() -> None:
     hidden = [k for _, _, k, _, attrs in cards if re.search(r"\bhidden\b", attrs)]
     check("no card is hard-coded hidden (hide it from the Settings panel instead)", not hidden, str(hidden))
     kinds = {k: sum(1 for c in reg if c["kind"] == k) for k in settings_store.DEMO_CONTROL_KINDS}
-    check("kinds: 9 request / 4 server / 1 display",
-          kinds == {"request": 9, "server": 4, "display": 1}, str(kinds))
+    check("kinds: 9 request / 5 server / 1 display",
+          kinds == {"request": 9, "server": 5, "display": 1}, str(kinds))
     check("every registry record has key/label/group/kind",
           all(set(c) == {"key", "label", "group", "kind"} for c in reg))
 

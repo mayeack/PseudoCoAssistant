@@ -142,6 +142,14 @@ def create_governance_log(
         # output_text (truncated), status}. Consumed by the Galileo SDK path to
         # rebuild the multi-agent trace; None on non-chat events (then dropped).
         "agent_trace": kwargs.get("agent_trace"),
+        # Synthetic MCP tool-thrash: one record per redundant tool call the
+        # "MCP Tool Thrash" Demo Control ran this turn ({name, call_id,
+        # arguments, output, status, duration_ms, step, iteration, converged}).
+        # The Agent Observability path (backend/agent_observability.py) rebuilds
+        # them as tool spans so Signals can detect the oscillation; None (and
+        # dropped) when the toggle is off. Not a DB column — AO/HEC only, like
+        # agent_trace.
+        "tool_thrash": kwargs.get("tool_thrash"),
         "theme": kwargs.get("theme"),
         "severity": kwargs.get("severity"),
         "tool_name": kwargs.get("tool_name"),

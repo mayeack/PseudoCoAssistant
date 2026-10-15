@@ -119,6 +119,7 @@ class _FakeLogger:
     def add_agent_span(self, **k): self._rec("add_agent_span", k)
     def add_llm_span(self, **k): self._rec("add_llm_span", k)
     def add_control_span(self, **k): self._rec("add_control_span", k)
+    def add_tool_span(self, **k): self._rec("add_tool_span", k)
     def conclude(self, **k): self._rec("conclude", k)
 
     def flush(self, on_error=None):
@@ -383,6 +384,47 @@ check("an errored evaluation is a status-500 observe span carrying the error",
 fake = _FakeLogger()
 ao._build_turn(fake, _turn())
 check("additive: a turn without verdicts emits no control span", "add_control_span" not in _names(fake.calls))
+
+# MCP tool-thrash records (tool_thrash on the governance event) become tool spans
+# under a dedicated mcp_tool_broker agent span — one agent looping on tool calls
+# that never converge, which is what Signals mines from the stream.
+_THRASH = [
+    {"name": "patient_record.lookup", "call_id": "mcp-thrash-0", "arguments": "query=x, iteration=0",
+     "output": "Ambiguous: 7 candidates", "status": "ok", "duration_ms": 140.0, "step": 0,
+     "iteration": 0, "converged": False},
+    {"name": "patient_record.refine", "call_id": "mcp-thrash-1", "arguments": "query=x, iteration=0",
+     "output": "Narrowed to 4, conflicts", "status": "ok", "duration_ms": 140.0, "step": 1,
+     "iteration": 0, "converged": False},
+    {"name": "patient_record.cross_check", "call_id": "mcp-thrash-2", "arguments": "query=x, iteration=1",
+     "output": "record of truth disagrees", "status": "error", "duration_ms": 140.0, "step": 2,
+     "iteration": 1, "converged": False},
+]
+fake = _FakeLogger()
+ao._build_turn(fake, dict(_turn(agent_trace=None), tool_thrash=_THRASH))
+names = _names(fake.calls)
+_broker = [c[1] for c in fake.calls if c[0] == "add_agent_span"]
+_tools = [c[1] for c in fake.calls if c[0] == "add_tool_span"]
+check("tool_thrash -> one mcp_tool_broker agent span wrapping one tool span per record",
+      len(_broker) == 1 and _broker[0].get("name") == "mcp_tool_broker" and len(_tools) == 3)
+check("tool spans carry the tool name, step_number and the call id, in order",
+      [c.get("name") for c in _tools] == ["patient_record.lookup", "patient_record.refine", "patient_record.cross_check"]
+      and [c.get("step_number") for c in _tools] == [0, 1, 2]
+      and [c.get("tool_call_id") for c in _tools] == ["mcp-thrash-0", "mcp-thrash-1", "mcp-thrash-2"])
+check("an errored tool call is a status-500 span; a successful one is 200",
+      [c.get("status_code") for c in _tools] == [200, 200, 500])
+check("tool spans are back-dated sequentially from the turn start and nest under the broker",
+      [c.get("created_at") for c in _tools]
+      == [_t0, _t0 + timedelta(milliseconds=140), _t0 + timedelta(milliseconds=280)]
+      and names.index("add_agent_span") < names.index("add_tool_span"))
+check("the broker agent span is concluded (back to the workflow): conclude balanced at 3 (broker+workflow+trace)",
+      names.count("conclude") == 3 and names[-2:] == ["conclude", "conclude"])
+check("every tool span carries the governance metadata and marks non-convergence",
+      all(c.get("metadata", {}).get("pii_detected") is True for c in _tools)
+      and all(c.get("metadata", {}).get("mcp_thrash_converged") is False for c in _tools))
+
+fake = _FakeLogger()
+ao._build_turn(fake, _turn())
+check("additive: a turn without tool_thrash emits no tool span", "add_tool_span" not in _names(fake.calls))
 
 fake = _FakeLogger()
 fake.fail_start = True
