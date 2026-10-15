@@ -159,8 +159,41 @@ def run_thrash(
             "step": step,
             "iteration": iteration,
             "converged": False,
+            # The agent's (scripted) thought that led to THIS call — the
+            # floundering narrative the Agent Observability trace rebuilds as an
+            # LLM reasoning span, so Signals reads a tool loop that never
+            # converges (not just a row of tool calls). See _reasoning().
+            "reasoning": _reasoning(profile.entity, name, step, len(profile.script)),
         })
     return records
+
+
+def abandonment_text(entity: str, n: int) -> str:
+    """The agent's final (scripted) give-up thought, used as the output of the
+    closing reasoning span and of the abandoned broker span."""
+    return (f"I have called the {entity} tools {n} times — looking up and refining over and over — "
+            f"and the results keep conflicting with each other. I am going in circles and making no "
+            f"progress, so I am abandoning the {entity} lookup without a resolved result.")
+
+
+def _reasoning(entity: str, name: str, step: int, total: int) -> str:
+    """One scripted 'agent thought' before a tool call. Escalates from a normal
+    first lookup to visibly circular, no-progress retries — the wording Signals
+    clusters into a tool-loop / non-convergence failure."""
+    attempt = step // 2 + 1
+    if step == 0:
+        return (f"I need the caller's {entity} before I can answer safely. "
+                f"Calling {name} to retrieve it.")
+    if name.endswith(".lookup"):
+        return (f"The refinement conflicted with the earlier candidate {entity}s (attempt {attempt}). "
+                f"I cannot reconcile them, so I am re-running the lookup from scratch — again.")
+    if name.endswith(".refine"):
+        return (f"{name} returned 7 ambiguous candidate {entity}s at confidence 0.31 (attempt {attempt}) — "
+                f"too many to trust. Refining the query to narrow the set, like the last few attempts.")
+    if name.endswith(".cross_check"):
+        return (f"I still cannot settle on one {entity} after {attempt} rounds of lookup and refine. "
+                f"Cross-checking the leading candidate against the system of record before I give up.")
+    return f"Retrying {name} on the {entity} (attempt {attempt}); still no convergence."
 
 
 def _fmt_args(arguments: Dict[str, Any]) -> str:

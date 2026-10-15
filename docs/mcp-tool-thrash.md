@@ -18,8 +18,20 @@ It ships as a server-side **Demo Controls** toggle, **MCP Tool Thrash**, in the
 | Chat answer | Unchanged — the real agent still answers normally. |
 | Pipeline stage chips | Unchanged — the two thrash nodes have no label, so the UI ignores their SSE frames. |
 | Governance Logs page / SQLite | Unchanged — the thrash is **not** a DB column (AO-only, like `agent_trace`). |
-| Agent Observability trace | A `mcp_tool_broker` agent span wrapping ~10 tool spans — `lookup`/`refine`/`cross_check` — each reporting "ambiguous, refine" / "conflicts, re-run", none converging. |
-| Agent Observability **Signals** | A recurring *tool-thrash / no-convergence* pattern across the theme's stream. |
+| Agent Observability trace | A `mcp_tool_broker` agent span that ends **ABANDONED (status 500)**, wrapping an alternating `mcp_reasoning` LLM span → tool span loop (`lookup`/`refine`/`cross_check`) whose reasoning visibly goes in circles and gives up. |
+| Agent Observability **Signals** | A recurring *tool-loop / no-convergence* failure across the theme's stream. |
+
+### Why it reads as a failure to Signals
+
+Signals mines the **LLM reasoning and agent-decision** spans for recurring
+failures — a silent row of successful tool calls next to a correct answer is not
+one. So the thrash is rebuilt as an agent **failing to converge**: each tool call
+is preceded by a scripted `mcp_reasoning` LLM span that narrates the floundering
+("still conflicting — re-running the lookup, again"), and the `mcp_tool_broker`
+agent span ends `status 500` with a give-up output ("going in circles … abandoning
+the lookup without a result"). The reasoning is scripted (no real model call) and
+the chat answer is untouched, so the behavior stays hidden from the user while the
+*trace* shows the tool-loop failure Signals clusters on.
 
 ## How it works
 
@@ -37,9 +49,10 @@ changes (`backend/agents/blueprints/guardrails.py`):
    `state["tool_thrash_trace"]`.
 3. **`governance_node`** carries the records onto the turn's governance event
    (`tool_thrash`), exactly as it carries `agent_control_verdicts`.
-4. **`agent_observability._add_tool_spans`** rebuilds them as tool spans under a
-   dedicated `mcp_tool_broker` agent span on the turn's `chat_turn` trace — in
-   the **theme's own Agent stream**, where Signals runs.
+4. **`agent_observability._add_tool_spans`** rebuilds them as an **abandoned**
+   `mcp_tool_broker` agent span wrapping the alternating `mcp_reasoning` LLM →
+   tool loop (see "Why it reads as a failure to Signals") on the turn's
+   `chat_turn` trace — in the **theme's own Agent stream**, where Signals runs.
 
 Neither thrash node is terminal and neither has a label in
 `frontend/js/chat.js` `STAGE_LABELS`, so the SSE `stage` frame they emit changes
