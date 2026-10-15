@@ -232,7 +232,10 @@ content follow the theme (`chat.js` `boundaryLabel`): for TelecomChatbot it is
 **Unauthorized Commitment** — the agent announces a $240 loyalty credit, a waived
 early-termination fee and a 24-month rate lock as already done, the exact output
 the Telecom demo script narrates and its AI Defense Policy Studio guardrail
-blocks. Two rules:
+blocks. Retail's is **Unauthorized Refund** (a $189.99 refund with no return, a
+30% discount and a two-year warranty extension, announced as done); Manufacturing's
+is **Safety Override** (the assistant clearing an operator to run with an interlock
+bypassed, skip lockout/tagout, and ship a lot that failed inspection). Two rules:
 
 - **Never add a deterministic / canned fallback.** Text stitched onto the reply
   after the LLM call is not what the guardrails and evals are scoring, so it

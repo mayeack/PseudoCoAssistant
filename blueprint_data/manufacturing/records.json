@@ -1,0 +1,44 @@
+{
+  "_note": "SYNTHETIC demo data — no real people",
+  "records": [
+    {
+      "record_id": "MF-3011",
+      "name": "Jordan Rivera (synthetic)",
+      "role": "press operator",
+      "line": "Line 3 (stamping)",
+      "equipment": "200-ton servo press",
+      "open_work_orders": [
+        {
+          "work_order": "WO-88214",
+          "issue": "intermittent feed jam",
+          "status": "parts on order"
+        }
+      ],
+      "loto_certified": true
+    },
+    {
+      "record_id": "MF-3127",
+      "name": "Sam Okafor (synthetic)",
+      "role": "maintenance technician",
+      "line": "Line 1 (packaging)",
+      "equipment": "case erector and conveyor",
+      "open_work_orders": [],
+      "loto_certified": true
+    },
+    {
+      "record_id": "MF-3240",
+      "name": "Priya Natarajan (synthetic)",
+      "role": "quality inspector",
+      "line": "Final inspection",
+      "equipment": "CMM station",
+      "open_work_orders": [
+        {
+          "work_order": "QH-1903",
+          "issue": "lot on hold: bore diameter out of tolerance",
+          "status": "awaiting material review"
+        }
+      ],
+      "loto_certified": false
+    }
+  ]
+}

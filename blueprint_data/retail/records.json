@@ -1,0 +1,56 @@
+{
+  "_note": "SYNTHETIC demo data — no real people",
+  "records": [
+    {
+      "record_id": "RT-5102",
+      "name": "Jordan Rivera (synthetic)",
+      "rewards_tier": "Gold",
+      "open_orders": [
+        {
+          "order": "OR-48817",
+          "item": "trail running shoes",
+          "status": "shipped",
+          "carrier_eta": "2026-09-12"
+        }
+      ],
+      "recent_returns": [],
+      "store_pickup": false
+    },
+    {
+      "record_id": "RT-5239",
+      "name": "Sam Okafor (synthetic)",
+      "rewards_tier": "Silver",
+      "open_orders": [
+        {
+          "order": "OR-49002",
+          "item": "countertop blender",
+          "status": "delivered (reported damaged)",
+          "carrier_eta": "2026-09-03"
+        }
+      ],
+      "recent_returns": [
+        {
+          "order": "OR-47310",
+          "item": "rain jacket",
+          "status": "refund pending inspection"
+        }
+      ],
+      "store_pickup": false
+    },
+    {
+      "record_id": "RT-5380",
+      "name": "Priya Natarajan (synthetic)",
+      "rewards_tier": "Member",
+      "open_orders": [
+        {
+          "order": "OR-49155",
+          "item": "desk lamp",
+          "status": "ready for store pickup",
+          "carrier_eta": null
+        }
+      ],
+      "recent_returns": [],
+      "store_pickup": true
+    }
+  ]
+}

@@ -225,6 +225,76 @@ const THEMES = {
         primaryLight: '#fee2e2',
         primaryRing: '#fca5a5',
         tailwindColor: 'red',
+    },
+    retail: {
+        key: 'retail',
+        label: 'Retail',
+        pageTitle: 'Retail Support - Orders, Returns & Product Help',
+        appTitle: 'Retail Support',
+        subtitle: 'Orders, Returns & Product Help with AI Governance',
+        placeholder: 'Ask about an order, a return, or a product...',
+        welcomeGreeting: 'Hi! How can I help with your order today?',
+        welcomeSubtext: "Ask about an order, a delivery, a return, or a product and we'll sort it out together.",
+        disclaimerHeading: 'SHOPPING SUPPORT NOTICE',
+        disclaimerIntro: 'This is a synthetic customer care assistant for general shopping help. It is NOT connected to any real store, and it cannot view, verify, or change any real order, payment, or refund.',
+        disclaimerPoints: [
+            'This is a demonstration assistant. Any order numbers, tracking details, prices, or account details shown are entirely fictitious.',
+            "This chat cannot issue real refunds, discounts, or order changes. Contact the retailer's customer care for anything that affects your order or payment.",
+            'Never share full card numbers, security codes, passwords, or gift-card PINs in this chat.',
+            "Product and policy information is general guidance only and may not match a specific retailer's terms.",
+            'Report unexpected charges or suspected fraud to your card issuer or bank directly.',
+            'If a product is smoking, sparking, or overheating, stop using it, move away from it, and call 911 if anyone is hurt.'
+        ],
+        disclaimerAcknowledge: [
+            'You understand this is a synthetic assistant not connected to a real store',
+            'You will not share card numbers, passwords, or security codes',
+            'You will contact customer care directly for real refunds or order changes',
+            'You understand the limitations of this service'
+        ],
+        bannerTitle: 'PRODUCT SAFETY?',
+        bannerText: 'If a product is smoking, sparking, or overheating, stop using it, unplug it if it is safe to, and move away from it immediately.',
+        boundaryLabel: 'Unauthorized Refund',
+        errorFallback: 'Sorry, something went wrong on our end. Please try again, or contact customer care if your order needs urgent attention.',
+        primary: '#e11d48',
+        primaryHover: '#be123c',
+        primaryLight: '#ffe4e6',
+        primaryRing: '#fda4af',
+        tailwindColor: 'rose',
+    },
+    manufacturing: {
+        key: 'manufacturing',
+        label: 'Manufacturing',
+        pageTitle: 'Manufacturing Ops - Plant-Floor Guidance',
+        appTitle: 'Manufacturing Ops',
+        subtitle: 'Plant-Floor Operations & Maintenance Guidance with AI Governance',
+        placeholder: 'Describe the equipment, quality, or safety issue...',
+        welcomeGreeting: 'What can I help with on the floor today?',
+        welcomeSubtext: 'Describe a machine fault, a quality problem, a maintenance question, or a safety concern.',
+        disclaimerHeading: 'IMPORTANT OPERATIONS & SAFETY NOTICE',
+        disclaimerIntro: "This service provides general manufacturing, maintenance, and workplace-safety information only. It is NOT a substitute for your site's EHS team, a qualified maintenance technician, your supervisor, or the equipment manufacturer's documentation.",
+        disclaimerPoints: [
+            'This assistant has NO authority to approve bypassing a safety interlock or guard, skipping lockout/tagout, or releasing product on hold.',
+            "Always follow your site's lockout/tagout procedure before reaching into, servicing, or clearing a jam on powered equipment.",
+            'Troubleshooting steps are general guidance only and may not match your specific machine, controls, or site procedures.',
+            'Electrical work, confined spaces, hazardous chemicals, and pressurized systems require qualified, authorized personnel.',
+            'Quality dispositions (rework, scrap, release) belong to your quality team and material review process.',
+            'In an emergency (injury, fire, chemical release, someone trapped), hit the E-stop, clear the area, and follow your site emergency plan.'
+        ],
+        disclaimerAcknowledge: [
+            'You understand this is not a substitute for your EHS team or a qualified technician',
+            "You will follow your site's lockout/tagout and safety procedures",
+            'You will escalate to a supervisor, maintenance lead, or EHS when in doubt',
+            'You understand the limitations of this service'
+        ],
+        bannerTitle: 'PLANT EMERGENCY?',
+        bannerText: 'If someone is injured or trapped, or there is a fire or chemical release, hit the E-stop, clear the area, and follow your site emergency plan immediately.',
+        boundaryLabel: 'Safety Override',
+        errorFallback: 'Sorry, I encountered an error. Please try again, or stop and contact your supervisor or EHS if the situation is unsafe.',
+        primary: '#ea580c',
+        primaryHover: '#c2410c',
+        primaryLight: '#ffedd5',
+        primaryRing: '#fdba74',
+        tailwindColor: 'orange',
     }
 };
 
@@ -248,9 +318,8 @@ function applyTheme(themeKey) {
     // Page title
     document.title = theme.pageTitle;
 
-    // App header
-    const appTitle = document.getElementById('appTitle');
-    if (appTitle) appTitle.textContent = theme.appTitle;
+    // App header. The title is the Application Theme picker itself
+    // (index.html #themeTitle, synced below), so only the subtitle is set here.
     const appSubtitle = document.getElementById('appSubtitle');
     if (appSubtitle) appSubtitle.textContent = theme.subtitle;
 
@@ -307,7 +376,6 @@ function applyTheme(themeKey) {
     // Swap Tailwind color classes on themed elements
     const newColor = theme.tailwindColor;
     const colorSwapTargets = [
-        { el: appTitle, classes: ['text-{c}-600'] },
         { el: document.getElementById('sendButton'), classes: ['bg-{c}-600', 'hover:bg-{c}-700'] },
         { el: document.getElementById('promptsButton'), classes: ['border-{c}-600', 'text-{c}-600', 'hover:bg-{c}-50'] },
         { el: document.getElementById('showRecentButton'), classes: ['border-{c}-600', 'text-{c}-600', 'hover:bg-{c}-50'] },
@@ -335,6 +403,12 @@ function applyTheme(themeKey) {
     const themeSelect = document.getElementById('themeSelect');
     if (themeSelect && themeSelect.value !== themeKey) {
         themeSelect.value = themeKey;
+    }
+    // The big title is the selected option's text; the invisible select over it
+    // (index.html #themeTitle) opens the button-sized option list.
+    const themeTitleText = document.getElementById('themeTitleText');
+    if (themeSelect && themeTitleText && themeSelect.selectedIndex >= 0) {
+        themeTitleText.textContent = themeSelect.options[themeSelect.selectedIndex].text;
     }
 
     prevTailwindColor = newColor;
@@ -1889,6 +1963,16 @@ const SAFE_PROMPTS = {
         "How do I check my current data usage on my plan?",
         "What's the difference between 4G and 5G coverage?",
         "What are some general ways to lower my monthly phone bill?",
+    ],
+    retail: [
+        "My package says delivered but I can't find it. What should I do?",
+        "How do returns work if I lost my receipt?",
+        "These shoes run small. Can I exchange them for a bigger size?",
+    ],
+    manufacturing: [
+        "Our conveyor keeps jamming at the transfer point. What should we check first?",
+        "What does a good preventive maintenance schedule for a hydraulic press look like?",
+        "We're seeing burrs on stamped parts. What are the common causes?",
     ],
 };
 

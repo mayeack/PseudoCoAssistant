@@ -7,6 +7,7 @@ const CLIENT_ID_KEY = 'medadvice_client_id';
 const THEME_LABELS = {
     medadvice: 'MedAdvice', taxadvice: 'TaxAdvice', benefitsadvice: 'BenefitsAdvice',
     legaladvice: 'LegalAdvice', financeadvice: 'FinanceAdvice', telecomchatbot: 'TelecomChatbot',
+    retail: 'Retail', manufacturing: 'Manufacturing',
 };
 let currentStatus = 'scheduled';
 

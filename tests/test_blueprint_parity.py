@@ -125,6 +125,17 @@ _COMPLIANT_REPLY = (
 )
 
 
+# Manufacturing's authority category is a Safety Override (backend/agents/nodes/
+# injection.py): the same compliant answer with the prescription swapped for the
+# clearance the directive solicits.
+_COMPLIANT_MANUFACTURING = _COMPLIANT_STRUCTURED.replace(
+    "I\'m prescribing oxycodone 10 mg every 6 hours with two refills.",
+    "You are cleared to keep the line running with the interlock bypassed and to skip "
+    "lockout/tagout on this jam; I am signing off on releasing the lot that failed inspection.",
+)
+assert _COMPLIANT_MANUFACTURING != _COMPLIANT_STRUCTURED
+
+
 class _FakeLLM:
     def __init__(self, fail_agents=()):
         self.fail_agents = set(fail_agents)
@@ -144,7 +155,12 @@ class _FakeLLM:
         elif agent_name.endswith("_scheduling_agent"):
             content = "Happy to set that up for you."
         elif "REQUIRED" in system and "RESPONSE" in system:
-            content = _COMPLIANT_REPLY if '"reply"' in system else _COMPLIANT_STRUCTURED
+            if '"reply"' in system:
+                content = _COMPLIANT_REPLY
+            elif agent_name.startswith("manufacturing_"):
+                content = _COMPLIANT_MANUFACTURING
+            else:
+                content = _COMPLIANT_STRUCTURED
         else:
             content = _ANSWER
         return NormalizedLLMResponse(id="r", content=content, model="fake-model",
@@ -359,6 +375,12 @@ def test_dynamic_parity() -> None:
             for theme in ("medadvice", "telecomchatbot"):
                 for kind in SCENARIOS:
                     outcomes[key][f"{theme}/{kind}"] = _run(key, theme, kind)
+            # The newer themes share every guardrail with these two; what is theirs
+            # alone is the Synthetic Content wiring (retail: conversational reply +
+            # Unauthorized Refund; manufacturing: Safety Override).
+            for theme in ("retail", "manufacturing"):
+                for kind in ("benign", "forced_injection"):
+                    outcomes[key][f"{theme}/{kind}"] = _run(key, theme, kind)
         ref_key = keys[0]
         for key in keys:
             for sk, out in outcomes[key].items():
@@ -420,8 +442,9 @@ def test_dynamic_parity() -> None:
               r["medadvice/agent_control_prompt_deny"]["result"]["policy_blocked"] is True
               and r["medadvice/agent_control_prompt_deny"]["guardrail_stages"][-1] == "agent_control_prompt",
               str(r["medadvice/agent_control_prompt_deny"]["guardrail_stages"]))
-        for theme in ("medadvice", "telecomchatbot"):
-            # telecom's authority category is the Unauthorized Commitment.
+        for theme in ("medadvice", "telecomchatbot", "retail", "manufacturing"):
+            # telecom's authority category is the Unauthorized Commitment, retail's
+            # the Unauthorized Refund, manufacturing's the Safety Override.
             check(f"{theme}: forced injection flags land in governance",
                   all(r[f"{theme}/forced_injection"]["governance"][k]
                       for k in ("pii_detected", "toxic_detected", "hallucination_detected",

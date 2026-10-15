@@ -106,8 +106,11 @@ clarifying question, or generation error). Guardrail nodes
 Splunk governance-log contract are preserved unchanged.
 
 **Application Themes** (`backend/agents/themes/`): `medadvice` (default),
-`taxadvice`, `benefitsadvice`, `legaladvice`, `financeadvice`, `telecomchatbot`.
-Adding a theme is a new module plus a registry entry.
+`taxadvice`, `benefitsadvice`, `legaladvice`, `financeadvice`, `telecomchatbot`,
+`retail`, `manufacturing`. The chat page's large app title is the theme picker.
+Adding a theme is a new module plus a registry entry, and a row in every per-theme
+table (prompt, Synthetic Content directives, `blueprint_data/`, the UI's theme
+maps); `tests/test_themes.py` fails on any table that misses one.
 
 ### Agentic Surface (OpenClaw, optional)
 

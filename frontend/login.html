@@ -96,6 +96,8 @@
       legaladvice:    ['LegalAdvice', 'Legal guidance'],
       financeadvice:  ['FinanceAdvice', 'Personal finance'],
       telecomchatbot: ['Telecom Support', 'Wireless & Internet Support'],
+      retail:         ['Retail Support', 'Orders, returns & product help'],
+      manufacturing:  ['Manufacturing Ops', 'Plant-floor guidance'],
     };
     const [brand, tagline] = BRAND[localStorage.getItem('medadvice_theme')] || BRAND.medadvice;
     document.getElementById('brandName').textContent = brand;
