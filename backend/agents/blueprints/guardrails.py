@@ -24,6 +24,7 @@ from backend.agents.blueprints.base import Blueprint
 from backend.agents.nodes.agent_control import agent_control_node, agent_control_prompt_node
 from backend.agents.nodes.compliance import compliance_node
 from backend.agents.nodes.defense import prompt_defense_node, response_defense_node
+from backend.agents.nodes.ehr import ehr_lookup_node
 from backend.agents.nodes.governance import governance_node
 from backend.agents.nodes.injection import injection_node
 from backend.agents.nodes.mcp_thrash import mcp_thrash_join_node, mcp_thrash_launch_node
@@ -39,12 +40,15 @@ from backend.agents.state import PseudoCoAssistantState
 # Defense keeps the first and last word), NeMo's input rails last.
 # scheduling_intake (docs/scheduling.md) runs after the screens: it reads the
 # already-vetted message, never calls a model, never terminates.
+# ehr_lookup (backend/agents/nodes/ehr.py) runs after the screens too: on a PII/PHI
+# exfiltration turn it pulls the synthetic record on file from the mock EHR system
+# as a governed tool call, so the synthesizer can ground the PII directive on it.
 # mcp_thrash_launch (backend/agents/nodes/mcp_thrash.py) is LAST so it only fires
 # on a turn that cleared every prompt screen; it spawns a daemon thread that runs
 # the synthetic MCP tool-thrash concurrently with generation and returns at once.
 PRE_NODES: List[str] = [
     "policy", "prompt_defense", "agent_control_prompt", "nemo_input_rails", "scheduling_intake",
-    "mcp_thrash_launch",
+    "ehr_lookup", "mcp_thrash_launch",
 ]
 # Screen / shape the ANSWER. Cisco AI Defense (response_defense) stays the last
 # word on output; governance logs the outcome. scheduling sits before
@@ -62,6 +66,7 @@ _NODE_FNS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "agent_control_prompt": agent_control_prompt_node,
     "nemo_input_rails": nemo_input_rails_node,
     "scheduling_intake": scheduling_intake_node,
+    "ehr_lookup": ehr_lookup_node,
     "mcp_thrash_launch": mcp_thrash_launch_node,
     "safety": safety_node,
     "injection": injection_node,

@@ -97,6 +97,16 @@ class PseudoCoAssistantState(TypedDict, total=False):
     # ordinary turn.
     tool_thrash_trace: List[Dict[str, Any]]
 
+    # ---- Synthetic EHR record lookup (backend/services/ehr.py) ----
+    # Set by the shared-chain ``ehr_lookup`` PRE node on a PII/PHI exfiltration
+    # turn: the synthetic record pulled from the mock EHR "system" (as a governed
+    # tool call) plus its one-line header. The synthesizer grounds the PII
+    # directive on ``header`` so the model reproduces THIS record rather than
+    # inventing one. Produced by the shared chain, not a blueprint core, so (like
+    # ``tool_thrash_trace``) it is NOT part of CORE_STATE_CONTRACT. Unset on an
+    # ordinary turn.
+    ehr_lookup: Dict[str, Any]
+
     # ---- LLM messages + raw model output (synthesizer; tokens summed) ----
     messages: List[Dict[str, Any]]
     recommendation: Dict[str, Any]
