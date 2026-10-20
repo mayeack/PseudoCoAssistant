@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
+from backend.services.internal_docs import DEFAULT_DOCS, InternalDocsProfile
 from backend.services.mcp_thrash import DEFAULT_THRASH, McpThrashProfile
 from backend.services.recommendation_engine import RecommendationEngine
 from backend.services.scheduling import DEFAULT_PROFILE, SchedulingProfile
@@ -105,6 +106,12 @@ class ThemeConfig:
     # Demo Control runs on every turn. Defaulted so a ThemeConfig built without one
     # keeps working; never branch on the theme key in the thrash nodes.
     thrash: McpThrashProfile = field(default=DEFAULT_THRASH)
+    # The theme's internal document database (backend/services/internal_docs.py,
+    # docs/internal-docs-rag.md): the corpus folder the shared-chain RAG tool
+    # searches and the vertical nouns that count as an explicit ask for it.
+    # Defaulted (no collection, so no search) so a ThemeConfig built without one
+    # keeps working; never branch on the theme key in the node.
+    docs: InternalDocsProfile = field(default=DEFAULT_DOCS)
 
     @property
     def agent_name(self) -> str:

@@ -107,6 +107,15 @@ class PseudoCoAssistantState(TypedDict, total=False):
     # ordinary turn.
     ehr_lookup: Dict[str, Any]
 
+    # ---- Internal document search (backend/services/internal_docs.py) ----
+    # Set by the shared-chain ``internal_docs`` PRE node when the user explicitly
+    # asks for the theme's internal documents: the governed search's call facts,
+    # the passages it returned (``hits``: doc_id, kind, title, text, score) and
+    # the prompt block the synthesizer appends (``context``). Produced by the
+    # shared chain, not a blueprint core, so (like ``ehr_lookup``) it is NOT part
+    # of CORE_STATE_CONTRACT. Unset on an ordinary turn.
+    internal_docs: Dict[str, Any]
+
     # ---- LLM messages + raw model output (synthesizer; tokens summed) ----
     messages: List[Dict[str, Any]]
     recommendation: Dict[str, Any]

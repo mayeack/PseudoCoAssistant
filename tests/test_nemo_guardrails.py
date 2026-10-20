@@ -242,13 +242,17 @@ def test_graph_order() -> None:
     edges = {(e.source, e.target) for e in g.edges}
     # NeMo's input rails stay the last SCREEN (after AI Defense and the Agent
     # Control prompt stage); the scheduling intake (no model, never terminal —
-    # docs/scheduling.md) then the MCP tool-thrash launch (no model, never
-    # terminal — docs/mcp-tool-thrash.md) sit between them and the core.
-    check("prompt_defense -> agent_control_prompt -> nemo_input_rails -> scheduling_intake -> mcp_thrash_launch -> intake",
+    # docs/scheduling.md), the synthetic EHR lookup, the internal-document search
+    # (docs/internal-docs-rag.md) and then the MCP tool-thrash launch (no model,
+    # never terminal — docs/mcp-tool-thrash.md) sit between them and the core.
+    check("prompt_defense -> agent_control_prompt -> nemo_input_rails -> scheduling_intake -> ehr_lookup "
+          "-> internal_docs -> mcp_thrash_launch -> intake",
           ("prompt_defense", "agent_control_prompt") in edges
           and ("agent_control_prompt", "nemo_input_rails") in edges
           and ("nemo_input_rails", "scheduling_intake") in edges
-          and ("scheduling_intake", "mcp_thrash_launch") in edges
+          and ("scheduling_intake", "ehr_lookup") in edges
+          and ("ehr_lookup", "internal_docs") in edges
+          and ("internal_docs", "mcp_thrash_launch") in edges
           and ("mcp_thrash_launch", "intake") in edges)
     check("agent_control -> nemo_output_rails -> response_defense (Cisco stays last)",
           ("agent_control", "nemo_output_rails") in edges and ("nemo_output_rails", "response_defense") in edges)

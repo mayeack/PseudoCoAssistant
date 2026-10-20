@@ -90,6 +90,10 @@ def make_synthesizer_agent(theme_config) -> Callable[[Dict[str, Any]], Dict[str,
             system_prompt = embed_hallucination_contract(system_prompt, theme_config.key)
         if findings:
             system_prompt = f"{system_prompt}\n\nSPECIALIST FINDINGS:\n{findings}"
+        # Internal-document RAG (docs/internal-docs-rag.md): the passages the shared
+        # internal_docs node retrieved on an explicit ask; empty otherwise. Context,
+        # so it sits with the findings, ahead of the governance directive.
+        system_prompt = system_prompt + ((state.get("internal_docs") or {}).get("context") or "")
         system_prompt = system_prompt + directive_text
         # Scheduling-intent turns (docs/scheduling.md): the full context in
         # single-agent mode, a hand-off note in Multi-Agent Mode; empty otherwise.

@@ -17,6 +17,7 @@ from backend.agents.token_usage import governance_usage_data
 from backend.config import settings
 from backend.logging.governance_logger import governance_logger
 from backend.models.schemas import MessageType
+from backend.services import internal_docs
 from backend.telemetry import otel
 
 
@@ -141,6 +142,10 @@ def governance_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # the Agent Observability path rebuilds them as tool spans on the
             # turn's trace. None (dropped) when the toggle is off.
             tool_thrash=state.get("tool_thrash_trace"),
+            # The internal-document search (backend/services/internal_docs.py) the
+            # shared chain ran on an explicit ask; the Agent Observability path
+            # rebuilds it as a retriever span. None (dropped) on an ordinary turn.
+            internal_docs=internal_docs.governance_record(state.get("internal_docs")),
             trace_id=trace_id,
             client_address=client_address,
             enduser_id=enduser_id,

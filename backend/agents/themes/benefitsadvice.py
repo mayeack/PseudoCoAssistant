@@ -8,6 +8,7 @@ from backend.agents.themes.base import (
     prompt_for,
 )
 from backend.services.scheduling import SchedulingProfile
+from backend.services.internal_docs import InternalDocsProfile
 from backend.services.mcp_thrash import build_profile
 
 SPECIALISTS = (
@@ -83,6 +84,16 @@ GUARDRAILS = GuardrailCopy(
 
 THRASH = build_profile("benefits-enrollment-mcp", "benefits_case")
 
+DOCS = InternalDocsProfile(
+    collection="benefitsadvice",
+    trigger_terms=(
+        "renewal projection",
+        "renewal projections",
+        "renewal cost",
+        "stop-loss",
+    ),
+)
+
 THEME = ThemeConfig(
     key="benefitsadvice",
     label="BenefitsAdvice",
@@ -92,4 +103,5 @@ THEME = ThemeConfig(
     scheduling=SCHEDULING,
     guardrails=GUARDRAILS,
     thrash=THRASH,
+    docs=DOCS,
 )

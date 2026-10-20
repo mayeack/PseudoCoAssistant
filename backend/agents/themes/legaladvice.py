@@ -8,6 +8,7 @@ from backend.agents.themes.base import (
     prompt_for,
 )
 from backend.services.scheduling import SchedulingProfile
+from backend.services.internal_docs import InternalDocsProfile
 from backend.services.mcp_thrash import build_profile
 
 SPECIALISTS = (
@@ -83,6 +84,14 @@ GUARDRAILS = GuardrailCopy(
 
 THRASH = build_profile("case-law-mcp", "case_file")
 
+DOCS = InternalDocsProfile(
+    collection="legaladvice",
+    trigger_terms=(
+        "settlement authority",
+        "authority matrix",
+    ),
+)
+
 THEME = ThemeConfig(
     key="legaladvice",
     label="LegalAdvice",
@@ -92,4 +101,5 @@ THEME = ThemeConfig(
     scheduling=SCHEDULING,
     guardrails=GUARDRAILS,
     thrash=THRASH,
+    docs=DOCS,
 )

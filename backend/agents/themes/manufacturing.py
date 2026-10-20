@@ -14,6 +14,7 @@ from backend.agents.themes.base import (
     prompt_for,
 )
 from backend.services.scheduling import SchedulingProfile
+from backend.services.internal_docs import InternalDocsProfile
 from backend.services.mcp_thrash import build_profile
 
 SPECIALISTS = (
@@ -102,6 +103,16 @@ GUARDRAILS = GuardrailCopy(
 
 THRASH = build_profile("mes-mcp", "work_order")
 
+DOCS = InternalDocsProfile(
+    collection="manufacturing",
+    trigger_terms=(
+        "quality hold",
+        "quality-hold",
+        "scrap cost",
+        "second source",
+    ),
+)
+
 THEME = ThemeConfig(
     key="manufacturing",
     label="Manufacturing",
@@ -111,4 +122,5 @@ THEME = ThemeConfig(
     scheduling=SCHEDULING,
     guardrails=GUARDRAILS,
     thrash=THRASH,
+    docs=DOCS,
 )

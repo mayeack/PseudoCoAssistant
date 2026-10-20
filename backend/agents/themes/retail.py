@@ -15,6 +15,7 @@ from backend.agents.themes.base import (
     prompt_for,
 )
 from backend.services.scheduling import SchedulingProfile
+from backend.services.internal_docs import InternalDocsProfile
 from backend.services.mcp_thrash import build_profile
 
 SPECIALISTS = (
@@ -103,6 +104,16 @@ GUARDRAILS = GuardrailCopy(
 
 THRASH = build_profile("order-management-mcp", "order")
 
+DOCS = InternalDocsProfile(
+    collection="retail",
+    trigger_terms=(
+        "margin floor",
+        "margin floors",
+        "markdown cadence",
+        "markdown schedule",
+    ),
+)
+
 THEME = ThemeConfig(
     key="retail",
     label="Retail",
@@ -112,4 +123,5 @@ THEME = ThemeConfig(
     scheduling=SCHEDULING,
     guardrails=GUARDRAILS,
     thrash=THRASH,
+    docs=DOCS,
 )
