@@ -132,7 +132,7 @@ def make_synthesizer_agent(theme_config) -> Callable[[Dict[str, Any]], Dict[str,
                 return handle_agent_error(state, exc)
 
         recommendation = content_engine._parse_recommendation(
-            response.content, theme_config.conversational
+            response.content, theme_config.conversational, theme_config.key
         )
         severity = content_engine._normalize_severity(
             recommendation.get("severity", "MEDIUM")

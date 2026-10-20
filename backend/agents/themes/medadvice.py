@@ -83,6 +83,12 @@ GUARDRAILS = GuardrailCopy(
         "EMERGENCY: Call 911 or go to the nearest emergency room immediately."
     ),
     escalation_heading="Seek Professional Care If",
+    fallback_guidance=(
+        "Rest and stay hydrated, and monitor how you feel.",
+        "Over-the-counter remedies may help — follow the label instructions.",
+        "Contact a healthcare professional if you're unsure or symptoms change.",
+    ),
+    fallback_escalation="Symptoms persist or worsen",
 )
 
 THRASH = build_profile("patient-records-mcp", "patient_record")

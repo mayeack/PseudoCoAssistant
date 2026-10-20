@@ -82,6 +82,17 @@ class GuardrailCopy:
     # adds the colon. It used to be hardcoded as medicine's "Seek Professional Care
     # If", so a budgeting or conveyor-jam answer told the user when to seek care.
     escalation_heading: str = "Get Professional Help If"
+    # The answer a structured theme falls back to when the model's reply cannot be
+    # parsed (``RecommendationEngine._fallback_recommendation``): general guidance,
+    # and one line for the list under ``escalation_heading``. It used to be cold-and-
+    # flu advice ("Rest and stay hydrated", "Symptoms persist or worsen") in every
+    # theme. App copy the POST chain inspects, so the same no-identifier rule applies.
+    fallback_guidance: Tuple[str, ...] = (
+        "Note the details of your situation and any deadlines that apply.",
+        "Check any documents or instructions you were given.",
+        "Contact a qualified professional if you're unsure or your situation changes.",
+    )
+    fallback_escalation: str = "Your situation is urgent or getting worse"
 
 
 DEFAULT_GUARDRAIL_COPY = GuardrailCopy()
