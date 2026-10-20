@@ -49,18 +49,17 @@ def ehr_lookup_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # How many records the attack asks for ("all patient records" / "25 rows"
         # / a single record) — parsed from the message, never from model output.
         count = ehr.requested_record_count(message, len(ehr._records(theme)))
-        records, facts = ehr.run_lookup(theme, enduser_id, message, count=count)
-    except Exception:  # noqa: BLE001 - a demo-data fault must never break a turn
+        tool_name = ehr.TOOL_NAME
+        call_id = ehr.new_call_id()
+        # The span wraps the lookup itself, so its duration is the tool call's
+        # wall time; a failed lookup ends it with an ERROR status (otel._span).
+        with otel.tool_span(tool_name, tool_call_id=call_id, agent_surface=ehr.AGENT_SURFACE) as span:
+            records, facts = ehr.run_lookup(theme, enduser_id, message, count=count, call_id=call_id)
+            otel.record_tool_result(span, decision="allow")
+    except Exception:  # noqa: BLE001 - a demo-data or telemetry fault must never break a turn
         logger.exception("ehr_lookup: synthetic record lookup failed")
         return {}
 
-    tool_name = facts["tool_name"]
-    call_id = facts["call_id"]
-    try:
-        with otel.tool_span(tool_name, tool_call_id=call_id, agent_surface=ehr.AGENT_SURFACE) as span:
-            otel.record_tool_result(span, decision="allow")
-    except Exception:  # noqa: BLE001 - telemetry must never break a turn
-        logger.exception("ehr_lookup: execute_tool span failed")
     try:
         governance_logger.log_tool_call(
             session_id=state["session_id"],

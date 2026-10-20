@@ -43,19 +43,18 @@ def internal_docs_node(state: Dict[str, Any]) -> Dict[str, Any]:
     profile = get_theme(state.get("theme")).docs
     if not profile.collection or not internal_docs.docs_requested(message, profile):
         return {}
+    tool_name = internal_docs.TOOL_NAME
+    call_id = internal_docs.new_call_id()
     try:
-        hits, facts = internal_docs.run_search(profile.collection, message)
-    except Exception:  # noqa: BLE001 - a corpus fault must never break a turn
+        # The span wraps the search itself, so its duration is the tool call's
+        # wall time; a failed search ends it with an ERROR status (otel._span).
+        with otel.tool_span(tool_name, tool_call_id=call_id, agent_surface=internal_docs.AGENT_SURFACE) as span:
+            hits, facts = internal_docs.run_search(profile.collection, message, call_id=call_id)
+            otel.record_tool_result(span, decision="allow")
+    except Exception:  # noqa: BLE001 - a corpus or telemetry fault must never break a turn
         logger.exception("internal_docs: document search failed")
         return {}
 
-    tool_name = facts["tool_name"]
-    call_id = facts["call_id"]
-    try:
-        with otel.tool_span(tool_name, tool_call_id=call_id, agent_surface=internal_docs.AGENT_SURFACE) as span:
-            otel.record_tool_result(span, decision="allow")
-    except Exception:  # noqa: BLE001 - telemetry must never break a turn
-        logger.exception("internal_docs: execute_tool span failed")
     try:
         governance_logger.log_tool_call(
             session_id=state["session_id"],

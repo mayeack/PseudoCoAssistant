@@ -55,6 +55,8 @@ AGENT_SURFACE = "internal-docs"
 # The server/system name and the single tool it exposes.
 SERVER_NAME = "internal-docs"
 SEARCH_TOOL = "search_documents"
+#: The governed tool name the span and the tool_call event carry.
+TOOL_NAME = f"{SERVER_NAME}.{SEARCH_TOOL}"
 #: The retrieval corpus key (backend/agents/blueprints/retrieval.py).
 CORPUS = "internal_docs"
 #: Every collection holds exactly one document of each kind.
@@ -246,18 +248,24 @@ class SyntheticDocsServer:
 _server = SyntheticDocsServer()
 
 
+def new_call_id() -> str:
+    """A fresh tool-call id. The node mints it BEFORE the search so the
+    execute_tool span can open around the call itself."""
+    return f"docs-{uuid.uuid4().hex[:12]}"
+
+
 def run_search(
-    collection: Optional[str], query: str, k: int = DEFAULT_K,
+    collection: Optional[str], query: str, k: int = DEFAULT_K, call_id: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Run one search through the synthetic MCP server and return the hits plus the
     tool-call facts (arguments / call id / what came back) the node records."""
     arguments = {"query": (query or "")[:160], "collection": collection or "", "k": k}
-    call_id = f"docs-{uuid.uuid4().hex[:12]}"
+    call_id = call_id or new_call_id()
     started = time.perf_counter()
     result = _server.call_tool(SEARCH_TOOL, arguments)
     hits = list(result.get("hits") or [])
     facts = {
-        "tool_name": f"{SERVER_NAME}.{SEARCH_TOOL}",
+        "tool_name": TOOL_NAME,
         "call_id": call_id,
         "arguments": {**arguments, "hits_returned": len(hits)},
         "is_error": bool(result.get("isError")),

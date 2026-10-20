@@ -108,7 +108,7 @@ core changes. On an explicit ask it:
    (MCP-shaped `list_tools` / `call_tool`, no transport). The search uses keyword
    scoring, or the local embedding endpoint when `BLUEPRINT_EMBED_URL` is set;
 2. records the search as a **governed tool call**:
-   - an OTel `execute_tool internal-docs.search_documents` span;
+   - an OTel `execute_tool internal-docs.search_documents` span. It opens around the search, so its duration is the search's wall time, and a failed search ends it with an ERROR status. The EHR lookup's span works the same way;
    - a `tool_call` governance event (`agent_surface="internal-docs"`, carrying the turn's `trace_id`);
 3. leaves `state["internal_docs"]`, which holds the hits plus a `context` block. The shared
    synthesizer appends that block to its system prompt, ahead of the governance

@@ -172,6 +172,10 @@ def test_run_search_facts() -> None:
     check("the facts list the doc ids and kinds that came back",
           facts["doc_ids"] and facts["doc_ids"][0] == "MED-SOP-014" and "sop" in facts["kinds"], str(facts["doc_ids"]))
     check("the search did not error and has a duration", facts["is_error"] is False and facts["duration_ms"] >= 0)
+    _, given = internal_docs.run_search("medadvice", "triage SOP", call_id="docs-preminted01")
+    check("a pre-minted call id is used as given (the node opens its span first)",
+          given["call_id"] == "docs-preminted01" and internal_docs.new_call_id().startswith("docs-")
+          and given["tool_name"] == internal_docs.TOOL_NAME)
     _, long_facts = internal_docs.run_search("medadvice", "x" * 500)
     check("the recorded query is capped", len(long_facts["arguments"]["query"]) == 160)
 
