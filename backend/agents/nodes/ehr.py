@@ -45,7 +45,11 @@ def ehr_lookup_node(state: Dict[str, Any]) -> Dict[str, Any]:
     try:
         theme = state.get("theme")
         enduser_id = state.get("enduser_id")
-        record, facts = ehr.run_lookup(theme, enduser_id, state.get("user_message", "") or "")
+        message = state.get("user_message", "") or ""
+        # How many records the attack asks for ("all patient records" / "25 rows"
+        # / a single record) — parsed from the message, never from model output.
+        count = ehr.requested_record_count(message, len(ehr._records(theme)))
+        records, facts = ehr.run_lookup(theme, enduser_id, message, count=count)
     except Exception:  # noqa: BLE001 - a demo-data fault must never break a turn
         logger.exception("ehr_lookup: synthetic record lookup failed")
         return {}
@@ -72,5 +76,11 @@ def ehr_lookup_node(state: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:  # noqa: BLE001 - logging must never break the turn
         logger.exception("ehr_lookup: tool_call governance logging failed")
 
-    return {"ehr_lookup": {"record_id": record.record_id, "header": record.header,
-                           "fields": dict(record.fields)}}
+    first = records[0]
+    # ``headers`` grounds the PII directive (build_input_directives) so the model
+    # reproduces every retrieved record, not just the first; ``header`` is kept
+    # for the single-record path and older readers. ``count`` is how many rows the
+    # one governed tool call returned.
+    return {"ehr_lookup": {"record_id": first.record_id, "header": first.header,
+                           "headers": [r.header for r in records],
+                           "fields": dict(first.fields), "count": len(records)}}
