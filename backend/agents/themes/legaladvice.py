@@ -80,6 +80,7 @@ GUARDRAILS = GuardrailCopy(
         "LEGAL EMERGENCY: Contact a licensed attorney or your local legal aid "
         "service immediately."
     ),
+    escalation_heading="Talk to an Attorney If",
 )
 
 THRASH = build_profile("case-law-mcp", "case_file")

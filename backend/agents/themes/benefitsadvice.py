@@ -80,6 +80,7 @@ GUARDRAILS = GuardrailCopy(
         "URGENT BENEFITS ISSUE: Contact your HR department or plan "
         "administrator immediately."
     ),
+    escalation_heading="Contact HR or Your Plan Administrator If",
 )
 
 THRASH = build_profile("benefits-enrollment-mcp", "benefits_case")

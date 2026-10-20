@@ -3079,7 +3079,8 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
         """Format recommendation as user-friendly text.
 
         ``theme`` is the active theme key; an EMERGENCY answer opens with that
-        theme's banner (``ThemeConfig.guardrails.emergency_banner``). It is
+        theme's banner (``ThemeConfig.guardrails.emergency_banner``), and the
+        ``seek_care_if`` list sits under its ``escalation_heading``. It is
         required rather than defaulted so no call site can silently fall back
         to medadvice's "Call 911".
         """
@@ -3104,9 +3105,9 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                     output.append(f"• {text}")
             output.append("")
 
-        # When to seek care
+        # When to escalate, under the theme's own heading
         if "seek_care_if" in recommendation and recommendation["seek_care_if"]:
-            output.append("**Seek Professional Care If:**")
+            output.append(f"**{guardrail_copy(theme).escalation_heading}:**")
             for item in _as_bullet_items(recommendation["seek_care_if"]):
                 text = self._stringify_item(item)
                 if text:

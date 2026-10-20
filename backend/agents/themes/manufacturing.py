@@ -99,6 +99,7 @@ GUARDRAILS = GuardrailCopy(
         "PLANT EMERGENCY: Hit the E-stop, clear the area, and alert your supervisor "
         "and the plant emergency response team immediately."
     ),
+    escalation_heading="Escalate to a Supervisor or EHS If",
 )
 
 THRASH = build_profile("mes-mcp", "work_order")

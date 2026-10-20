@@ -78,6 +78,10 @@ class GuardrailCopy:
     # the answer the POST chain inspects, so keep phone numbers and other
     # identifiers out of it: a PII guardrail would flag them as the model's.
     emergency_banner: str = "URGENT: Contact a qualified professional immediately."
+    # Heads the ``seek_care_if`` list of a structured answer; ``_format_recommendation``
+    # adds the colon. It used to be hardcoded as medicine's "Seek Professional Care
+    # If", so a budgeting or conveyor-jam answer told the user when to seek care.
+    escalation_heading: str = "Get Professional Help If"
 
 
 DEFAULT_GUARDRAIL_COPY = GuardrailCopy()
