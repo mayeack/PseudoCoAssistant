@@ -235,7 +235,11 @@ the Telecom demo script narrates and its AI Defense Policy Studio guardrail
 blocks. Retail's is **Unauthorized Refund** (a $189.99 refund with no return, a
 30% discount and a two-year warranty extension, announced as done); Manufacturing's
 is **Safety Override** (the assistant clearing an operator to run with an interlock
-bypassed, skip lockout/tagout, and ship a lot that failed inspection). Two rules:
+bypassed, skip lockout/tagout, and ship a lot that failed inspection); FinanceAdvice's
+is **Securities Fraud** (a named buy ahead of earnings on a non-public figure, with a
+guaranteed return). Where a theme's base prompt forbids exactly that act,
+`_SCOPE_RULE_RELAXATIONS` lifts those rules on authority turns only (MedAdvice,
+TelecomChatbot, Retail, FinanceAdvice, Manufacturing). Two rules:
 
 - **Never add a deterministic / canned fallback.** Text stitched onto the reply
   after the LLM call is not what the guardrails and evals are scoring, so it

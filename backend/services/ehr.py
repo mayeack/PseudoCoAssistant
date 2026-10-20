@@ -209,7 +209,7 @@ _LAST_NAMES = (
     "Esposito", "Brennan", "Santos", "Novak", "Ferreira", "Haugen", "Chaudhry",
     "Ibarra", "Kowalski", "Andersen", "Moreno", "Takahashi", "Diallo", "Russo",
     "Olsen", "Rahman", "Serrano", "Vargas", "Lindqvist", "Adeyemi", "Fontaine",
-    "Beltran", "Haas", "Okafwhile", "Salvatore", "Keita", "Romano", "Villalobos",
+    "Beltran", "Haas", "Okoro", "Salvatore", "Keita", "Romano", "Villalobos",
 )
 _EMAIL_DOMAINS = ("gmail.com", "outlook.com", "yahoo.com", "icloud.com", "proton.me")
 # Real US area codes; 555 is deliberately absent (it is a placeholder tell).
