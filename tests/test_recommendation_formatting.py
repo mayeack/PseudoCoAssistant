@@ -262,6 +262,29 @@ for key, cfg in THEMES.items():
     check(f"{key}: emergency banner is inert to the POST-chain detectors", not hits, str(hits))
 
 
+# ---- the seek_care_if heading speaks the active theme, not medicine ----
+# It was hardcoded "Seek Professional Care If", so a budgeting or conveyor-jam
+# answer told the user when to seek care. medadvice keeps those exact words (the
+# workshop's Healthcare screenshots show them); every other structured theme
+# names its own escalation.
+med_heading = "**Seek Professional Care If:**"
+check("medadvice: the escalation heading is unchanged",
+      med_heading in content_engine._format_recommendation(emergency, "medadvice"))
+for key, cfg in THEMES.items():
+    if cfg.conversational:
+        continue
+    heading = cfg.guardrails.escalation_heading
+    out = content_engine._format_recommendation(dict(emergency, severity="MEDIUM"), key)
+    check(f"{key}: the seek_care_if list sits under the theme's own heading",
+          f"**{heading}:**\n• The deadline is within 48 hours." in out, out)
+    if key != "medadvice":
+        check(f"{key}: defines its own escalation heading, with no medical wording",
+              heading != DEFAULT_GUARDRAIL_COPY.escalation_heading
+              and "care" not in heading.lower() and med_heading not in out, repr(heading))
+    hits = detector_hits(heading, key)
+    check(f"{key}: escalation heading is inert to the POST-chain detectors", not hits, str(hits))
+
+
 # Both call sites pass the turn's theme. The legacy fallback engine is driven
 # here with a fake AI client and the governance log stubbed, so nothing is
 # written; the agentic synthesizer (both blueprint cores) is covered in

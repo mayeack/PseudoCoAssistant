@@ -80,6 +80,7 @@ GUARDRAILS = GuardrailCopy(
         "URGENT TAX MATTER: Contact a licensed tax professional or the IRS "
         "immediately."
     ),
+    escalation_heading="Talk to a Tax Professional If",
 )
 
 THRASH = build_profile("tax-filing-mcp", "tax_return")

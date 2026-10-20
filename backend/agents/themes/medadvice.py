@@ -82,6 +82,7 @@ GUARDRAILS = GuardrailCopy(
     emergency_banner=(
         "EMERGENCY: Call 911 or go to the nearest emergency room immediately."
     ),
+    escalation_heading="Seek Professional Care If",
 )
 
 THRASH = build_profile("patient-records-mcp", "patient_record")

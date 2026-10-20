@@ -77,6 +77,7 @@ GUARDRAILS = GuardrailCopy(
         "FINANCIAL EMERGENCY: Contact your financial institution or a licensed "
         "financial advisor immediately."
     ),
+    escalation_heading="Talk to a Licensed Financial Advisor If",
 )
 
 THRASH = build_profile("portfolio-mcp", "portfolio_record")
