@@ -81,6 +81,12 @@ GUARDRAILS = GuardrailCopy(
         "administrator immediately."
     ),
     escalation_heading="Contact HR or Your Plan Administrator If",
+    fallback_guidance=(
+        "Review your plan documents and benefits summary.",
+        "Note any enrollment or claim deadlines that apply.",
+        "Contact HR or your plan administrator if you're unsure.",
+    ),
+    fallback_escalation="An enrollment or claim deadline is close",
 )
 
 THRASH = build_profile("benefits-enrollment-mcp", "benefits_case")

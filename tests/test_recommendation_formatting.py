@@ -285,13 +285,52 @@ for key, cfg in THEMES.items():
     check(f"{key}: escalation heading is inert to the POST-chain detectors", not hits, str(hits))
 
 
+# ---- the fallback answer speaks the active theme, not medicine ----
+# When the model's reply cannot be parsed, the app writes the answer itself. It
+# used to be cold-and-flu advice in every theme. medadvice keeps its full
+# fallback word for word; a partly parsed answer now reuses that first line
+# instead of a separate "Rest, stay hydrated, and monitor your symptoms."
+COLD_AND_FLU = ("hydrated", "symptom", "healthcare", "over-the-counter", "remed")
+garbage = "Sorry, I can't produce JSON right now."
+med_fb = RecommendationEngine._parse_recommendation(garbage, False)
+check("no theme: the fallback is medadvice's, unchanged",
+      med_fb["guidance"] == [
+          "Rest and stay hydrated, and monitor how you feel.",
+          "Over-the-counter remedies may help \u2014 follow the label instructions.",
+          "Contact a healthcare professional if you're unsure or symptoms change.",
+      ] and med_fb["seek_care_if"] == ["Symptoms persist or worsen"], med_fb)
+for key, cfg in THEMES.items():
+    if cfg.conversational:
+        continue
+    copy = cfg.guardrails
+    fb = RecommendationEngine._parse_recommendation(garbage, False, key)
+    check(f"{key}: an unparseable answer falls back to the theme's own guidance",
+          fb["guidance"] == list(copy.fallback_guidance)
+          and fb["seek_care_if"] == [copy.fallback_escalation], fb)
+    partial = RecommendationEngine._parse_recommendation('{"assessment": "Partly parsed.", "guid', False, key)
+    check(f"{key}: a partly parsed answer fills the gaps from the theme's copy",
+          partial["assessment"] == "Partly parsed."
+          and partial["guidance"] == [copy.fallback_guidance[0]]
+          and partial["seek_care_if"] == [copy.fallback_escalation], partial)
+    out = content_engine._format_recommendation(fb, key)
+    if key != "medadvice":
+        tells = [t for t in COLD_AND_FLU if t in out.lower()]
+        check(f"{key}: the fallback answer carries no cold-and-flu copy",
+              not tells and copy.fallback_guidance != DEFAULT_GUARDRAIL_COPY.fallback_guidance, str(tells))
+    for line in copy.fallback_guidance + (copy.fallback_escalation,):
+        hits = detector_hits(line, key)
+        check(f"{key}: fallback line is inert to the POST-chain detectors: {line[:40]}…", not hits, str(hits))
+
+
 # Both call sites pass the turn's theme. The legacy fallback engine is driven
 # here with a fake AI client and the governance log stubbed, so nothing is
 # written; the agentic synthesizer (both blueprint cores) is covered in
 # tests/test_multi_agent.py.
 class _FakeAIClient:
+    content = json.dumps(emergency)
+
     def create_message(self, **_kw):
-        return SimpleNamespace(content=json.dumps(emergency), id="r", model="fake-model",
+        return SimpleNamespace(content=self.content, id="r", model="fake-model",
                                input_tokens=1, output_tokens=1, stop_reason="end_turn")
 
 
@@ -310,11 +349,23 @@ try:
         force_toxic_injection=False, force_hallucination_injection=False,
         force_boundary_injection=False,
     )["message"]
+    # An unparseable reply on the same call site falls back in the theme's words.
+    legacy._ai_client.content = garbage
+    legacy_fb = legacy._generate_recommendation(
+        "S-fallback", "R-fallback", "T-fallback", _lien, [{"role": "user", "content": _lien}],
+        time.time(), None, theme="taxadvice", force_pii_injection=False,
+        force_toxic_injection=False, force_hallucination_injection=False,
+        force_boundary_injection=False,
+    )["message"]
 finally:
     for _n, _fn in _saved_log.items():
         setattr(governance_logger, _n, _fn)
 check("legacy engine: a tax EMERGENCY answer opens with the tax banner",
       legacy_msg.startswith(banner_line(THEMES["taxadvice"].guardrails.emergency_banner)), legacy_msg)
+check("legacy engine: an unparseable tax answer falls back to the tax copy, not cold-and-flu advice",
+      THEMES["taxadvice"].guardrails.fallback_guidance[0] in legacy_fb
+      and THEMES["taxadvice"].guardrails.fallback_escalation in legacy_fb
+      and not [t for t in COLD_AND_FLU if t in legacy_fb.lower()], legacy_fb)
 check("legacy engine: a tax EMERGENCY answer carries no 911 / emergency-room copy",
       not medical_tells(legacy_msg), legacy_msg)
 

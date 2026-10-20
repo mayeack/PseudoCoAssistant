@@ -81,6 +81,12 @@ GUARDRAILS = GuardrailCopy(
         "service immediately."
     ),
     escalation_heading="Talk to an Attorney If",
+    fallback_guidance=(
+        "Write down the key facts and dates while they are fresh.",
+        "Keep copies of any documents or notices you received.",
+        "Contact a licensed attorney or legal aid if you're unsure.",
+    ),
+    fallback_escalation="A court date, filing deadline or legal notice is involved",
 )
 
 THRASH = build_profile("case-law-mcp", "case_file")

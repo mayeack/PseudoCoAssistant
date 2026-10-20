@@ -100,6 +100,12 @@ GUARDRAILS = GuardrailCopy(
         "and the plant emergency response team immediately."
     ),
     escalation_heading="Escalate to a Supervisor or EHS If",
+    fallback_guidance=(
+        "Stop and make the equipment safe before you investigate.",
+        "Follow your site's lockout/tagout and jam-clearing procedures.",
+        "Escalate to your supervisor or maintenance lead if you're unsure.",
+    ),
+    fallback_escalation="A safety device is damaged or the fault keeps coming back",
 )
 
 THRASH = build_profile("mes-mcp", "work_order")

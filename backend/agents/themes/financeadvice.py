@@ -78,6 +78,12 @@ GUARDRAILS = GuardrailCopy(
         "financial advisor immediately."
     ),
     escalation_heading="Talk to a Licensed Financial Advisor If",
+    fallback_guidance=(
+        "List your income, expenses and debts to see where you stand.",
+        "Keep an emergency fund before taking on new risk.",
+        "Talk to a licensed financial advisor if you're unsure.",
+    ),
+    fallback_escalation="You're facing financial hardship or a large decision",
 )
 
 THRASH = build_profile("portfolio-mcp", "portfolio_record")

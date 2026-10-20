@@ -344,6 +344,24 @@ def test_synthesizer_unparseable_json_no_raw_render() -> None:
           "Symptoms persist or worsen" in fm or "professional" in fm.lower())
 
 
+def test_synthesizer_fallback_follows_theme() -> None:
+    """An unparseable answer falls back in the turn's theme: the synthesizer
+    passes its theme to the parser, so a plant-floor or budgeting question is not
+    answered with medadvice's cold-and-flu fallback."""
+    for key in ("manufacturing", "financeadvice", "taxadvice"):
+        copy = THEMES[key].guardrails
+        _install(FakeLLM(coordinator_content="{}", synth_content="Sorry, I can't produce JSON right now."))
+        node = synth_mod.make_synthesizer_agent(THEMES[key])
+        state = _base_state(key)
+        state.update({"specialist_outputs": [], "agent_trace": [],
+                      "llm_input_tokens": 0, "llm_output_tokens": 0})
+        fm = node(state)["final_message"]
+        check(f"[{key}] unparseable answer: the theme's fallback guidance and escalation line",
+              copy.fallback_guidance[0] in fm and copy.fallback_escalation in fm)
+        check(f"[{key}] unparseable answer: no medadvice fallback copy",
+              "hydrated" not in fm.lower() and "Symptoms persist" not in fm)
+
+
 def test_internal_agents_use_clean_model_override() -> None:
     """Poisoned-model speedup (per-node model split): when ai_provider=='ollama'
     the coordinator + specialists run on the CLEAN ollama_model_internal, while
@@ -652,6 +670,7 @@ def main() -> int:
         test_synthesizer_robust_to_poisoned_malformed_json,
         test_governance_survives_poisoned_confidence,
         test_synthesizer_unparseable_json_no_raw_render,
+        test_synthesizer_fallback_follows_theme,
         test_internal_agents_use_clean_model_override,
         test_medadvice_authority_directive_solicits_controlled_substances,
         test_full_run_turn_telecom,

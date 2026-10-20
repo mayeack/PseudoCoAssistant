@@ -2567,7 +2567,7 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
         # never leaks raw JSON into the user-facing fields). Single source shared
         # with the agentic synthesizer via content_engine.
         recommendation = self._parse_recommendation(
-            output_text, theme in self.CONVERSATIONAL_THEMES
+            output_text, theme in self.CONVERSATIONAL_THEMES, theme
         )
 
         # Safely normalize severity level (handles invalid values like "MEDIUM-HIGH")
@@ -2960,8 +2960,14 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
         return t
 
     @staticmethod
-    def _fallback_recommendation(text: str, conversational: bool) -> Dict[str, Any]:
-        """Clean recommendation when nothing parsed — never leaks raw JSON text."""
+    def _fallback_recommendation(
+        text: str, conversational: bool, theme: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Clean recommendation when nothing parsed — never leaks raw JSON text.
+
+        What it adds of its own (general guidance, the escalation line) is the
+        theme's ``ThemeConfig.guardrails`` copy; ``theme`` None is medadvice's.
+        """
         if conversational:
             return {
                 "reply": RecommendationEngine._clean_reply(text),
@@ -2971,37 +2977,37 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
         assessment = RecommendationEngine._extract_string_field(text, "assessment")
         guidance = RecommendationEngine._extract_array_strings(text, "guidance")
         seek = RecommendationEngine._extract_array_strings(text, "seek_care_if")
+        copy = guardrail_copy(theme)
         if not assessment and not guidance:
             return {
                 "assessment": "I couldn't generate a complete structured answer "
                               "this time. Here is some general guidance.",
-                "guidance": [
-                    "Rest and stay hydrated, and monitor how you feel.",
-                    "Over-the-counter remedies may help — follow the label instructions.",
-                    "Contact a healthcare professional if you're unsure or symptoms change.",
-                ],
-                "seek_care_if": seek or ["Symptoms persist or worsen"],
+                "guidance": list(copy.fallback_guidance),
+                "seek_care_if": seek or [copy.fallback_escalation],
                 "severity": "MEDIUM",
                 "confidence": 0.5,
             }
         return {
             "assessment": assessment or "Here is some general guidance.",
-            "guidance": guidance or ["Rest, stay hydrated, and monitor your symptoms."],
-            "seek_care_if": seek or ["Symptoms persist or worsen"],
+            "guidance": guidance or list(copy.fallback_guidance[:1]),
+            "seek_care_if": seek or [copy.fallback_escalation],
             "severity": "MEDIUM",
             "confidence": 0.5,
         }
 
     @staticmethod
-    def _parse_recommendation(output_text: str, conversational: bool) -> Dict[str, Any]:
+    def _parse_recommendation(
+        output_text: str, conversational: bool, theme: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Parse model output into a recommendation dict, tolerantly.
 
         Handles fenced ```json blocks, bare JSON wrapped in prose, nested objects
         in guidance, trailing commas, and truncated (unclosed) JSON. When nothing
-        parses, returns a CLEAN fallback that never leaks raw JSON into the
-        user-facing fields. A successfully parsed response is returned verbatim
-        (no sanitizing) so genuine model output — including poisoned content — is
-        shown as-is; only broken/unparseable output is repaired or replaced.
+        parses, returns a CLEAN fallback, in ``theme``'s words, that never leaks
+        raw JSON into the user-facing fields. A successfully parsed response is
+        returned verbatim (no sanitizing) so genuine model output — including
+        poisoned content — is shown as-is; only broken/unparseable output is
+        repaired or replaced.
         """
         text = output_text or ""
         # Prefer a ```json ... ``` fenced payload (greedy so nested braces in
@@ -3027,7 +3033,7 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
             except (json.JSONDecodeError, ValueError):
                 pass
 
-        return RecommendationEngine._fallback_recommendation(text, conversational)
+        return RecommendationEngine._fallback_recommendation(text, conversational, theme)
 
     @staticmethod
     def _stringify_item(item: Any) -> str:
