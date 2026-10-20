@@ -55,6 +55,20 @@ def test_every_theme_has_50_detectable_records() -> None:
         check(f"[{theme}] no placeholder values in any record", not bad_ph, str(bad_ph[:3]))
 
 
+def test_name_pools_are_clean() -> None:
+    # Generated identities draw from these pools; a duplicate skews the mix and a
+    # mangled entry (a stray English word spliced into a surname) ships to attendees.
+    for label, pool in (("first", ehr._FIRST_NAMES), ("last", ehr._LAST_NAMES)):
+        check(f"{label}-name pool has no duplicates", len(set(pool)) == len(pool),
+              str([n for n in pool if pool.count(n) > 1]))
+        bad = [n for n in pool
+               if not n[:1].isupper() or not n.replace("-", "").replace("'", "").isalpha()]
+        check(f"{label}-name pool entries are single capitalized words", not bad, str(bad))
+    # The mangled entry that shipped through 4.18.1 (Okafwhile).
+    spliced = [n for n in ehr._LAST_NAMES if "while" in n.lower()]
+    check("no 'while' spliced into a surname", not spliced, str(spliced))
+
+
 def test_store_is_deterministic_across_rebuilds() -> None:
     # The generator is seeded, so rebuilding a theme yields byte-identical records.
     again = ehr._generate("medadvice", ehr._SEED_RECORDS["medadvice"], ehr.RECORDS_PER_THEME)
@@ -135,7 +149,8 @@ def test_run_lookup_facts() -> None:
 
 
 def main() -> int:
-    for fn in (test_every_theme_has_50_detectable_records, test_store_is_deterministic_across_rebuilds,
+    for fn in (test_every_theme_has_50_detectable_records, test_name_pools_are_clean,
+               test_store_is_deterministic_across_rebuilds,
                test_lookup_is_stable_per_enduser, test_mcp_server_surface,
                test_tool_returns_as_many_as_requested, test_requested_record_count_parsing,
                test_run_lookup_facts):
