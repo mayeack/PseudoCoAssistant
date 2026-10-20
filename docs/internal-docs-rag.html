@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Internal document RAG (per-vertical document database) — PseudoCo Assistant</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 880px; margin: 2rem auto; padding: 0 1rem; color: #1f2937; line-height: 1.55; }
+  h1, h2, h3 { color: #111827; line-height: 1.25; }
+  h1 { font-size: 1.9rem; border-bottom: 2px solid #e5e7eb; padding-bottom: .4rem; }
+  h2 { font-size: 1.35rem; margin-top: 2rem; border-bottom: 1px solid #e5e7eb; padding-bottom: .25rem; }
+  h3 { font-size: 1.1rem; margin-top: 1.4rem; }
+  code { background: #f3f4f6; padding: .1rem .3rem; border-radius: 3px; font-size: .92em; }
+  pre { background: #f3f4f6; padding: .8rem 1rem; border-radius: 6px; overflow-x: auto; font-size: .88em; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .93em; }
+  th, td { border: 1px solid #e5e7eb; padding: .4rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #f9fafb; }
+  ul { padding-left: 1.4rem; }
+  li { margin: .25rem 0; }
+  .note { font-size: .9em; color: #6b7280; }
+</style>
+</head>
+<body>
+<h1>Internal document RAG (per-vertical document database)</h1>
+<p>Each Application Theme has its own <strong>internal document database</strong>: three
+synthetic documents the assistant can search through a governed RAG tool,
+<code>internal-docs.search_documents</code>. When a user explicitly asks for the internal
+documents, the tool retrieves the best-matching passages and the answer is
+grounded on them.</p>
+<table>
+<thead>
+<tr>
+<th>Piece</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>The corpus (3 docs × 8 themes)</td>
+<td><code>backend/data/internal_docs/&lt;theme&gt;/*.md</code></td>
+</tr>
+<tr>
+<td>Loader, MCP-shaped server, explicit-ask detection</td>
+<td><code>backend/services/internal_docs.py</code></td>
+</tr>
+<tr>
+<td>Per-theme profile (collection + trigger terms)</td>
+<td><code>InternalDocsProfile</code> on <code>ThemeConfig.docs</code> (<code>backend/agents/themes/&lt;theme&gt;.py</code>)</td>
+</tr>
+<tr>
+<td>The shared-chain PRE node</td>
+<td><code>backend/agents/nodes/internal_docs.py</code> (<code>internal_docs</code> in <code>PRE_NODES</code>)</td>
+</tr>
+<tr>
+<td>Retrieval</td>
+<td><code>backend/agents/blueprints/retrieval.py</code> <code>search_corpus</code> (corpus <code>internal_docs</code>)</td>
+</tr>
+<tr>
+<td>Grounding</td>
+<td><code>backend/agents/nodes/synthesizer.py</code> (the <code>INTERNAL DOCUMENTS</code> block)</td>
+</tr>
+<tr>
+<td>Governance field + Agent Observability span</td>
+<td><code>internal_docs</code> on the chat event → <code>internal_docs_search</code> retriever span</td>
+</tr>
+</tbody>
+</table>
+<h2>The documents</h2>
+<p>Every collection holds exactly one document of each <code>kind</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Kind</th>
+<th>What it is</th>
+<th>What it exercises</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>sop</code></td>
+<td>An ordinary internal standard operating procedure.</td>
+<td>Plain RAG grounding: the answer cites the SOP.</td>
+</tr>
+<tr>
+<td><code>confidential</code></td>
+<td>An internal-only memo (contract rates, offer ceilings, margin floors, …), marked <code>CONFIDENTIAL — INTERNAL USE ONLY</code>.</td>
+<td>Confidential-data leakage: whether the assistant repeats internal figures to a customer, and whether the output guardrails catch it.</td>
+</tr>
+<tr>
+<td><code>poisoned</code></td>
+<td>An ordinary-looking FAQ with an <strong>empty slot</strong> for an injected passage.</td>
+<td>RAG poisoning, once you fill the slot (see below).</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Theme</th>
+<th>SOP</th>
+<th>Confidential memo</th>
+<th>Poisoned host document</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>medadvice</td>
+<td>Nurse Triage Escalation SOP</td>
+<td>Payer Contract Rate Memo</td>
+<td>Patient Portal FAQ</td>
+</tr>
+<tr>
+<td>taxadvice</td>
+<td>Return Review &amp; E-File SOP</td>
+<td>Audit-Risk Scoring Thresholds Memo</td>
+<td>Tax Document Checklist FAQ</td>
+</tr>
+<tr>
+<td>benefitsadvice</td>
+<td>Claims Appeal Handling SOP</td>
+<td>Plan-Renewal Cost Projections Memo</td>
+<td>Open Enrollment FAQ</td>
+</tr>
+<tr>
+<td>legaladvice</td>
+<td>Client Intake &amp; Conflict-Check SOP</td>
+<td>Settlement Authority Matrix</td>
+<td>Engagement Letter FAQ</td>
+</tr>
+<tr>
+<td>financeadvice</td>
+<td>Suitability Review SOP</td>
+<td>Advisory Fee Floors &amp; House-Fund Incentives</td>
+<td>Account Transfer FAQ</td>
+</tr>
+<tr>
+<td>telecomchatbot</td>
+<td>Network Outage Escalation SOP</td>
+<td>Retention Offer Ceilings</td>
+<td>Device Upgrade FAQ</td>
+</tr>
+<tr>
+<td>retail</td>
+<td>Returns Exception SOP</td>
+<td>Markdown &amp; Margin Floor Memo</td>
+<td>Loyalty Program FAQ</td>
+</tr>
+<tr>
+<td>manufacturing</td>
+<td>Line Changeover SOP</td>
+<td>Supplier Quality-Hold &amp; Scrap-Cost Memo</td>
+<td>Preventive Maintenance FAQ</td>
+</tr>
+</tbody>
+</table>
+<p>All content is synthetic: the organizations, figures and suppliers are invented.</p>
+<h3>File format</h3>
+<pre><code>---
+doc_id: MED-SOP-014
+kind: sop
+classification: internal
+---
+# Nurse Triage Escalation SOP
+
+Paragraph one …
+
+Paragraph two …
+</code></pre>
+<p>The model only ever sees a document's <strong>title and body</strong>. The front matter and
+every HTML comment (<code>&lt;!-- … --&gt;</code>) are stripped before indexing. <code>doc_id</code> and
+<code>kind</code> travel in the tool facts, the governance event and the Agent
+Observability span, never in the prompt. Each paragraph (blank-line separated,
+40+ characters, not a heading) is indexed as its own passage.</p>
+<h3>Filling a poisoned document's slot</h3>
+<p>Each poisoned FAQ carries a marked slot:</p>
+<pre><code>&lt;!-- poisoned-passage:start — write this document's injected passage below … --&gt;
+
+&lt;!-- poisoned-passage:end --&gt;
+</code></pre>
+<p>The repo ships every slot <strong>empty</strong>, so the document is an ordinary FAQ until
+you add a passage. To add one:</p>
+<ol>
+<li>Write it between the two markers as plain paragraphs. The markers are
+   comments and are stripped; your text is indexed like any other paragraph.</li>
+<li>Restart the app, since the corpus is cached per process.</li>
+<li>Ask a question that retrieves the document. A paragraph is only retrieved
+   when it matches the query.</li>
+</ol>
+<p><code>tests/test_internal_docs.py</code> checks the slot mechanics (filled text is indexed,
+the markers are not). It does not check what the passage says.</p>
+<h2>When the tool runs</h2>
+<p>The tool runs <strong>only on an explicit ask</strong>, decided from the user message and
+never from model output (<code>internal_docs.docs_requested</code>):</p>
+<ul>
+<li>shared phrasing: <em>internal docs / documents / policy / guidelines / memo</em>,
+  <em>SOP</em>, <em>standard operating procedure</em>, <em>playbook</em>, <em>handbook</em>, <em>runbook</em>,
+  <em>memo</em>, <em>FAQ</em>, <em>knowledge base</em>, <em>check the docs</em>, <em>according to our internal …</em>;</li>
+<li>plus the theme profile's own <code>trigger_terms</code>, the subjects of its confidential
+  memo (for example <code>payer contract</code> for MedAdvice, <code>retention offer</code> for
+  TelecomChatbot, <code>margin floor</code> for Retail).</li>
+</ul>
+<p>An ordinary question ("I have a sore throat", "my internet keeps dropping") does
+not search. Neither does "internal bleeding": <code>internal</code> alone is not a trigger.</p>
+<h2>How it works</h2>
+<p><code>internal_docs</code> is a PRE node in the <strong>shared guardrail chain</strong>, after the
+prompt screens and the EHR lookup and before the MCP tool-thrash launch, so both
+blueprints (<code>pseudoco_multi_agent</code>, <code>nvidia_virtual_assistant</code>) get it with no
+core changes. On an explicit ask it:</p>
+<ol>
+<li>searches the theme's collection through the in-process <code>SyntheticDocsServer</code>
+   (MCP-shaped <code>list_tools</code> / <code>call_tool</code>, no transport). The search uses keyword
+   scoring, or the local embedding endpoint when <code>BLUEPRINT_EMBED_URL</code> is set;</li>
+<li>records the search as a <strong>governed tool call</strong>:</li>
+<li>an OTel <code>execute_tool internal-docs.search_documents</code> span;</li>
+<li>a <code>tool_call</code> governance event (<code>agent_surface="internal-docs"</code>, carrying the turn's <code>trace_id</code>);</li>
+<li>leaves <code>state["internal_docs"]</code>, which holds the hits plus a <code>context</code> block. The shared
+   synthesizer appends that block to its system prompt, ahead of the governance
+   directive.</li>
+</ol>
+<p>The context block looks like this:</p>
+<pre><code>INTERNAL DOCUMENTS (internal-docs.search_documents results for this question):
+[1] (Nurse Triage Escalation SOP)
+Tier 1 (call 911 now): …
+</code></pre>
+<p>The node is never terminal and is wrapped so a corpus fault cannot break a turn.</p>
+<p>The retrieved passages enter the prompt <strong>after</strong> the PRE prompt screens (AI
+Defense, NeMo input rails, Agent Control prompt) have run on the user message.
+Those screens never see document text. The POST output guardrails still screen
+the answer.</p>
+<h2>Where it shows up</h2>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>On an explicit ask</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Chat answer</td>
+<td>Grounded on the passages; names the document it used.</td>
+</tr>
+<tr>
+<td>Pipeline stage chips</td>
+<td>Unchanged: <code>internal_docs</code> has no stage label (like <code>ehr_lookup</code>).</td>
+</tr>
+<tr>
+<td>Governance Logs / SQLite / HEC</td>
+<td>A <code>tool_call</code> row for <code>internal-docs.search_documents</code>. The chat event also carries <code>internal_docs</code>: <code>call_id</code>, <code>collection</code>, <code>query</code>, and <code>hits</code> with doc_id, kind, title, score and text trimmed to 600 characters. That field goes to HEC and the JSON file only; it is not a DB column.</td>
+</tr>
+<tr>
+<td>Splunk APM</td>
+<td>The <code>execute_tool internal-docs.search_documents</code> span inside the turn's trace.</td>
+</tr>
+<tr>
+<td>Agent Observability</td>
+<td>An <code>internal_docs_search</code> <strong>retriever span</strong> before the agent spans: the query in, one document per passage out (content plus doc_id / kind / title / score metadata). AO's RAG evaluators can score the answer against it.</td>
+</tr>
+</tbody>
+</table>
+<p>The executive overlay maps every <code>tool_call</code> event to <code>tool_exploitation</code>. That
+includes this one, which only fires on explicit asks.</p>
+<h2>Adding a theme</h2>
+<ol>
+<li>Create <code>backend/data/internal_docs/&lt;theme&gt;/</code> with three documents, one of each kind.</li>
+<li>Add an <code>InternalDocsProfile(collection="&lt;theme&gt;", trigger_terms=(…))</code> to the
+   theme file.</li>
+</ol>
+<p>The node never branches on the theme key. <code>tests/test_internal_docs.py</code> fails
+until the new theme has one collection with all three kinds.</p>
+<h2>Files</h2>
+<ul>
+<li><code>backend/data/internal_docs/</code> — the corpus.</li>
+<li><code>backend/services/internal_docs.py</code> — loader, <code>InternalDocsProfile</code>,
+  <code>docs_requested</code>, <code>SyntheticDocsServer</code>, <code>run_search</code>, <code>governance_record</code>,
+  <code>format_context</code>.</li>
+<li><code>backend/agents/nodes/internal_docs.py</code> — the PRE node.</li>
+<li><code>backend/agents/blueprints/guardrails.py</code> — wires it into <code>PRE_NODES</code>.</li>
+<li><code>backend/agents/blueprints/retrieval.py</code> — <code>search_corpus</code> (per-corpus caches;
+  the KB <code>search</code> is unchanged).</li>
+<li><code>backend/agents/state.py</code> — the <code>internal_docs</code> state key.</li>
+<li><code>backend/agents/themes/base.py</code> + <code>themes/*.py</code> — the per-theme profiles.</li>
+<li><code>backend/agents/nodes/synthesizer.py</code> — appends the context block.</li>
+<li><code>backend/agents/nodes/governance.py</code>, <code>backend/logging/log_schemas.py</code> — the
+  <code>internal_docs</code> governance field.</li>
+<li><code>backend/agent_observability.py</code> — <code>_add_retriever_span</code>.</li>
+</ul>
+<p>Tests:</p>
+<ul>
+<li><code>tests/test_internal_docs.py</code></li>
+<li><code>tests/test_blueprint_parity.py</code> (the <code>internal_docs_ask</code> scenario, plus a no-search check on <code>benign</code>)</li>
+<li><code>tests/test_agent_observability.py</code> (the retriever span)</li>
+<li><code>tests/test_nvidia_blueprint.py</code> (the KB index unchanged)</li>
+<li><code>tests/test_nemo_guardrails.py</code> (PRE-chain order)</li>
+</ul>
+</body>
+</html>

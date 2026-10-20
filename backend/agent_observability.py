@@ -812,6 +812,8 @@ def _build_turn(lg, log_data: Dict[str, Any]) -> None:
 
     lg.add_workflow_span(input=inp, output=out, name=_ROOT_SPAN_NAME, metadata=meta,
                          created_at=turn_start, duration_ns=turn_ns)
+    # The internal-document search ran in the PRE chain, before generation.
+    _add_retriever_span(lg, log_data.get("internal_docs"), meta, turn_start)
     if agent_trace:
         _add_agent_spans(lg, agent_trace, inp, model, meta, turn_start)
     else:
@@ -844,6 +846,37 @@ def _add_agent_spans(lg, agent_trace, inp: str, model: str, meta: Dict[str, Any]
         lg.conclude(output=agent_out, duration_ns=dur_ns)      # pop the agent span
         if cursor is not None and dur_ns:
             cursor = cursor + timedelta(microseconds=dur_ns / 1000)
+
+
+_RETRIEVER_SPAN_NAME = "internal_docs_search"
+
+
+def _add_retriever_span(lg, record: Any, meta: Dict[str, Any], turn_start) -> None:
+    """Rebuild the shared chain's internal-document search
+    (backend/services/internal_docs.py, ``internal_docs`` on the governance event)
+    as one retriever span under the workflow: the query in, one document per
+    retrieved passage out (content + doc_id / kind / title / score), so Agent
+    Observability shows what the answer was grounded on and its RAG evaluators can
+    score against it. A leaf (no ``conclude``). A logger / SDK without
+    ``add_retriever_span``, or a turn with no search, adds nothing."""
+    if not isinstance(record, dict) or not record.get("call_id") or not hasattr(lg, "add_retriever_span"):
+        return
+    hits = [h for h in record.get("hits") or [] if isinstance(h, dict)]
+    documents = [{"content": str(h.get("text") or ""),
+                  "metadata": {k: _coerce(h.get(k)) for k in ("doc_id", "kind", "title", "score", "method")
+                               if h.get(k) is not None}}
+                 for h in hits]
+    span_meta = {k: _coerce(v) for k, v in {
+        **meta,
+        "internal_docs_tool": record.get("tool_name"),
+        "internal_docs_call_id": record.get("call_id"),
+        "internal_docs_collection": record.get("collection"),
+        "internal_docs_hits": len(hits),
+        "internal_docs_doc_ids": ",".join(dict.fromkeys(str(h.get("doc_id")) for h in hits if h.get("doc_id"))),
+    }.items() if v is not None}
+    lg.add_retriever_span(input=str(record.get("query") or ""), output=documents or None,
+                          name=_RETRIEVER_SPAN_NAME, metadata=span_meta, created_at=turn_start,
+                          duration_ns=_ms_to_ns(record.get("duration_ms")) or _DEFAULT_STEP_NS)
 
 
 _MCP_BROKER_NAME = "mcp_tool_broker"

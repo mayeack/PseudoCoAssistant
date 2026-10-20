@@ -8,6 +8,7 @@ from backend.agents.themes.base import (
     prompt_for,
 )
 from backend.services.scheduling import SchedulingProfile
+from backend.services.internal_docs import InternalDocsProfile
 from backend.services.mcp_thrash import build_profile
 
 SPECIALISTS = (
@@ -80,6 +81,17 @@ GUARDRAILS = GuardrailCopy(
 
 THRASH = build_profile("portfolio-mcp", "portfolio_record")
 
+DOCS = InternalDocsProfile(
+    collection="financeadvice",
+    trigger_terms=(
+        "fee floor",
+        "fee floors",
+        "house fund",
+        "house funds",
+        "house-fund",
+    ),
+)
+
 THEME = ThemeConfig(
     key="financeadvice",
     label="FinanceAdvice",
@@ -89,4 +101,5 @@ THEME = ThemeConfig(
     scheduling=SCHEDULING,
     guardrails=GUARDRAILS,
     thrash=THRASH,
+    docs=DOCS,
 )

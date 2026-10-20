@@ -120,6 +120,7 @@ class _FakeLogger:
     def add_llm_span(self, **k): self._rec("add_llm_span", k)
     def add_control_span(self, **k): self._rec("add_control_span", k)
     def add_tool_span(self, **k): self._rec("add_tool_span", k)
+    def add_retriever_span(self, **k): self._rec("add_retriever_span", k)
     def conclude(self, **k): self._rec("conclude", k)
 
     def flush(self, on_error=None):
@@ -438,6 +439,39 @@ check("every tool span carries the governance metadata and marks non-convergence
 fake = _FakeLogger()
 ao._build_turn(fake, _turn())
 check("additive: a turn without tool_thrash emits no tool span", "add_tool_span" not in _names(fake.calls))
+
+# The internal-document search (internal_docs on the governance event) becomes ONE
+# retriever span under the workflow, ahead of the agent spans (the search ran in
+# the PRE chain): the query in, one document per retrieved passage out.
+_DOCS = {"tool_name": "internal-docs.search_documents", "call_id": "docs-abc123", "collection": "medadvice",
+         "query": "what does the SOP say about escalation", "duration_ms": 52.0,
+         "hits": [{"doc_id": "MED-SOP-014", "kind": "sop", "title": "Nurse Triage Escalation SOP",
+                   "score": 0.9, "method": "keyword", "text": "Tier 1 (call 911 now): chest pain"},
+                  {"doc_id": "MED-MEMO-007", "kind": "confidential", "title": "Payer Contract Rate Memo",
+                   "score": 0.4, "method": "keyword", "text": "CONFIDENTIAL — INTERNAL USE ONLY."}]}
+fake = _FakeLogger()
+ao._build_turn(fake, _turn())
+_baseline = _names(fake.calls)
+fake = _FakeLogger()
+ao._build_turn(fake, dict(_turn(), internal_docs=_DOCS))
+_seq = _names(fake.calls)
+_ret = [c[1] for c in fake.calls if c[0] == "add_retriever_span"]
+check("internal_docs -> one internal_docs_search retriever span carrying the query",
+      len(_ret) == 1 and _ret[0].get("name") == "internal_docs_search"
+      and _ret[0].get("input") == "what does the SOP say about escalation")
+check("one document per retrieved passage: content + doc_id / kind / title metadata",
+      [d["metadata"]["doc_id"] for d in _ret[0]["output"]] == ["MED-SOP-014", "MED-MEMO-007"]
+      and _ret[0]["output"][1]["metadata"]["kind"] == "confidential"
+      and _ret[0]["output"][0]["content"].startswith("Tier 1"))
+check("the retriever span precedes the agent spans and starts at the turn start",
+      _seq.index("add_retriever_span") < _seq.index("add_agent_span") and _ret[0].get("created_at") == _t0)
+check("the retriever span carries the governance metadata, the doc ids and the search duration",
+      _ret[0]["metadata"].get("pii_detected") is True
+      and _ret[0]["metadata"].get("internal_docs_doc_ids") == "MED-SOP-014,MED-MEMO-007"
+      and _ret[0].get("duration_ns") == 52_000_000)
+check("a retriever span is a leaf: the conclude count is unchanged",
+      _seq.count("conclude") == _baseline.count("conclude"))
+check("additive: a turn without internal_docs emits no retriever span", "add_retriever_span" not in _baseline)
 
 fake = _FakeLogger()
 fake.fail_start = True

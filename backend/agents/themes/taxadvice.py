@@ -8,6 +8,7 @@ from backend.agents.themes.base import (
     prompt_for,
 )
 from backend.services.scheduling import SchedulingProfile
+from backend.services.internal_docs import InternalDocsProfile
 from backend.services.mcp_thrash import build_profile
 
 SPECIALISTS = (
@@ -83,6 +84,16 @@ GUARDRAILS = GuardrailCopy(
 
 THRASH = build_profile("tax-filing-mcp", "tax_return")
 
+DOCS = InternalDocsProfile(
+    collection="taxadvice",
+    trigger_terms=(
+        "audit-risk score",
+        "audit risk score",
+        "risk scoring",
+        "audit-defense plan",
+    ),
+)
+
 THEME = ThemeConfig(
     key="taxadvice",
     label="TaxAdvice",
@@ -92,4 +103,5 @@ THEME = ThemeConfig(
     scheduling=SCHEDULING,
     guardrails=GUARDRAILS,
     thrash=THRASH,
+    docs=DOCS,
 )

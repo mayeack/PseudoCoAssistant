@@ -99,6 +99,11 @@ def test_records_and_retrieval() -> None:
     hits = retrieval.search("telecomchatbot", "my internet keeps dropping every evening", k=2)
     check("keyword retrieval finds the outage article first", hits and hits[0]["title"] == "Internet outage troubleshooting", str([h["title"] for h in hits]))
     check("retrieval reports its method (no embedding endpoint configured)", hits and hits[0]["method"] == "keyword")
+    check("KB hits keep their shape (no doc_id / kind from the internal-docs corpus)",
+          hits and set(hits[0]) == {"title", "text", "score", "method"}, str(hits[0] if hits else None))
+    check("the KB index is separate from the internal document database",
+          not any(h["title"] == "Retention Offer Ceilings"
+                  for h in retrieval.search("telecomchatbot", "retention offer ceilings tier 2 desk", k=5)))
     check("empty query -> no hits, no error", retrieval.search("medadvice", "   ") == [])
     check("unknown theme -> no hits, no error", retrieval.search("nope", "anything") == [])
     check("no embedding endpoint -> keyword mode", retrieval.embed_endpoint() is None)

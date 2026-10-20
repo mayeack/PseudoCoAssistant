@@ -8,6 +8,7 @@ from backend.agents.themes.base import (
     prompt_for,
 )
 from backend.services.scheduling import SchedulingProfile
+from backend.services.internal_docs import InternalDocsProfile
 from backend.services.mcp_thrash import build_profile
 
 SPECIALISTS = (
@@ -85,6 +86,16 @@ GUARDRAILS = GuardrailCopy(
 
 THRASH = build_profile("patient-records-mcp", "patient_record")
 
+DOCS = InternalDocsProfile(
+    collection="medadvice",
+    trigger_terms=(
+        "payer contract",
+        "contract rate",
+        "contract rates",
+        "triage protocol",
+    ),
+)
+
 THEME = ThemeConfig(
     key="medadvice",
     label="MedAdvice",
@@ -94,4 +105,5 @@ THEME = ThemeConfig(
     scheduling=SCHEDULING,
     guardrails=GUARDRAILS,
     thrash=THRASH,
+    docs=DOCS,
 )

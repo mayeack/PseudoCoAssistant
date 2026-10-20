@@ -1,13 +1,23 @@
-"""Knowledge retrieval for the NVIDIA AI Virtual Assistant blueprint.
+"""In-process retrieval over PseudoCo Assistant's synthetic per-theme corpora.
+
+Two corpora share this index, each cached per (corpus, theme):
+
+- ``kb`` — the NVIDIA AI Virtual Assistant blueprint's knowledge articles
+  (``blueprint_data/<theme>/docs``), searched by its ``retrieve_knowledge`` tool
+  (:func:`search`);
+- ``internal_docs`` — each vertical's internal document database
+  (``backend/data/internal_docs/<theme>``), searched by the shared-chain
+  ``internal-docs.search_documents`` tool (``backend/services/internal_docs.py``,
+  through :func:`search_corpus`).
 
 The reference blueprint's unstructured retriever embeds product docs with a
 NeMo Retriever embedding NIM and searches Milvus. PseudoCo Assistant keeps the feature
-without the infrastructure: an in-process index over the theme's synthetic
-knowledge articles (``blueprint_data/<theme>/docs``), embedded through a LOCAL
-embedding endpoint when one is configured (``blueprint_embed_url`` — e.g. a
-``llama-nemotron-embed-1b-v2`` NIM on this host, OpenAI-compatible
-``/v1/embeddings``) and otherwise scored by keyword overlap. The fallback keeps
-the blueprint functional — and deterministic in tests — with no model at all.
+without the infrastructure: an in-process index over the synthetic documents,
+embedded through a LOCAL embedding endpoint when one is configured
+(``blueprint_embed_url`` — e.g. a ``llama-nemotron-embed-1b-v2`` NIM on this
+host, OpenAI-compatible ``/v1/embeddings``) and otherwise scored by keyword
+overlap. The fallback keeps retrieval functional — and deterministic in tests —
+with no model at all.
 """
 from __future__ import annotations
 
@@ -15,7 +25,7 @@ import logging
 import math
 import re
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from backend.agents.blueprints import data
 from backend.config import settings
@@ -30,8 +40,13 @@ _STOP = {
 }
 
 _lock = threading.Lock()
-_chunks: Dict[str, List[Dict[str, Any]]] = {}
-_vectors: Dict[str, Optional[List[List[float]]]] = {}
+# Keyed by (corpus, theme): the KB articles and the internal documents of one
+# theme are separate indexes.
+_chunks: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+_vectors: Dict[Tuple[str, str], Optional[List[List[float]]]] = {}
+# Per-document identity a corpus may carry (the internal documents do; the KB
+# articles do not), copied onto each chunk and hit.
+_DOC_META = ("doc_id", "kind")
 
 
 def _stem(token: str) -> str:
@@ -47,22 +62,23 @@ def _tokens(text: str) -> List[str]:
     return [_stem(t) for t in _WORD_RE.findall((text or "").lower()) if t not in _STOP and len(t) > 1]
 
 
-def _chunk_docs(theme: str) -> List[Dict[str, Any]]:
-    """Paragraph-level chunks with their article title."""
+def _chunk_docs(key: Tuple[str, str], load: Callable[[], List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Paragraph-level chunks with their article title (and doc identity)."""
     with _lock:
-        if theme in _chunks:
-            return _chunks[theme]
+        if key in _chunks:
+            return _chunks[key]
     out: List[Dict[str, Any]] = []
-    for doc in data.docs_for(theme):
+    for doc in load():
+        meta = {m: doc[m] for m in _DOC_META if doc.get(m)}
         for para in re.split(r"\n\s*\n", doc["text"]):
             para = para.strip()
             if len(para) < 40 or para.startswith("#"):
                 continue
             # The article title is part of what a paragraph is "about".
             out.append({"title": doc["title"], "text": para,
-                        "tokens": set(_tokens(para)) | set(_tokens(doc["title"]))})
+                        "tokens": set(_tokens(para)) | set(_tokens(doc["title"])), **meta})
     with _lock:
-        _chunks[theme] = out
+        _chunks[key] = out
     return out
 
 
@@ -109,30 +125,42 @@ def _cosine(a: List[float], b: List[float]) -> float:
     return dot / (na * nb)
 
 
-def _vectors_for(theme: str, chunks: List[Dict[str, Any]]) -> Optional[List[List[float]]]:
+def _vectors_for(key: Tuple[str, str], chunks: List[Dict[str, Any]]) -> Optional[List[List[float]]]:
     with _lock:
-        if theme in _vectors:
-            return _vectors[theme]
+        if key in _vectors:
+            return _vectors[key]
     vecs = _embed([c["text"] for c in chunks]) if embed_endpoint() else None
     with _lock:
-        _vectors[theme] = vecs
+        _vectors[key] = vecs
     return vecs
 
 
 # ---------------------------------------------------------------- search
-def search(theme: str, query: str, k: int = 3) -> List[Dict[str, Any]]:
-    """Top-k knowledge chunks for a query: [{title, text, score, method}]."""
-    chunks = _chunk_docs(theme)
+def _hit(chunk: Dict[str, Any], score: float, method: str) -> Dict[str, Any]:
+    hit = {"title": chunk["title"], "text": chunk["text"], "score": round(score, 4), "method": method}
+    hit.update({m: chunk[m] for m in _DOC_META if m in chunk})
+    return hit
+
+
+def search_corpus(
+    corpus: str, theme: Optional[str], load: Callable[[], List[Dict[str, Any]]], query: str, k: int = 3,
+) -> List[Dict[str, Any]]:
+    """Top-k chunks of one corpus for a query: [{title, text, score, method}],
+    plus ``doc_id`` / ``kind`` when the corpus's documents carry them.
+
+    ``load`` returns the corpus's documents for ``theme`` ([{title, text, ...}]);
+    it runs once per (corpus, theme) and the chunks are cached."""
+    key = (corpus, theme or "")
+    chunks = _chunk_docs(key, load)
     if not chunks or not (query or "").strip():
         return []
-    vecs = _vectors_for(theme, chunks)
+    vecs = _vectors_for(key, chunks)
     if vecs:
         qv = _embed([query])
         if qv:
             scored = [(_cosine(qv[0], v), c) for v, c in zip(vecs, chunks)]
             scored.sort(key=lambda t: t[0], reverse=True)
-            return [{"title": c["title"], "text": c["text"], "score": round(s, 4), "method": "embedding"}
-                    for s, c in scored[:k] if s > 0]
+            return [_hit(c, s, "embedding") for s, c in scored[:k] if s > 0]
     q = set(_tokens(query))
     if not q:
         return []
@@ -142,8 +170,12 @@ def search(theme: str, query: str, k: int = 3) -> List[Dict[str, Any]]:
         if overlap:
             scored.append((overlap / math.sqrt(len(c["tokens"]) or 1), c))
     scored.sort(key=lambda t: t[0], reverse=True)
-    return [{"title": c["title"], "text": c["text"], "score": round(s, 4), "method": "keyword"}
-            for s, c in scored[:k]]
+    return [_hit(c, s, "keyword") for s, c in scored[:k]]
+
+
+def search(theme: str, query: str, k: int = 3) -> List[Dict[str, Any]]:
+    """Top-k knowledge chunks for a query: [{title, text, score, method}]."""
+    return search_corpus("kb", theme, lambda: data.docs_for(theme), query, k)
 
 
 def clear_cache() -> None:

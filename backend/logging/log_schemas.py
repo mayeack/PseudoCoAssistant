@@ -150,6 +150,13 @@ def create_governance_log(
         # dropped) when the toggle is off. Not a DB column — AO/HEC only, like
         # agent_trace.
         "tool_thrash": kwargs.get("tool_thrash"),
+        # Internal-document search (docs/internal-docs-rag.md): {tool_name, call_id,
+        # collection, query, duration_ms, hits: [{doc_id, kind, title, score,
+        # method, text (trimmed)}]} when the user explicitly asked for the internal
+        # documents this turn. The Agent Observability path rebuilds it as a
+        # retriever span; None (and dropped) otherwise. Not a DB column — AO/HEC
+        # only, like tool_thrash.
+        "internal_docs": kwargs.get("internal_docs"),
         "theme": kwargs.get("theme"),
         "severity": kwargs.get("severity"),
         "tool_name": kwargs.get("tool_name"),

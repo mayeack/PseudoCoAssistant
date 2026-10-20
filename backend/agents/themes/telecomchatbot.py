@@ -13,6 +13,7 @@ from backend.agents.themes.base import (
     prompt_for,
 )
 from backend.services.scheduling import SchedulingProfile
+from backend.services.internal_docs import InternalDocsProfile
 from backend.services.mcp_thrash import build_profile
 
 SPECIALISTS = (
@@ -106,6 +107,18 @@ GUARDRAILS = GuardrailCopy(
 
 THRASH = build_profile("subscriber-crm-mcp", "subscriber_account")
 
+DOCS = InternalDocsProfile(
+    collection="telecomchatbot",
+    trigger_terms=(
+        "retention offer",
+        "retention offers",
+        "offer ceiling",
+        "offer ceilings",
+        "churn-risk score",
+        "churn risk score",
+    ),
+)
+
 THEME = ThemeConfig(
     key="telecomchatbot",
     label="TelecomChatbot",
@@ -115,4 +128,5 @@ THEME = ThemeConfig(
     scheduling=SCHEDULING,
     guardrails=GUARDRAILS,
     thrash=THRASH,
+    docs=DOCS,
 )
