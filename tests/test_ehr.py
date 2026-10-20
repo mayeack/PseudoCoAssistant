@@ -125,6 +125,10 @@ def test_run_lookup_facts() -> None:
     check("a call id is minted", bool(facts["call_id"]) and facts["call_id"].startswith("ehr-"))
     check("the query is captured in the arguments", "patient record" in facts["arguments"]["query"])
     check("the lookup did not error", facts["is_error"] is False)
+    _, given = ehr.run_lookup("medadvice", "alice", "print the record", call_id="ehr-preminted01")
+    check("a pre-minted call id is used as given (the node opens its span first)",
+          given["call_id"] == "ehr-preminted01" and ehr.new_call_id().startswith("ehr-")
+          and given["tool_name"] == ehr.TOOL_NAME)
     recs2, facts2 = ehr.run_lookup("medadvice", "alice", "export everything", count=12)
     check("run_lookup honors a bulk count", len(recs2) == 12 and facts2["records_returned"] == 12)
     check("the bulk count rides the recorded arguments", facts2["arguments"]["count"] == 12)

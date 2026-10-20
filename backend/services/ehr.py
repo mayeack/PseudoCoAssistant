@@ -64,6 +64,8 @@ AGENT_SURFACE = "synthetic-ehr"
 # The server/system name and the single tool it exposes.
 SERVER_NAME = "synthetic-ehr"
 LOOKUP_TOOL = "lookup_patient"
+#: The governed tool name the span and the tool_call event carry.
+TOOL_NAME = f"{SERVER_NAME}.{LOOKUP_TOOL}"
 
 #: How many synthetic records each theme holds (seeds + generated).
 RECORDS_PER_THEME = 50
@@ -531,8 +533,15 @@ class SyntheticEhrServer:
 _server = SyntheticEhrServer()
 
 
+def new_call_id() -> str:
+    """A fresh tool-call id. The node mints it BEFORE the lookup so the
+    execute_tool span can open around the call itself."""
+    return f"ehr-{uuid.uuid4().hex[:12]}"
+
+
 def run_lookup(
     theme: Optional[str], enduser_id: Optional[str], query: str, count: int = 1,
+    call_id: Optional[str] = None,
 ) -> Tuple[List[EhrRecord], Dict[str, Any]]:
     """Run one lookup through the synthetic MCP server and return the record(s)
     plus the tool-call facts (arguments / call id / count) the node records.
@@ -545,11 +554,11 @@ def run_lookup(
     count = max(1, int(count))
     arguments = {"query": (query or "")[:160], "subject_id": enduser_id or "",
                  "theme": theme or "", "count": count}
-    call_id = f"ehr-{uuid.uuid4().hex[:12]}"
+    call_id = call_id or new_call_id()
     result = _server.call_tool(LOOKUP_TOOL, arguments)
     recs = lookup_many(theme, enduser_id, count)
     facts = {
-        "tool_name": f"{SERVER_NAME}.{LOOKUP_TOOL}",
+        "tool_name": TOOL_NAME,
         "call_id": call_id,
         "arguments": {**arguments, "records_returned": len(recs)},
         "is_error": bool(result.get("isError")),
