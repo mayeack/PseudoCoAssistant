@@ -1032,6 +1032,12 @@ def _add_control_spans(lg, records: Any, inp: str, out: str, meta: Dict[str, Any
             "agent_control_target": str(rec.get("target") or ""),
             "agent_control_errored": errored,
         })
+        # A response-stage steer the app applied (backend/agents/nodes/agent_control.py):
+        # whether the rewrite cleared the re-check, and in how many attempts.
+        steer = rec.get("steer")
+        if isinstance(steer, dict):
+            span_meta["agent_control_steer_outcome"] = str(steer.get("outcome") or "")
+            span_meta["agent_control_steer_attempts"] = int(steer.get("attempts") or 0)
         confidence = rec.get("confidence")
         try:
             confidence = float(confidence) if confidence is not None else None

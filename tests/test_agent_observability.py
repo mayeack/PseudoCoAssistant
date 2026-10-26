@@ -383,6 +383,18 @@ _err = [c[1] for c in fake.calls if c[0] == "add_control_span"]
 check("an errored evaluation is a status-500 observe span carrying the error",
       len(_err) == 1 and _err[0].get("status_code") == 500 and _err[0]["output"].error_message == "HTTP 403: controls.read")
 fake = _FakeLogger()
+ao._build_turn(fake, dict(_turn(), agent_control_verdicts=[
+    {"stage": "post", "controls": ["steer-remove-output-pii-regex"], "decisions": ["steer"], "errored": False,
+     "duration_ms": 900.0, "backend": "splunk_ao", "steering": ["Remove all personal data from the output."],
+     "steer": {"attempts": 1, "outcome": "applied", "recheck_controls": [], "recheck_decisions": []}}]))
+_steer = [c[1] for c in fake.calls if c[0] == "add_control_span"]
+check("a steered verdict is a steer span carrying the rewrite's outcome and attempts",
+      len(_steer) == 1 and _steer[0]["output"].action == "steer"
+      and _steer[0].get("metadata", {}).get("agent_control_steer_outcome") == "applied"
+      and _steer[0].get("metadata", {}).get("agent_control_steer_attempts") == 1)
+check("an unsteered control span carries no steer metadata",
+      "agent_control_steer_outcome" not in (_ctl[1].get("metadata") or {}))
+fake = _FakeLogger()
 ao._build_turn(fake, _turn())
 check("additive: a turn without verdicts emits no control span", "add_control_span" not in _names(fake.calls))
 
