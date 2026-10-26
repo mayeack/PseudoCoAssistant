@@ -12,8 +12,8 @@ core differs. This suite is the detector:
 
   DYNAMIC (LLM boundary stubbed; no network)
   - the same scenario matrix (benign, internal policy block, AI Defense prompt
-    and response blocks, NeMo input/output blocks, Agent Control deny, forced
-    PII/toxic/hallucination/authority injection, generation error, Multi-Agent
+    and response blocks, NeMo input/output blocks, Agent Control deny and steer,
+    forced PII/toxic/hallucination/authority injection, generation error, Multi-Agent
     Mode accepted) is run through run_turn and run_turn_stream for EVERY
     blueprint, and the normalized outcome — result type/severity/escalated/
     policy_blocked, the terminal governance event's guardrail fields, the core
@@ -27,6 +27,7 @@ Run:  venv/bin/python tests/test_blueprint_parity.py    # exit 0 = pass
 """
 import inspect
 import os
+import re
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -136,6 +137,11 @@ _COMPLIANT_MANUFACTURING = _COMPLIANT_STRUCTURED.replace(
 assert _COMPLIANT_MANUFACTURING != _COMPLIANT_STRUCTURED
 
 
+# What the Agent Control steer agent returns: the answer without the record line.
+_STEERED = "Rest your voice, drink warm fluids, and see a clinician if it lasts more than a week."
+_SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+
+
 class _FakeLLM:
     def __init__(self, fail_agents=()):
         self.fail_agents = set(fail_agents)
@@ -156,6 +162,8 @@ class _FakeLLM:
             content = '{"assistant": "triage", "rationale": "x"}'
         elif agent_name.endswith("_scheduling_agent"):
             content = "Happy to set that up for you."
+        elif agent_name.endswith("_agent_control_steer_agent"):
+            content = _STEERED
         elif "REQUIRED" in system and "RESPONSE" in system:
             if '"reply"' in system:
                 content = _COMPLIANT_REPLY
@@ -268,6 +276,23 @@ def _scenario(kind: str):
                                                              matched_controls=["block-x"], decisions=["deny"]),
             )
             kwargs["agent_control_review"] = True
+        elif kind == "agent_control_steer":
+            # A response-stage steer control that matches while an SSN is in the
+            # answer (control #33's shape): the shared node rewrites the answer with
+            # the steering context and re-checks it, so every blueprint must ship
+            # the same rewrite and report the same steer outcome.
+            saved["acc"] = ac_mod.agent_control_client
+
+            def _steer_on_ssn(**k):
+                if _SSN_RE.search(k.get("assistant_message") or ""):
+                    return ControlVerdict(is_safe=False, confidence=1.0, decisions=["steer"],
+                                          matched_controls=["steer-remove-output-pii-regex"],
+                                          steering=["Remove all personal data from the output."])
+                return ControlVerdict()
+
+            ac_mod.agent_control_client = _Stub(is_configured=True, stages=["post"],
+                                                evaluate_response=_steer_on_ssn)
+            kwargs.update(agent_control_review=True, force_pii_injection=True)
         elif kind == "forced_injection":
             kwargs.update(force_pii_injection=True, force_toxic_injection=True,
                           force_hallucination_injection=True, force_boundary_injection=True)
@@ -393,12 +418,16 @@ def _run(bp_key: str, theme: str, kind: str) -> Dict[str, Any]:
         # governance event) and whether its passages reached the answer agent.
         "internal_docs": [h.get("doc_id") for h in ((last.get("internal_docs") or {}).get("hits") or [])],
         "docs_grounded": any("INTERNAL DOCUMENTS (" in sp for sp in fake.systems),
+        # The Agent Control steer outcome per verdict, and whether the answer the
+        # user got still carries an SSN (a steer must have removed it).
+        "steer": [(rec.get("steer") or {}).get("outcome") for rec in (last.get("agent_control_verdicts") or [])],
+        "answer_has_ssn": bool(_SSN_RE.search(str(result.get("message") or ""))),
     }
 
 
 SCENARIOS = ("benign", "policy_block", "ai_defense_prompt_block", "ai_defense_response_block",
              "nemo_input_block", "nemo_output_block", "agent_control_deny", "agent_control_prompt_deny",
-             "forced_injection", "pii_exfil_prompt", "pii_exfil_bulk", "internal_docs_ask",
+             "agent_control_steer", "forced_injection", "pii_exfil_prompt", "pii_exfil_bulk", "internal_docs_ask",
              "generation_error", "multi_agent", "mcp_thrash",
              "scheduling_offer", "scheduling_book", "scheduling_list")
 
@@ -419,7 +448,7 @@ def test_dynamic_parity() -> None:
             # alone is the Synthetic Content wiring (retail: conversational reply +
             # Unauthorized Refund; manufacturing: Safety Override).
             for theme in ("retail", "manufacturing"):
-                for kind in ("benign", "forced_injection"):
+                for kind in ("benign", "forced_injection", "agent_control_steer"):
                     outcomes[key][f"{theme}/{kind}"] = _run(key, theme, kind)
         ref_key = keys[0]
         for key in keys:
@@ -448,6 +477,9 @@ def test_dynamic_parity() -> None:
                       out["tokens"] == ref["tokens"], f"{out['tokens']} != {ref['tokens']}")
                 check(f"[{key} vs {ref_key}] {sk}: same governance guardrail fields",
                       out["governance"] == ref["governance"], f"{out['governance']} != {ref['governance']}")
+                check(f"[{key} vs {ref_key}] {sk}: same Agent Control steer outcome and delivered PII",
+                      (out["steer"], out["answer_has_ssn"]) == (ref["steer"], ref["answer_has_ssn"]),
+                      f"{(out['steer'], out['answer_has_ssn'])} != {(ref['steer'], ref['answer_has_ssn'])}")
                 check(f"[{key} vs {ref_key}] {sk}: same guardrail stage frames",
                       out["guardrail_stages"] == ref["guardrail_stages"],
                       f"{out['guardrail_stages']} != {ref['guardrail_stages']}")
@@ -492,6 +524,15 @@ def test_dynamic_parity() -> None:
               r["medadvice/agent_control_prompt_deny"]["result"]["policy_blocked"] is True
               and r["medadvice/agent_control_prompt_deny"]["guardrail_stages"][-1] == "agent_control_prompt",
               str(r["medadvice/agent_control_prompt_deny"]["guardrail_stages"]))
+        for theme in ("medadvice", "telecomchatbot", "retail", "manufacturing"):
+            steer = r[f"{theme}/agent_control_steer"]
+            check(f"{theme}: an Agent Control steer rewrites the PII out of the delivered answer",
+                  steer["steer"] == ["applied"] and steer["answer_has_ssn"] is False
+                  and f"{theme}_agent_control_steer_agent" in steer["agents"]
+                  and steer["result"]["policy_blocked"] is False, str(steer))
+            check(f"{theme}: a steered turn is attributed to Agent Control and reports what was delivered",
+                  "galileo_agent_control" in (steer["governance"]["guardrail_ids"] or [])
+                  and steer["governance"]["pii_detected"] is False, str(steer["governance"]))
         for theme in ("medadvice", "telecomchatbot", "retail", "manufacturing"):
             # telecom's authority category is the Unauthorized Commitment, retail's
             # the Unauthorized Refund, manufacturing's the Safety Override.

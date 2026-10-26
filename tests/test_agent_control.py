@@ -145,7 +145,7 @@ check(
     ac.ControlVerdict(is_safe=False, decisions=["deny"]).should_block is True,
 )
 check(
-    "steer does not block (recorded, not enforced)",
+    "steer does not block (the response node rewrites instead, see [10])",
     ac.ControlVerdict(is_safe=False, decisions=["steer"]).should_block is False,
 )
 check(
@@ -184,6 +184,27 @@ check("parses decision", parsed.decisions == ["deny"])
 check("parses evaluator message", parsed.messages == ["score 0.2 < 0.5"])
 check("parses evaluator errors", parsed.evaluator_errors == ["some-broken-control"])
 check("parsed deny blocks", parsed.should_block is True)
+check("a deny carries no steering", parsed.steering == [])
+steer_parsed = ac.AgentControlClient._parse_response(
+    {
+        "is_safe": False,
+        "confidence": 1.0,
+        "matches": [
+            {"control_name": "steer-remove-output-pii-regex", "action": "steer",
+             "result": {"matched": True, "message": "Condition tree matched"},
+             "steering_context": {"message": "Remove all personal data from the output."}},
+            # Guidance on a non-steer match is not steering.
+            {"control_name": "watch-it", "action": "observe",
+             "steering_context": {"message": "ignored"}},
+        ],
+    }
+)
+check("parses a steer match's steering_context message",
+      steer_parsed.steering == ["Remove all personal data from the output."]
+      and steer_parsed.steered and steer_parsed.should_block is False)
+check("the verdict record carries the steering guidance (and no outcome yet)",
+      steer_parsed.record()["steering"] == ["Remove all personal data from the output."]
+      and steer_parsed.record()["steer"] is None)
 check(
     "a body without is_safe is treated as an error, not as safe",
     ac.AgentControlClient._parse_response({"confidence": 1.0}).errored is True,
@@ -539,6 +560,14 @@ for label, override in [
     check(f"{label} (no scorer call, no block)",
           not any(u.endswith("/scorers/invoke") for u in calls_f)
           and verdict.should_block is False)
+
+steer_c, _, _, _ = _evaluate(
+    {"score": False, "status": "success"},
+    controls=_only({"action": {"decision": "steer",
+                               "steering_context": {"message": "Correct the dose."}}}),
+)
+check("client-side: a matched steer control carries its steering_context message",
+      steer_c.decisions == ["steer"] and steer_c.steering == ["Correct the dose."])
 
 unsupported = _only(
     {"condition": {"selector": {"path": "*"}, "evaluator": {"name": "regex", "config": {}}}}
@@ -1106,6 +1135,150 @@ check("the prompt node may terminate the turn", "agent_control_prompt" in _MAY_T
 check("governance reads the prompt-stage verdict too", "agent_control_prompt" in gov_src)
 check("governance carries both verdicts to Agent Observability", "agent_control_verdicts" in gov_src)
 check("chat.js labels the prompt stage", "agent_control_prompt:" in js)
+
+# ---- 10. response-stage steer -------------------------------------------
+# A steer control's guidance (steering_context.message) is applied: a steer agent
+# rewrites the answer, the rewrite is evaluated again, and the rewrite ships.
+print("\n[10] response-stage steer")
+from backend.agents.llm import ChatModelError, NormalizedLLMResponse  # noqa: E402
+from backend.models.schemas import SeverityLevel  # noqa: E402
+
+_PII_ANSWER = ("Customer: Alexandra Martinez | Rewards #: (305) 392-8471 | Store card application SSN: "
+               "234-56-7890 | DOB: 06/15/1985 | amartinez@gmail.com | (305) 392-8471\n\n"
+               "I recommend trying size 9. Would you like me to start the exchange?")
+_CLEAN_ANSWER = "I recommend trying size 9. Would you like me to start the exchange?"
+_GUIDANCE = "Remove all personal data from the output."
+
+steer_state = dict(
+    base_state, agent_control_review=True, theme="retail", final_message=_PII_ANSWER,
+    complete_display_text="MEDIUM\n" + _PII_ANSWER, severity=SeverityLevel.MEDIUM,
+    requested_categories={"pii": True}, pii_detected=True, pii_types=["synthetic_pii"],
+    agent_trace=[{"name": "retail_synthesizer", "role": "synthesizer"}],
+    llm_output_tokens_cached=0, llm_output_tokens_uncached=22,
+)
+
+
+def _steer_verdict(guidance=_GUIDANCE):
+    return ac.ControlVerdict(is_safe=False, confidence=1.0, decisions=["steer"],
+                             matched_controls=["steer-remove-output-pii-regex"],
+                             steering=[guidance] if guidance else [])
+
+
+def _rewrite(text, out=7):
+    return NormalizedLLMResponse(id="rw", content=text, model="mistral-nemo:12b", input_tokens=40,
+                                 output_tokens=out, output_tokens_cached=0, output_tokens_uncached=out,
+                                 stop_reason="end_turn")
+
+
+def _run_steer(verdicts, rewrites, *, attempts=1, fail_open=True):
+    """The response node with evaluate_response answering ``verdicts`` in order and
+    the steer agent answering ``rewrites`` in order (an exception instance raises)."""
+    llm = mock.Mock(side_effect=rewrites)
+    with mock.patch.object(
+        ac.AgentControlClient, "is_configured", new_callable=mock.PropertyMock
+    ) as configured, mock.patch.object(
+        node_mod.agent_control_client, "evaluate_response", side_effect=verdicts
+    ) as ev, mock.patch.object(node_mod, "invoke_agent", llm), mock.patch.object(
+        node_mod.content_engine, "_handle_agent_control_block"
+    ) as handler, mock.patch.object(
+        settings, "galileo_agent_control_steer_attempts", attempts
+    ), mock.patch.object(settings, "galileo_agent_control_fail_open", fail_open):
+        configured.return_value = True
+        handler.return_value = {"message": "withheld", "policy_blocked": True}
+        out = node_mod.agent_control_node(dict(steer_state))
+    return out, llm, ev, handler
+
+
+out, llm, ev, handler = _run_steer([_steer_verdict(), ac.ControlVerdict()], [_rewrite(_CLEAN_ANSWER)])
+v = out.get("agent_control")
+check("steer: the answer is rewritten, not withheld",
+      out.get("terminal") is None and out.get("final_message") == _CLEAN_ANSWER and not handler.called)
+check("steer: the display text is rebuilt around the rewrite (severity badge kept)",
+      out.get("complete_display_text") == "MEDIUM\n" + _CLEAN_ANSWER)
+check("steer: the rewrite is re-evaluated before it ships",
+      ev.call_count == 2 and ev.call_args_list[1].kwargs["assistant_message"] == _CLEAN_ANSWER)
+sent = llm.call_args.kwargs
+check("steer: the steer agent gets the control's guidance and the original answer",
+      sent["agent_name"] == "retail_agent_control_steer_agent"
+      and _GUIDANCE in sent["messages"][0]["content"] and _PII_ANSWER in sent["messages"][0]["content"])
+check("steer: the outcome rides on the verdict record",
+      v.record()["steer"] == {"attempts": 1, "outcome": "applied", "recheck_controls": [],
+                              "recheck_decisions": []}
+      and v.record()["decisions"] == ["steer"] and v.record()["steering"] == [_GUIDANCE])
+check("steer: Synthetic Content flags are re-read from the delivered rewrite",
+      out.get("pii_detected") is False and out.get("pii_types") == [])
+check("steer: the steer agent joins agent_trace and its tokens the turn's sums",
+      [t["name"] for t in out["agent_trace"]] == ["retail_synthesizer", "retail_agent_control_steer_agent"]
+      and out["llm_input_tokens"] == 51 and out["llm_output_tokens"] == 29
+      and out["llm_output_tokens_cached"] + out["llm_output_tokens_uncached"] == 29)
+
+out, *_ = _run_steer([_steer_verdict(), ac.ControlVerdict()], [_rewrite(f"<reply>\n{_CLEAN_ANSWER}\n</reply>")])
+check("steer: echoed <reply> tags are stripped", out.get("final_message") == _CLEAN_ANSWER)
+
+deny_after = ac.ControlVerdict(is_safe=False, confidence=1.0, decisions=["deny"], matched_controls=["block-x"])
+out, llm, ev, handler = _run_steer([_steer_verdict(), deny_after], [_rewrite(_CLEAN_ANSWER)])
+blocked_with = handler.call_args.kwargs if handler.called else {}
+check("steer: a rewrite the re-check denies is withheld", out.get("terminal") is True and handler.called)
+check("steer: the block records the denying verdict, marked as a denied steer",
+      blocked_with.get("verdict") is deny_after and (deny_after.steer or {}).get("outcome") == "denied"
+      and out.get("agent_control") is deny_after)
+check("steer: the block reports the rewrite's tokens too",
+      blocked_with.get("usage_data", {}).get("usage_total_tokens") == 33 + 47)
+
+out, llm, ev, _ = _run_steer(
+    [_steer_verdict(), _steer_verdict("Also drop the email address."), _steer_verdict()],
+    [_rewrite("first pass"), _rewrite("second pass")], attempts=2,
+)
+check("steer: attempts are bounded; the last rewrite ships, recorded unresolved",
+      llm.call_count == 2 and out.get("final_message") == "second pass" and out.get("terminal") is None
+      and out["agent_control"].steer["outcome"] == "unresolved" and out["agent_control"].steer["attempts"] == 2)
+check("steer: a further attempt applies the re-check's guidance to the previous rewrite",
+      "Also drop the email address." in llm.call_args.kwargs["messages"][0]["content"]
+      and "first pass" in llm.call_args.kwargs["messages"][0]["content"])
+
+out, *_ = _run_steer([_steer_verdict(), ac.ControlVerdict(errored=True, error_message="timeout")],
+                     [_rewrite(_CLEAN_ANSWER)])
+check("steer: a re-check that errors (fail-open) ships the rewrite as unverified",
+      out.get("final_message") == _CLEAN_ANSWER and out["agent_control"].steer["outcome"] == "unverified")
+
+out, llm, ev, handler = _run_steer([_steer_verdict()], [ChatModelError("boom")])
+v = out["agent_control"]
+check("steer: a failed rewrite under fail-open releases the original answer, flagged",
+      out.get("terminal") is None and "final_message" not in out and v.errored
+      and v.steer["outcome"] == "error" and "steer rewrite failed" in (v.error_message or "")
+      and ev.call_count == 1 and not handler.called)
+out, _, _, handler = _run_steer([_steer_verdict()], [ChatModelError("boom")], fail_open=False)
+check("steer: a failed rewrite under fail-closed withholds the answer",
+      out.get("terminal") is True and handler.called)
+out, *_ = _run_steer([_steer_verdict()], [_rewrite("   ")])
+check("steer: an empty rewrite is an error, never an empty answer",
+      "final_message" not in out and out["agent_control"].steer["outcome"] == "error")
+
+out, llm, _, _ = _run_steer([_steer_verdict()], [], attempts=0)
+check("steer: steer_attempts=0 records the steer without rewriting",
+      not llm.called and "final_message" not in out and out["agent_control"].steer is None
+      and out["agent_control"].decisions == ["steer"])
+out, llm, _, _ = _run_steer([_steer_verdict(guidance=None)], [])
+check("steer: a steer control without steering context has nothing to apply",
+      not llm.called and out["agent_control"].steer["outcome"] == "no_guidance")
+both = ac.ControlVerdict(is_safe=False, decisions=["steer", "deny"], matched_controls=["s", "d"],
+                         steering=[_GUIDANCE])
+out, llm, _, handler = _run_steer([both], [])
+check("steer: a deny in the same verdict wins (withheld, no rewrite)",
+      out.get("terminal") is True and handler.called and not llm.called)
+
+with mock.patch.object(
+    ac.AgentControlClient, "is_configured", new_callable=mock.PropertyMock
+) as configured, mock.patch.object(
+    ac.AgentControlClient, "stages", new_callable=mock.PropertyMock
+) as stages, mock.patch.object(
+    node_mod.agent_control_client, "evaluate_prompt", return_value=_steer_verdict()
+), mock.patch.object(node_mod, "invoke_agent") as llm:
+    configured.return_value = True
+    stages.return_value = ["pre", "post"]
+    out = node_mod.agent_control_prompt_node(dict(steer_state))
+check("a prompt-stage steer is recorded, never rewritten",
+      not llm.called and "final_message" not in out and out["agent_control_prompt"].steered)
 
 os.environ.pop("GALILEO_API_KEY", None)
 os.environ.pop("AGENT_CONTROL_API_KEY", None)

@@ -224,6 +224,14 @@ def _scope_matches(scope: Dict[str, Any], *, stage: str, step_type: str, step_na
     return True
 
 
+def _steering_message(context: Any) -> Optional[str]:
+    """The guidance text of a ``SteeringContext`` ({"message": ...}), or None."""
+    if not isinstance(context, dict):
+        return None
+    message = str(context.get("message") or "").strip()
+    return message or None
+
+
 @dataclass
 class ControlVerdict:
     """Normalized outcome of one Agent Control evaluation."""
@@ -253,6 +261,14 @@ class ControlVerdict:
     backend: Optional[str] = None
     target: Optional[str] = None
     duration_ms: Optional[float] = None
+    # The corrective guidance of each matched steer control
+    # (``steering_context.message``), in match order. The response-stage node
+    # rewrites the answer with it (backend/agents/nodes/agent_control.py).
+    steering: List[str] = field(default_factory=list)
+    # What that node did with a steer, set only on a steered response verdict:
+    # {"attempts", "outcome" (applied | unresolved | unverified | error),
+    #  "recheck_controls", "recheck_decisions"}.
+    steer: Optional[Dict[str, Any]] = None
 
     def record(self) -> Dict[str, Any]:
         """Flat, JSON-safe view for the governance event
@@ -273,6 +289,8 @@ class ControlVerdict:
             "error_message": self.error_message,
             "transport": self.transport,
             "duration_ms": self.duration_ms,
+            "steering": list(self.steering),
+            "steer": dict(self.steer) if self.steer else None,
         }
 
     @property
@@ -280,8 +298,10 @@ class ControlVerdict:
         """Whether the response must be withheld.
 
         - A real verdict containing a ``deny`` decision always blocks.
-        - ``steer`` and ``observe`` never block (they are advisory here; PseudoCo Assistant
-          has no re-generation loop, so a steer is recorded, not enforced).
+        - ``steer`` and ``observe`` never block. A response-stage steer is
+          enforced by rewriting the answer with the control's guidance
+          (``agent_control_node``), not by withholding it; a prompt-stage steer
+          is recorded only.
         - On error, honor the configured fail-open / fail-closed policy.
         """
         if self.errored:
@@ -1167,11 +1187,15 @@ class AgentControlClient:
             if not matched:
                 continue
 
-            decision = str((definition.get("action") or {}).get("decision") or "observe").lower()
+            action = definition.get("action") or {}
+            decision = str(action.get("decision") or "observe").lower()
             scores = memo.get("_last_scores") or []
             score, config = scores[-1] if scores else (None, {})
             verdict.matched_controls.append(name)
             verdict.decisions.append(decision)
+            guidance = _steering_message(action.get("steering_context"))
+            if guidance and decision == "steer":
+                verdict.steering.append(guidance)
             verdict.confidence = max(verdict.confidence, _confidence_from_score(score))
             verdict.messages.append(
                 f"{name}: score {score!r} {config.get('operator')} "
@@ -1206,6 +1230,7 @@ class AgentControlClient:
         matched_controls: List[str] = []
         decisions: List[str] = []
         messages: List[str] = []
+        steering: List[str] = []
         for match in data.get("matches") or []:
             if not isinstance(match, dict):
                 continue
@@ -1218,6 +1243,9 @@ class AgentControlClient:
             result = match.get("result")
             if isinstance(result, dict) and result.get("message"):
                 messages.append(str(result["message"]))
+            guidance = _steering_message(match.get("steering_context"))
+            if guidance and str(action or "").lower() == "steer":
+                steering.append(guidance)
 
         errors = [err for err in (data.get("errors") or []) if isinstance(err, dict)]
         evaluator_errors = [str(err.get("control_name") or "unknown") for err in errors]
@@ -1255,6 +1283,7 @@ class AgentControlClient:
             decisions=decisions,
             messages=messages,
             evaluator_errors=evaluator_errors,
+            steering=steering,
         )
 
     @staticmethod

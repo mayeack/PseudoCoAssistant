@@ -51,6 +51,34 @@ stream's Control View counts. One span per matched control, carrying its action;
 one `observe` span per clean or errored stage, so an evaluation that ran is
 always visible.
 
+### Steer
+
+A response-stage **steer** is applied, not just recorded (since 4.19.0). The
+matched controls' steering context — the **Steering context** field in the
+Controls UI, `steering_context.message` on the evaluation — goes to a steer
+agent (`<theme>_agent_control_steer_agent`, on the internal model under Ollama)
+that rewrites the answer to follow it and changes nothing else. The rewrite is
+evaluated again before it ships:
+
+- clean — it is the answer the user gets, and NeMo's output rails and Cisco AI
+  Defense screen it next;
+- deny — the turn is withheld like any other deny;
+- still steering — another attempt with the new guidance, up to
+  `GALILEO_AGENT_CONTROL_STEER_ATTEMPTS` (default 1), then the last rewrite ships.
+
+A rewrite that fails counts as an Agent Control error, so
+`GALILEO_AGENT_CONTROL_FAIL_OPEN` decides between the original answer and
+withholding it. `GALILEO_AGENT_CONTROL_STEER_ATTEMPTS=0` restores record-only
+steers. A prompt-stage steer is recorded only.
+
+The response verdict records the guidance (`steering`) and what happened
+(`steer`: `attempts`, `outcome` = `applied` | `unresolved` | `unverified` |
+`error` | `no_guidance` | `denied`, and the re-check's controls and decisions);
+the control span carries `agent_control_steer_outcome` and
+`agent_control_steer_attempts`. The steer agent is an entry in `agent_trace`
+and its tokens count toward the turn. The Synthetic Content `*_detected` flags
+are re-read from the rewrite, because they describe what was delivered.
+
 ## Configuration
 
 ```
@@ -61,6 +89,7 @@ SPLUNK_AO_CONTROL_TOKEN=<O11y API token>         # blank = reuse SPLUNK_AO_O11Y_
 # SPLUNK_AO_CONTROL_TARGET_TYPE=log_stream        # the default; see below
 # SPLUNK_AO_CONTROL_STEP_NAME=complete_chat
 # GALILEO_AGENT_CONTROL_STAGES=                   # empty = pre,post on splunk_ao
+# GALILEO_AGENT_CONTROL_STEER_ATTEMPTS=1          # rewrites per steer; 0 = record only
 ```
 
 The same fields are on the Settings page under **Splunk Agent Observability**

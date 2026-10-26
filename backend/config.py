@@ -128,7 +128,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "PseudoCo Assistant v4"
-    app_version: str = "4.18.4"
+    app_version: str = "4.19.0"
     environment: str = "development"  # "development" or "production"
     debug: bool = True
 
@@ -325,7 +325,9 @@ class Settings(BaseSettings):
     # returns deny / steer / observe. PseudoCo Assistant submits the generated response as
     # a post-stage ``llm`` step, so a matching deny control (e.g.
     # "PseudoCoAssistant-block-hallucinated-output", which fails a response whose Galileo
-    # Correctness score is below threshold) withholds the answer.
+    # Correctness score is below threshold) withholds the answer, and a matching
+    # steer control's guidance is applied by rewriting the answer
+    # (backend/agents/nodes/agent_control.py).
     #
     # Master switch: when False the per-request toggle is ignored and no step is
     # ever submitted, regardless of the UI toggle state. Credentials come from
@@ -371,6 +373,11 @@ class Settings(BaseSettings):
     # False = fail closed (withhold the response), matching AI Defense's
     # posture; only sensible once runtime enforcement is verified working.
     galileo_agent_control_fail_open: bool = True
+    # How many times a response-stage ``steer`` rewrites the answer with the
+    # control's steering context before the turn gives up and ships the last
+    # rewrite (recorded as unresolved). Each attempt is one model call plus one
+    # re-evaluation. 0 = record steers without rewriting (the pre-4.19 behavior).
+    galileo_agent_control_steer_attempts: int = 1
     # Which Agent Control server the guardrail talks to:
     #   galileo   = the standalone Galileo console + agent-control server above
     #               (API key -> console JWT -> runtime token), the default;

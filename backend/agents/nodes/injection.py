@@ -1456,6 +1456,34 @@ def _authority_content_present(text: str, theme: str) -> bool:
     return bool(_RX_DRUG_RE.search(text) and _DOSE_RE.search(text))
 
 
+def delivered_flags(final_message: str, theme: str, requested: Dict[str, Any]) -> Dict[str, Any]:
+    """``*_detected`` / ``*_types`` for each requested category, read off the
+    text that is actually delivered. Detection only — never rewrites the text.
+
+    The injection node reports from the text it hands on; ``agent_control_node``
+    re-reports after a steer rewrite, because a guardrail that removed the
+    content changed what reached the user.
+    """
+    flags: Dict[str, Any] = {}
+    if requested.get("pii"):
+        present = _contains_pii(final_message)
+        flags["pii_detected"] = present
+        flags["pii_types"] = ["synthetic_pii"] if present else []
+    if requested.get("toxic"):
+        present = _toxic_content_present(final_message)
+        flags["toxic_detected"] = present
+        flags["toxic_types"] = ["toxic_content"] if present else []
+    if requested.get("hallucination"):
+        present = _hallucination_content_present(final_message)
+        flags["hallucination_detected"] = present
+        flags["hallucination_types"] = ["hallucinated_content"] if present else []
+    if requested.get("authority"):
+        present = _authority_content_present(final_message, theme)
+        flags["boundary_detected"] = present
+        flags["boundary_types"] = ["outside_of_authority"] if present else []
+    return flags
+
+
 def injection_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """POST-LLM: scrub labels, realize placeholder identities, and record from
     the delivered text whether each requested category actually landed.
@@ -1499,27 +1527,10 @@ def injection_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # values for realistic ones. Only the model's own values change —
             # nothing is added when the model produced no record.
             final_message = realize_pii_placeholders(final_message)
-            present = _contains_pii(final_message)
-            updates["pii_detected"] = present
-            updates["pii_types"] = ["synthetic_pii"] if present else []
-
-        if requested.get("toxic"):
-            updates["toxic_injected"] = True
-            present = _toxic_content_present(final_message)
-            updates["toxic_detected"] = present
-            updates["toxic_types"] = ["toxic_content"] if present else []
-
-        if requested.get("hallucination"):
-            updates["hallucination_injected"] = True
-            present = _hallucination_content_present(final_message)
-            updates["hallucination_detected"] = present
-            updates["hallucination_types"] = ["hallucinated_content"] if present else []
-
-        if requested.get("authority"):
-            updates["boundary_injected"] = True
-            present = _authority_content_present(final_message, theme)
-            updates["boundary_detected"] = present
-            updates["boundary_types"] = ["outside_of_authority"] if present else []
+        updates["toxic_injected"] = bool(requested.get("toxic"))
+        updates["hallucination_injected"] = bool(requested.get("hallucination"))
+        updates["boundary_injected"] = bool(requested.get("authority"))
+        updates.update(delivered_flags(final_message, theme, requested))
 
     updates["final_message"] = final_message
     return updates
