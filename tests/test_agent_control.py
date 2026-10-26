@@ -1215,6 +1215,41 @@ check("steer: the steer agent joins agent_trace and its tokens the turn's sums",
 out, *_ = _run_steer([_steer_verdict(), ac.ControlVerdict()], [_rewrite(f"<reply>\n{_CLEAN_ANSWER}\n</reply>")])
 check("steer: echoed <reply> tags are stripped", out.get("final_message") == _CLEAN_ANSWER)
 
+# Seen live on llama3.2:3b (v4.19.0): a heading line, and the record line's labels
+# kept with every value blanked. Both go before the re-check and the user see them.
+_SKELETON = "Customer:  | Rewards #:  | Store card application SSN:  | DOB:  |  | "
+out, llm, ev, _ = _run_steer([_steer_verdict(), ac.ControlVerdict()],
+                             [_rewrite(f"Rewritten reply:\n\n{_SKELETON}\n{_CLEAN_ANSWER}")])
+check("steer: a 'Rewritten reply:' heading and an emptied record line are removed",
+      out.get("final_message") == _CLEAN_ANSWER
+      and ev.call_args_list[1].kwargs["assistant_message"] == _CLEAN_ANSWER)
+out, *_ = _run_steer([_steer_verdict(), ac.ControlVerdict()],
+                     [_rewrite(f"Customer: | Rewards #: | Store card application SSN: | DOB: | | \n\n{_CLEAN_ANSWER}")])
+check("steer: an emptied record line at the top is removed with its blank line",
+      out.get("final_message") == _CLEAN_ANSWER)
+for husk in ("Customer: |  |  | ", "Customer:  | Rewards #:  | Store card application  |  |  |  | ",
+             "Customer:"):
+    out, *_ = _run_steer([_steer_verdict(), ac.ControlVerdict()], [_rewrite(f"{husk}\n\n{_CLEAN_ANSWER}")])
+    check(f"steer: the emptied record line {husk!r} is removed", out.get("final_message") == _CLEAN_ANSWER)
+out, *_ = _run_steer([_steer_verdict(), ac.ControlVerdict()],
+                     [_rewrite("**Here is the revised response:**\n"
+                               "Customer: [REDACTED] | Rewards #: [removed] | Store card application SSN: N/A "
+                               f"| DOB: — |  | \n{_CLEAN_ANSWER}")])
+check("steer: redaction markers count as emptied values; a bold heading is removed",
+      out.get("final_message") == _CLEAN_ANSWER)
+out, *_ = _run_steer([_steer_verdict()], [_rewrite(f"Rewritten reply:\n{_SKELETON}")])
+check("steer: a rewrite that is only a heading and a skeleton is an empty rewrite (error)",
+      "final_message" not in out and out["agent_control"].steer["outcome"] == "error")
+_KEEP = ("Here's how:\n| Size | Fit |\n|---|---|\n| 9 | true |\nCustomer: Alexandra | Rewards #: |\n"
+         "Price: $20 | Tax: $1.60\nRevised pricing applies from Monday:\n- Shoes $20")
+out, *_ = _run_steer([_steer_verdict(), ac.ControlVerdict()], [_rewrite(_KEEP)])
+check("steer: tables, partly filled record lines and ordinary colon lines are kept",
+      out.get("final_message") == _KEEP)
+out, *_ = _run_steer([_steer_verdict(), ac.ControlVerdict()],
+                     [_rewrite("Order: | Status: | \nNotes:\nI recommend trying size 9.")])
+check("steer: a label-only line whose labels are not from the original record line is kept",
+      out.get("final_message") == "Order: | Status: | \nNotes:\nI recommend trying size 9.")
+
 deny_after = ac.ControlVerdict(is_safe=False, confidence=1.0, decisions=["deny"], matched_controls=["block-x"])
 out, llm, ev, handler = _run_steer([_steer_verdict(), deny_after], [_rewrite(_CLEAN_ANSWER)])
 blocked_with = handler.call_args.kwargs if handler.called else {}

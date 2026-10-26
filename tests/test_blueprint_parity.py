@@ -137,9 +137,13 @@ _COMPLIANT_MANUFACTURING = _COMPLIANT_STRUCTURED.replace(
 assert _COMPLIANT_MANUFACTURING != _COMPLIANT_STRUCTURED
 
 
-# What the Agent Control steer agent returns: the answer without the record line.
+# What the Agent Control steer agent returns: the answer without the record line's
+# values, plus the two leftovers a small rewrite model adds (seen live on
+# llama3.2:3b): a heading and the record line's labels with every value blanked.
 _STEERED = "Rest your voice, drink warm fluids, and see a clinician if it lasts more than a week."
+_STEER_REWRITE = f"Rewritten reply:\n\nSSN:  |  |  | \n{_STEERED}"
 _SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+_LEFTOVER_RE = re.compile(r"Rewritten reply|SSN:\s*\|")
 
 
 class _FakeLLM:
@@ -163,7 +167,7 @@ class _FakeLLM:
         elif agent_name.endswith("_scheduling_agent"):
             content = "Happy to set that up for you."
         elif agent_name.endswith("_agent_control_steer_agent"):
-            content = _STEERED
+            content = _STEER_REWRITE
         elif "REQUIRED" in system and "RESPONSE" in system:
             if '"reply"' in system:
                 content = _COMPLIANT_REPLY
@@ -422,6 +426,7 @@ def _run(bp_key: str, theme: str, kind: str) -> Dict[str, Any]:
         # user got still carries an SSN (a steer must have removed it).
         "steer": [(rec.get("steer") or {}).get("outcome") for rec in (last.get("agent_control_verdicts") or [])],
         "answer_has_ssn": bool(_SSN_RE.search(str(result.get("message") or ""))),
+        "answer_has_steer_leftovers": bool(_LEFTOVER_RE.search(str(result.get("message") or ""))),
     }
 
 
@@ -478,8 +483,10 @@ def test_dynamic_parity() -> None:
                 check(f"[{key} vs {ref_key}] {sk}: same governance guardrail fields",
                       out["governance"] == ref["governance"], f"{out['governance']} != {ref['governance']}")
                 check(f"[{key} vs {ref_key}] {sk}: same Agent Control steer outcome and delivered PII",
-                      (out["steer"], out["answer_has_ssn"]) == (ref["steer"], ref["answer_has_ssn"]),
-                      f"{(out['steer'], out['answer_has_ssn'])} != {(ref['steer'], ref['answer_has_ssn'])}")
+                      (out["steer"], out["answer_has_ssn"], out["answer_has_steer_leftovers"])
+                      == (ref["steer"], ref["answer_has_ssn"], ref["answer_has_steer_leftovers"]),
+                      f"{(out['steer'], out['answer_has_ssn'], out['answer_has_steer_leftovers'])} != "
+                      f"{(ref['steer'], ref['answer_has_ssn'], ref['answer_has_steer_leftovers'])}")
                 check(f"[{key} vs {ref_key}] {sk}: same guardrail stage frames",
                       out["guardrail_stages"] == ref["guardrail_stages"],
                       f"{out['guardrail_stages']} != {ref['guardrail_stages']}")
@@ -528,6 +535,7 @@ def test_dynamic_parity() -> None:
             steer = r[f"{theme}/agent_control_steer"]
             check(f"{theme}: an Agent Control steer rewrites the PII out of the delivered answer",
                   steer["steer"] == ["applied"] and steer["answer_has_ssn"] is False
+                  and steer["answer_has_steer_leftovers"] is False
                   and f"{theme}_agent_control_steer_agent" in steer["agents"]
                   and steer["result"]["policy_blocked"] is False, str(steer))
             check(f"{theme}: a steered turn is attributed to Agent Control and reports what was delivered",

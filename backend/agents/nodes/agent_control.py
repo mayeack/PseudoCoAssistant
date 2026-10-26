@@ -54,12 +54,79 @@ _STEER_SYSTEM = (
     "flagged the reply and returned guidance. Rewrite the reply so it follows the "
     "guidance. Change only what the guidance asks for and keep everything else as "
     "it is: wording, facts, formatting, line breaks, list markers and language. "
-    "Return only the rewritten reply, with no preamble, no note about what you "
-    "changed, and no quotation marks or tags around it."
+    "When the guidance says to remove something, delete it completely, with its "
+    "label and separators; never leave an empty field, a placeholder or a "
+    "redaction marker in its place, and drop a line the guidance says to drop. "
+    "Return only the rewritten reply, with no heading such as 'Rewritten reply:', "
+    "no note about what you changed, and no quotation marks or tags around it."
 )
 _STEER_TEMPERATURE = 0.2
 # The reply is handed over between <reply> tags; a model sometimes echoes them.
 _REPLY_TAG_RE = re.compile(r"</?reply>", re.IGNORECASE)
+# A small rewrite model ignores the two instructions above now and then: it opens
+# with a heading line ("Rewritten reply:", "Here is the revised response:"), and
+# instead of dropping a record line it blanks the values and keeps the labels
+# ("Customer: | Rewards #: |", "Customer: |  |  |"). Neither is content, so both
+# are removed before the re-check and the user see the rewrite.
+_PREAMBLE_RE = re.compile(
+    r"\A[ \t*_#>]*(?:(?:sure|okay|ok)\b[^\n]{0,20}?\s+)?(?:here(?:'s| is)\s+)?(?:the\s+|your\s+)?"
+    r"(?:rewritten|revised|updated|corrected|edited|cleaned(?:[- ]up)?)\s+"
+    r"(?:reply|response|answer|version|text|message)\b[^\n]{0,80}?:[ \t*_]*(?:\n|\Z)",
+    re.IGNORECASE,
+)
+_LABEL_FIELD_RE = re.compile(r"([^:|\n]{1,40}):\s*(.*)")
+# What a model leaves where it removed a value.
+_MARKER_RE = re.compile(
+    r"\[[^\]\n]{0,24}\]|<[^>\n]{0,24}>|redacted|removed|omitted|withheld|n/?a|none|[-–—*x•.]+",
+    re.IGNORECASE,
+)
+_WORD_RE = re.compile(r"[a-z]+")
+_BLANK_RUN_RE = re.compile(r"\n[ \t]*\n(?:[ \t]*\n)+")
+
+
+def _words(text: str) -> set:
+    return set(_WORD_RE.findall(text.lower()))
+
+
+def _is_record_husk(line: str, original_lines: set, value_line_words: List[set]) -> bool:
+    """A line the rewrite made by emptying a record line of the original answer:
+    new text, labels only (every value gone or replaced by a marker), and every
+    label word taken from one original line that held values (digits or an @)."""
+    stripped = line.strip()
+    if not stripped or stripped in original_lines or re.search(r"[\d@]", stripped):
+        return False
+    piped = "|" in stripped
+    labels: List[str] = []
+    has_label_field = False
+    for field in (f.strip() for f in stripped.split("|")):
+        if not field:
+            continue
+        match = _LABEL_FIELD_RE.fullmatch(field)
+        if match:
+            value = match.group(2).strip()
+            if value and not _MARKER_RE.fullmatch(value):
+                return False
+            labels.append(match.group(1))
+            has_label_field = True
+        elif piped and len(field) <= 40:
+            labels.append(field)  # a label whose colon went with its value
+        else:
+            return False
+    words = _words(" ".join(labels))
+    return has_label_field and bool(words) and any(words <= w for w in value_line_words)
+
+
+def _clean_rewrite(content: str, original: str) -> str:
+    """The steer model's reply without echoed tags, a heading, or the emptied
+    husk of an original record line. Only removes; never adds text."""
+    text = _PREAMBLE_RE.sub("", _REPLY_TAG_RE.sub("", content).strip(), count=1)
+    original_lines = {line.strip() for line in original.split("\n")}
+    value_line_words = [_words(line) for line in original.split("\n") if re.search(r"[\d@]", line)]
+    lines = text.split("\n")
+    kept = [line for line in lines if not _is_record_husk(line, original_lines, value_line_words)]
+    if len(kept) != len(lines):
+        text = _BLANK_RUN_RE.sub("\n\n", "\n".join(kept))
+    return text.strip()
 
 
 def _stage_timing(state: Dict[str, Any], stage: str, started: float) -> Dict[str, float]:
@@ -190,7 +257,7 @@ def _steer(state: Dict[str, Any], verdict: ControlVerdict) -> Tuple[Dict[str, An
         trace.append(trace_entry(name=agent_name, role="steer", response=response,
                                  duration_ms=round((time.perf_counter() - agent_start) * 1000, 1)))
         tally.add(response)
-        rewritten = _REPLY_TAG_RE.sub("", response.content or "").strip()
+        rewritten = _clean_rewrite(response.content or "", original)
         if not rewritten:
             verdict.errored = True
             verdict.error_message = "steer rewrite returned no text"

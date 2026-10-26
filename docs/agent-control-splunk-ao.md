@@ -66,6 +66,13 @@ evaluated again before it ships:
 - still steering — another attempt with the new guidance, up to
   `GALILEO_AGENT_CONTROL_STEER_ATTEMPTS` (default 1), then the last rewrite ships.
 
+Before the re-check, two leftovers of a small rewrite model are removed (since
+4.19.1): a heading line such as "Rewritten reply:", and the husk of a record
+line whose values it blanked instead of dropping the line (`Customer: |
+Rewards #: |`). A line is removed only when it is new in the rewrite, holds
+labels and nothing else, and every label comes from a line of the original
+answer that held values; the cleanup never adds text.
+
 A rewrite that fails counts as an Agent Control error, so
 `GALILEO_AGENT_CONTROL_FAIL_OPEN` decides between the original answer and
 withholding it. `GALILEO_AGENT_CONTROL_STEER_ATTEMPTS=0` restores record-only
