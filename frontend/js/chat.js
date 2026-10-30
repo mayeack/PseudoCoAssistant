@@ -377,6 +377,7 @@ function applyTheme(themeKey) {
     const newColor = theme.tailwindColor;
     const colorSwapTargets = [
         { el: document.getElementById('sendButton'), classes: ['bg-{c}-600', 'hover:bg-{c}-700'] },
+        { el: document.getElementById('attachButton'), classes: ['border-{c}-600', 'text-{c}-600', 'hover:bg-{c}-50'] },
         { el: document.getElementById('promptsButton'), classes: ['border-{c}-600', 'text-{c}-600', 'hover:bg-{c}-50'] },
         { el: document.getElementById('showRecentButton'), classes: ['border-{c}-600', 'text-{c}-600', 'hover:bg-{c}-50'] },
         { el: document.getElementById('myAppointmentsButton'), classes: ['border-{c}-600', 'text-{c}-600', 'hover:bg-{c}-50'] },
@@ -562,6 +563,9 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    // Dropping a PDF on the conversation attaches it (gated like the paperclip).
+    _initAttachmentDrop();
+
     // Refresh the Provider/Model + Static-emission indicators immediately when the
     // user returns to this tab (e.g. after changing settings on the Settings page).
     document.addEventListener('visibilitychange', function() {
@@ -613,6 +617,8 @@ async function refreshServerInfo() {
         if (el) el.textContent = data.hostname || 'unknown';
         if (ver) ver.textContent = data.version ? `v${data.version}` : '—';
         _hostGate = { gated: data.gated || {}, capabilities: data.capabilities || {} };
+        _attachmentConfig = data.attachments || null;
+        applyAttachmentGate();
     } catch (e) {
         unavailable();
     }
@@ -914,6 +920,7 @@ function handleKeyPress(event) {
 // POST /api/chat/message/stream. Unknown nodes keep the previous label.
 const STAGE_LABELS = {
     router: 'Routing to the right care team…',
+    attachment_intake: 'Reading your document…',
     policy: 'Policy screening…',
     prompt_defense: 'Screening your message (AI Defense)…',
     agent_control_prompt: 'Screening your message (Agent Observability Controls)…',
@@ -938,6 +945,193 @@ function setLoadingStatus(text) {
     if (el && text) {
         el.textContent = text;
     }
+}
+
+// ---- Chat attachments (docs/attachments.md) ----
+// A PDF waits in the composer (#attachmentChip) and rides on the next typed Send
+// as `attachment: {name, mime, data}` — base64 in the same JSON body, nothing is
+// uploaded before Send. The server is the authority: it refuses a bad file with
+// 413/415/422 (503 when this host cannot read PDFs) and a string detail, which the
+// chat shows as is; the checks here only save uploading a file it would refuse.
+// Whether the paperclip works at all is GET /api/server-info gated.pdf_attachments
+// (backend/host_capabilities.py), never a client-side guess, and the limits and
+// the upload notice come from server-info `attachments`. Every element below is
+// built with createElement/textContent: file names are user input.
+let pendingAttachment = null;   // {name, mime, data (base64, no data: prefix), size}
+let _attachmentConfig = null;   // server-info `attachments`: accept, kinds, max_bytes, max_pages, max_chars, default_prompt, upload_notice
+let _sendInFlight = false;      // a turn is running: the gate poll must not re-enable the paperclip
+const ATTACHMENT_REJECTIONS = new Set([413, 415, 422, 503]);
+
+function _attachmentsEnabled() {
+    const g = gateFor('pdf_attachments');
+    return !!(g && g.enabled);
+}
+
+function _attachmentGateReason() {
+    const g = gateFor('pdf_attachments');
+    return (g && g.reason) || 'PDF attachments are not available on this server';
+}
+
+// Greyed out with the reason as its tooltip when the host cannot read PDFs (and
+// until server-info has answered); enabled, the tooltip is the upload notice.
+function applyAttachmentGate() {
+    const btn = document.getElementById('attachButton');
+    if (!btn) return;
+    const enabled = _attachmentsEnabled();
+    btn.disabled = !enabled || _sendInFlight;
+    btn.title = enabled
+        ? ((_attachmentConfig && _attachmentConfig.upload_notice) || 'Attach a PDF')
+        : _attachmentGateReason();
+}
+
+// "5 MB", "5.3 MB", "1.2 KB", "600 bytes" — the server's wording for its limits.
+function _formatBytes(n) {
+    n = Number(n) || 0;
+    let value, unit;
+    if (n >= 1024 * 1024) { value = n / (1024 * 1024); unit = 'MB'; }
+    else if (n >= 1024) { value = n / 1024; unit = 'KB'; }
+    else return n + ' bytes';
+    return (value === Math.floor(value) ? String(value) : value.toFixed(1)) + ' ' + unit;
+}
+
+// "📎 name · 3 pages · 1.2 MB" — whichever of pages/size the record carries (a
+// live upload has no page count yet; a stored message has both).
+function _attachmentLabel(a) {
+    const parts = ['📎 ' + String(a.name || 'document.pdf')];
+    const pages = Number(a.pages);
+    if (Number.isFinite(pages) && pages > 0) parts.push(pages + (pages === 1 ? ' page' : ' pages'));
+    const bytes = Number(a.bytes);
+    if (Number.isFinite(bytes) && bytes > 0) parts.push(_formatBytes(bytes));
+    return parts.join(' · ');
+}
+
+function openAttachmentPicker() {
+    if (!_attachmentsEnabled() || _sendInFlight) return;
+    const input = document.getElementById('attachmentInput');
+    if (input) input.click();
+}
+
+async function onAttachmentPicked(event) {
+    const input = event && event.target;
+    const file = input && input.files && input.files[0];
+    if (input) input.value = '';   // so picking the same file again still fires change
+    if (file) await _acceptFile(file);
+}
+
+async function _acceptFile(file) {
+    if (!_attachmentsEnabled()) {
+        renderPendingAttachment(_attachmentGateReason());
+        return;
+    }
+    let name = String(file.name || 'document.pdf');
+    // ChatAttachment.name caps at 255; the server sanitizes the rest.
+    if (name.length > 255) name = name.slice(0, 251) + '.pdf';
+    if (file.type !== 'application/pdf' && !/\.pdf$/i.test(name)) {
+        renderPendingAttachment(`Only PDF attachments are supported (got ${file.type || 'no file type'})`);
+        return;
+    }
+    const max = Number(_attachmentConfig && _attachmentConfig.max_bytes) || 0;
+    if (max && file.size > max) {
+        renderPendingAttachment(`The attachment is ${_formatBytes(file.size)}; the limit is ${_formatBytes(max)}`);
+        return;
+    }
+    if (!file.size) {
+        renderPendingAttachment('The attachment is empty');
+        return;
+    }
+    try {
+        setPendingAttachment({ name, mime: 'application/pdf', data: await _readAsBase64(file), size: file.size });
+    } catch (e) {
+        console.error('Could not read the attachment:', e);
+        renderPendingAttachment('The file could not be read');
+    }
+}
+
+// Base64 of a File/Blob without the "data:...;base64," prefix.
+function _readAsBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const s = String(reader.result || '');
+            resolve(s.slice(s.indexOf(',') + 1));
+        };
+        reader.onerror = () => reject(reader.error || new Error('read failed'));
+        reader.readAsDataURL(blob);
+    });
+}
+
+function setPendingAttachment(att) {
+    pendingAttachment = att;
+    renderPendingAttachment();
+}
+
+function clearPendingAttachment() {
+    pendingAttachment = null;
+    renderPendingAttachment();
+}
+
+// The row above the input: the pending file as a removable chip with the upload
+// notice under it, or why a picked file was not taken. Empty = hidden.
+function renderPendingAttachment(error = null) {
+    const row = document.getElementById('attachmentChip');
+    if (!row) return;
+    row.textContent = '';
+    if (!pendingAttachment && !error) {
+        row.classList.add('hidden');
+        return;
+    }
+    row.classList.remove('hidden');
+    if (!pendingAttachment) {
+        const msg = document.createElement('p');
+        msg.className = 'text-xs text-red-600';
+        msg.setAttribute('role', 'alert');
+        msg.textContent = error;
+        row.appendChild(msg);
+        return;
+    }
+    const chip = document.createElement('div');
+    chip.className = 'inline-flex items-center gap-2 max-w-full px-3 py-1.5 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-700';
+    const label = document.createElement('span');
+    label.className = 'truncate';
+    label.textContent = _attachmentLabel({ name: pendingAttachment.name, bytes: pendingAttachment.size });
+    label.title = pendingAttachment.name;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'text-lg leading-none text-gray-500 hover:text-gray-700';
+    remove.setAttribute('aria-label', 'Remove attachment');
+    remove.title = 'Remove attachment';
+    remove.textContent = '×';
+    remove.addEventListener('click', clearPendingAttachment);
+    chip.appendChild(label);
+    chip.appendChild(remove);
+    row.appendChild(chip);
+    const notice = _attachmentConfig && _attachmentConfig.upload_notice;
+    if (notice) {
+        const p = document.createElement('p');
+        p.className = 'text-xs text-gray-500 mt-1';
+        p.textContent = notice;
+        row.appendChild(p);
+    }
+}
+
+// Drop a PDF anywhere on the conversation to attach it (same checks as the
+// picker). File drags are always consumed so a drop never navigates the tab
+// away to the PDF.
+function _initAttachmentDrop() {
+    const zone = document.getElementById('chatContainer');
+    if (!zone) return;
+    const isFileDrag = (e) => !!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'));
+    zone.addEventListener('dragover', (e) => {
+        if (!isFileDrag(e)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = (_attachmentsEnabled() && !_sendInFlight) ? 'copy' : 'none';
+    });
+    zone.addEventListener('drop', (e) => {
+        if (!isFileDrag(e)) return;
+        e.preventDefault();
+        const file = e.dataTransfer.files && e.dataTransfer.files[0];
+        if (file && !_sendInFlight) _acceptFile(file);
+    });
 }
 
 // ---- Appointment scheduling (docs/scheduling.md) ----
@@ -983,7 +1177,7 @@ function clientTz() {
     try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch (e) { return null; }
 }
 
-function buildChatPayload(message, schedulingAction = null) {
+function buildChatPayload(message, schedulingAction = null, attachment = null) {
     const payload = {
         session_id: sessionId,
         message: message,
@@ -1000,7 +1194,9 @@ function buildChatPayload(message, schedulingAction = null) {
         multi_agent_mode: multiAgentEnabled,
         client_id: clientId(),
         client_tz: clientTz(),
-        scheduling_action: schedulingAction || null
+        scheduling_action: schedulingAction || null,
+        // The pending PDF for this one turn (ChatRequest.attachment); never stored here or there.
+        attachment: attachment ? { name: attachment.name, mime: attachment.mime, data: attachment.data } : null
     };
     // A hidden card sends no override: null lets the server default govern the flag.
     for (const [key, flag] of Object.entries(CONTROL_FLAGS)) {
@@ -1071,10 +1267,12 @@ async function sendMessageViaStream(payload) {
     });
 
     if (!response.ok || !response.body) {
-        const error = await response.json().catch(() => ({}));
-        const err = new Error(error.detail || 'Failed to send message');
-        // 4xx = request problem (e.g. disclaimer 400): retrying legacy won't help.
-        err.noFallback = response.status >= 400 && response.status < 500;
+        const err = await _requestError(response);
+        // 4xx = request problem (e.g. disclaimer 400, a refused attachment):
+        // retrying legacy won't help, and neither will re-sending a PDF this host
+        // cannot read (503).
+        err.noFallback = (response.status >= 400 && response.status < 500)
+            || (response.status === 503 && !!payload.attachment);
         throw err;
     }
 
@@ -1102,6 +1300,11 @@ async function sendMessageViaStream(payload) {
                 return event;
             }
             if (event.event === 'stage') {
+                // attachment_intake reports on every turn; it only reads
+                // something when a document rides on this one.
+                if (event.node === 'attachment_intake' && !payload.attachment) {
+                    continue;
+                }
                 setLoadingStatus(STAGE_LABELS[event.node]);
             }
         }
@@ -1118,34 +1321,54 @@ async function sendMessageLegacy(payload) {
     });
 
     if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || 'Failed to send message');
+        throw await _requestError(response);
     }
     return response.json();
 }
 
+// An Error for a refused request, carrying the HTTP status and the server's
+// detail when it is a string (an attachment refusal says why; a validation
+// error's list of field errors is not for the chat).
+async function _requestError(response) {
+    const body = await response.json().catch(() => ({}));
+    const detail = typeof body.detail === 'string' ? body.detail : '';
+    const err = new Error(detail || 'Failed to send message');
+    err.status = response.status;
+    err.detail = detail;
+    return err;
+}
+
 // `presetText` / `schedulingAction` are set by a scheduling chip click (the
 // text becomes the user bubble, the action rides on the request); the Send
-// button and Enter key call this with no arguments and read the input.
+// button and Enter key call this with no arguments and read the input. A
+// pending PDF rides on a typed send only, never on a chip click.
 async function sendMessage(presetText = null, schedulingAction = null) {
     const input = document.getElementById('messageInput');
     const fromChip = typeof presetText === 'string';
-    const message = (fromChip ? presetText : input.value).trim();
+    const typed = (fromChip ? presetText : input.value).trim();
+    const attachment = fromChip ? null : pendingAttachment;
 
-    if (!message) {
+    if (!typed && !attachment) {
         return;
     }
+    // A document sent without a question asks the server's default one (the
+    // server substitutes the same text if it is not known here yet).
+    const message = typed || ((_attachmentConfig && _attachmentConfig.default_prompt) || '');
 
     input.disabled = true;
     document.getElementById('sendButton').disabled = true;
-    setLoadingStatus('Processing your message...');
+    _sendInFlight = true;
+    applyAttachmentGate();
+    setLoadingStatus(attachment ? STAGE_LABELS.attachment_intake : 'Processing your message...');
     document.getElementById('loadingIndicator').classList.remove('hidden');
 
-    addMessageToChat('user', message, 'user_message');
+    addMessageToChat('user', message, 'user_message', null, false, null,
+                     attachment ? [{ kind: 'pdf', name: attachment.name, bytes: attachment.size }] : null);
 
     if (!fromChip) input.value = '';
+    if (attachment) clearPendingAttachment();
 
-    const payload = buildChatPayload(message, fromChip ? schedulingAction : null);
+    const payload = buildChatPayload(message, fromChip ? schedulingAction : null, attachment);
 
     try {
         let data;
@@ -1170,10 +1393,16 @@ async function sendMessage(presetText = null, schedulingAction = null) {
     } catch (error) {
         console.error('Error sending message:', error);
         const theme = THEMES[currentTheme] || THEMES.medadvice;
-        addMessageToChat('assistant', theme.errorFallback, 'safety_warning');
+        // A refused attachment is refused before the turn starts, with a detail
+        // that says why (too large, not a PDF, encrypted, no PDF support here).
+        const refusal = attachment && ATTACHMENT_REJECTIONS.has(error.status)
+            ? (error.detail || 'The attachment could not be accepted.') : null;
+        addMessageToChat('assistant', refusal || theme.errorFallback, 'safety_warning');
     } finally {
         input.disabled = false;
         document.getElementById('sendButton').disabled = false;
+        _sendInFlight = false;
+        applyAttachmentGate();   // the host gate decides, not "the send is over"
         document.getElementById('loadingIndicator').classList.add('hidden');
         setLoadingStatus('Processing your message...');
         input.focus();
@@ -1189,8 +1418,9 @@ function parseServerTime(s) {
 }
 
 // `timestamp` is only passed when re-rendering a stored transcript (Show Recent);
-// live turns stamp "now" as before.
-function addMessageToChat(role, content, type, severity = null, escalated = false, timestamp = null) {
+// live turns stamp "now" as before. `attachments` is the turn's document
+// metadata ({name, pages?, bytes?}), drawn as a 📎 line under the text.
+function addMessageToChat(role, content, type, severity = null, escalated = false, timestamp = null, attachments = null) {
     const chatContainer = document.getElementById('chatContainer');
 
     const welcomeMsg = chatContainer.querySelector('.text-center.text-gray-500');
@@ -1243,6 +1473,23 @@ function addMessageToChat(role, content, type, severity = null, escalated = fals
         <div class="text-xs mt-2 opacity-70">${(timestamp ? parseServerTime(timestamp) : new Date()).toLocaleTimeString()}</div>
     `;
 
+    // DOM-built (file names are user input), between the text and the time.
+    if (Array.isArray(attachments)) {
+        const stamp = messageDiv.lastElementChild;
+        attachments.forEach((a) => {
+            if (!a || typeof a !== 'object') return;
+            const line = document.createElement('div');
+            line.className = 'mt-2';
+            const chip = document.createElement('span');
+            chip.className = 'inline-block max-w-full truncate px-2 py-1 text-xs rounded border '
+                + (role === 'user' ? 'border-white/40' : 'border-gray-300');
+            chip.textContent = _attachmentLabel(a);
+            chip.title = String(a.name || '');
+            line.appendChild(chip);
+            messageDiv.insertBefore(line, stamp);
+        });
+    }
+
     chatContainer.appendChild(messageDiv);
     chatContainer.scrollTop = chatContainer.scrollHeight;
     return messageDiv;   // so scheduling chips can be attached under an assistant bubble
@@ -1286,7 +1533,9 @@ function startNewSession() {
     if (!confirm('Are you sure you want to start a new session? This will clear your current conversation.')) {
         return;
     }
-    
+
+    clearPendingAttachment();   // a document waiting in the composer belonged to the old conversation
+
     const chatContainer = document.getElementById('chatContainer');
     const theme = THEMES[currentTheme] || THEMES.medadvice;
     chatContainer.innerHTML = `
@@ -1407,7 +1656,10 @@ function _recentSessionRow(s) {
     const msgs = s.messages || [];
     const first = msgs.find((m) => m.role === 'user');
     const turns = msgs.filter((m) => m.role === 'user').length;
-    const preview = first ? String(first.content || '') : '(no user message)';
+    const firstDoc = first && Array.isArray(first.attachments) && first.attachments[0];
+    const preview = first
+        ? (String(first.content || '') || (firstDoc ? '📎 ' + String(firstDoc.name || 'document.pdf') : ''))
+        : '(no user message)';
     const snippet = preview.length > 90 ? preview.slice(0, 90) + '…' : preview;
     const when = parseServerTime(s.created_at || (first && first.timestamp)).toLocaleString();
     const flags = s.escalated
@@ -1443,7 +1695,7 @@ async function loadRecentSession(id) {
     msgs.forEach((m, i) => {
         const sched = (m.metadata && m.metadata.scheduling) || null;
         const bubble = addMessageToChat(m.role, m.content || '', m.type, schedulingReplySeverity(sched, m.severity || null),
-                                        !!data.escalated && i === lastAssistant, m.timestamp);
+                                        !!data.escalated && i === lastAssistant, m.timestamp, m.attachments || null);
         if (m.role === 'assistant') {
             lastBubble = bubble;
             lastScheduling = (m.metadata && m.metadata.scheduling) || null;
@@ -2307,4 +2559,140 @@ function renderPromptLibrary() {
         trigSec.body.appendChild(sub.wrap);
     });
     root.appendChild(trigSec.wrap);
+
+    // ---- Section: Document injection (collapsed; rows load from the server) ----
+    const docSec = _collapsible('📎  Document injection', 'text-lg font-semibold text-gray-700 py-2 mt-1 border-t border-gray-200');
+    const docNote = document.createElement('p');
+    docNote.className = 'text-xs text-gray-500 mb-2 pl-6';
+    docNote.textContent = 'Each PDF is a realistic document for this theme with an instruction hidden in it: '
+        + 'white text, 1-pt type, or text placed off the page. A PDF viewer shows only the visible content '
+        + '(Preview); text extraction reads everything, and every enabled prompt guardrail screens your message '
+        + 'together with that text. Attach one, press Send, and compare Cisco AI Defense off vs on.';
+    docSec.body.appendChild(docNote);
+    const docList = document.createElement('div');
+    docList.className = 'space-y-2 pl-6';
+    docSec.body.appendChild(docList);
+    root.appendChild(docSec.wrap);
+    _loadDocumentSamples(docList);
+}
+
+// ---- Document injection samples (docs/attachments.md) ----
+// GET /api/attachments/samples?theme= lists the current theme's sample PDFs: the
+// same realistic document with a hidden instruction (backend/services/
+// attack_documents.py) plus a clean control. "Attach" loads the PDF into the
+// composer exactly as an upload would; "Preview" opens it in the browser's PDF
+// viewer, where the hidden text does not show. The expected outcome is what the
+// sample was validated against, not a promise: it holds while Cisco AI Defense is
+// on and its bound policy is unchanged.
+function _isSampleUrl(url) {
+    return typeof url === 'string' && url.startsWith('/api/attachments/samples/');
+}
+
+async function attachSampleDocument(sample, status) {
+    if (!_attachmentsEnabled() || _sendInFlight || !_isSampleUrl(sample.url)) return;
+    status.textContent = 'Loading…';
+    try {
+        const r = await fetch(sample.url);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const blob = await r.blob();
+        setPendingAttachment({
+            name: String(sample.filename || 'document.pdf'),
+            mime: 'application/pdf',
+            data: await _readAsBase64(blob),
+            size: blob.size,
+        });
+        status.textContent = '';
+        if (sample.prompt) usePrompt(String(sample.prompt)); else closePromptLibrary();
+    } catch (e) {
+        console.error('Could not load the sample document:', e);
+        status.textContent = 'The sample could not be loaded.';
+    }
+}
+
+// One sample: its label + neutral hiding badge + expected outcome, the document
+// it is attached as (every sample of a theme shares one cover and file name, so
+// neither the screens nor the model are told what is hidden), then Attach / Preview.
+function _documentSampleRow(sample, enabled) {
+    const row = document.createElement('div');
+    row.className = 'border border-gray-200 rounded p-3';
+    const head = document.createElement('div');
+    head.className = 'flex items-center flex-wrap gap-2 mb-1';
+    const title = document.createElement('span');
+    title.className = 'font-semibold text-gray-800 text-sm';
+    title.textContent = String(sample.label || sample.title || sample.id || 'Sample document');
+    head.appendChild(title);
+    if (sample.hiding_label) {
+        const badge = document.createElement('span');
+        badge.className = 'text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-700';
+        badge.textContent = String(sample.hiding_label);
+        head.appendChild(badge);
+    }
+    const expect = document.createElement('span');
+    expect.className = 'text-xs text-gray-400 italic';
+    expect.textContent = sample.expect_blocked
+        ? 'Expected: blocked by Cisco AI Defense when on' + (sample.validated_on ? ` (validated ${sample.validated_on})` : '')
+        : 'Control: no hidden text';
+    head.appendChild(expect);
+    row.appendChild(head);
+
+    const meta = [sample.title, sample.filename].filter(Boolean).map(String).join(' · ');
+    if (meta) {
+        const p = document.createElement('p');
+        p.className = 'text-xs text-gray-500 mb-2';
+        p.textContent = meta;
+        row.appendChild(p);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'flex items-center flex-wrap gap-2';
+    const btnClass = 'text-sm px-3 py-1.5 rounded border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed';
+    const status = document.createElement('span');
+    status.className = 'text-xs text-gray-500';
+    const attach = document.createElement('button');
+    attach.type = 'button';
+    attach.className = btnClass;
+    attach.textContent = '📎 Attach';
+    attach.disabled = !enabled;
+    attach.title = enabled ? 'Attach this PDF and load its prompt into the message box' : _attachmentGateReason();
+    attach.addEventListener('click', () => attachSampleDocument(sample, status));
+    const preview = document.createElement('button');
+    preview.type = 'button';
+    preview.className = btnClass;
+    preview.textContent = 'Preview';
+    preview.title = 'Open the PDF: the viewer shows only the visible content';
+    preview.addEventListener('click', () => window.open(sample.url, '_blank', 'noopener'));
+    actions.appendChild(attach);
+    actions.appendChild(preview);
+    actions.appendChild(status);
+    row.appendChild(actions);
+    return row;
+}
+
+async function _loadDocumentSamples(list) {
+    const note = (text) => {
+        const p = document.createElement('p');
+        p.className = 'text-xs text-gray-500';
+        p.textContent = text;
+        list.appendChild(p);
+    };
+    list.textContent = '';
+    note('Loading sample documents…');
+    try {
+        const r = await fetch('/api/attachments/samples?theme=' + encodeURIComponent(currentTheme));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        const samples = (data.samples || []).filter((s) => s && _isSampleUrl(s.url));
+        list.textContent = '';
+        if (!samples.length) {
+            note('No sample documents for this theme.');
+            return;
+        }
+        const enabled = _attachmentsEnabled();
+        if (!enabled) note(_attachmentGateReason() + ' — Preview still works.');
+        samples.forEach((s) => list.appendChild(_documentSampleRow(s, enabled)));
+    } catch (e) {
+        console.error('Could not load the sample documents:', e);
+        list.textContent = '';
+        note('Sample documents are unavailable on this server.');
+    }
 }

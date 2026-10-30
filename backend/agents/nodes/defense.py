@@ -4,6 +4,10 @@ Wrap the existing ``AIDefenseClient`` and reuse the engine's block handlers so
 the governance verdict logging is byte-identical to the legacy pipeline. Both
 nodes are no-ops unless the request opted in (``ai_defense_review``) and the
 server is configured.
+
+The prompt node inspects ``screened_prompt(state)``: the typed message plus, on a
+document turn, the attached document's text (docs/attachments.md). The response
+node keeps the typed message as the user context of the answer it judges.
 """
 
 from __future__ import annotations
@@ -11,6 +15,11 @@ from __future__ import annotations
 import time
 from typing import Any, Dict
 
+from backend.agents.nodes.attachment import (
+    attachment_governance_fields,
+    block_banner_suffix,
+    screened_prompt,
+)
 from backend.agents.nodes.shared import content_engine
 from backend.agents.state import governance_identity_overrides
 from backend.agents.token_usage import governance_usage_data
@@ -30,9 +39,11 @@ def prompt_defense_node(state: Dict[str, Any]) -> Dict[str, Any]:
         return {}
 
     started = time.perf_counter()
+    # Exactly user_message without an attachment.
+    screened = screened_prompt(state)
     with otel.agent_span("ai_defense_prompt_agent", theme=state.get("theme")):
         inspection = ai_defense_client.inspect_prompt(
-            state["user_message"], enduser_id=state.get("enduser_id")
+            screened, enduser_id=state.get("enduser_id")
         )
         if not inspection.should_block:
             return {"stage_timings": _stage_timing(state, "prompt_defense", started)}
@@ -41,14 +52,16 @@ def prompt_defense_node(state: Dict[str, Any]) -> Dict[str, Any]:
             session_id=state["session_id"],
             request_id=state["request_id"],
             trace_id=state["trace_id"],
-            user_message=state["user_message"],
+            user_message=screened,
             conversation_history=state.get("conversation_history", []),
             inspection=inspection,
             start_time=state["start_time"],
             client_address=state.get("client_address"),
             enduser_id=state.get("enduser_id"),
-            governance_overrides=governance_identity_overrides(state),
+            governance_overrides={**governance_identity_overrides(state),
+                                  **attachment_governance_fields(state)},
             theme=state.get("theme"),
+            banner_note=block_banner_suffix(state),
         )
 
     return {
@@ -86,7 +99,8 @@ def response_defense_node(state: Dict[str, Any]) -> Dict[str, Any]:
             enduser_id=state.get("enduser_id"),
             llm_model=state.get("llm_model"),
             usage_data=governance_usage_data(state),
-            governance_overrides=governance_identity_overrides(state),
+            governance_overrides={**governance_identity_overrides(state),
+                                  **attachment_governance_fields(state)},
             theme=state.get("theme"),
         )
 

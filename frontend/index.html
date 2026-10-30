@@ -671,8 +671,27 @@
                     </div>
                 </div>
 
-                <!-- Input Area -->
+                <!-- Input Area. A PDF picked with the paperclip (or attached from the
+                     Prompt Library) waits in #attachmentChip and rides on the next Send.
+                     chat.js enables the paperclip from GET /api/server-info
+                     gated.pdf_attachments, with the reason as its tooltip when this host
+                     cannot read PDFs (docs/attachments.md). -->
+                <div id="attachmentChip" class="hidden mb-2"></div>
+                <input type="file" id="attachmentInput" accept="application/pdf,.pdf" class="hidden" onchange="onAttachmentPicked(event)">
                 <div class="flex space-x-2">
+                    <button
+                        type="button"
+                        onclick="openAttachmentPicker()"
+                        id="attachButton"
+                        aria-label="Attach a PDF"
+                        title="Attach a PDF"
+                        disabled
+                        class="px-4 py-4 text-lg border-2 border-violet-600 text-violet-600 rounded-lg hover:bg-violet-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path>
+                        </svg>
+                    </button>
                     <input
                         type="text"
                         id="messageInput"
@@ -739,6 +758,6 @@
         </div>
     </div>
 
-    <script src="/static/js/chat.js?v=32"></script>
+    <script src="/static/js/chat.js?v=33"></script>
 </body>
 </html>

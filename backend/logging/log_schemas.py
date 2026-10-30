@@ -157,6 +157,15 @@ def create_governance_log(
         # retriever span; None (and dropped) otherwise. Not a DB column — AO/HEC
         # only, like tool_thrash.
         "internal_docs": kwargs.get("internal_docs"),
+        # The document attached to the turn (docs/attachments.md): {tool_name,
+        # call_id, kind, name, mime, bytes, sha256, pages, pages_read, chars,
+        # truncated, status, duration_ms[, error]} -- metadata only, never the
+        # extracted text (input_messages carries the composed turn) and never the
+        # bytes. Rides on every chat event of a document turn, blocked ones too;
+        # the Agent Observability path rebuilds it as a tool span. None (and
+        # dropped) otherwise. Not a DB column — HEC/AO/JSONL only, like
+        # internal_docs.
+        "attachment": kwargs.get("attachment"),
         "theme": kwargs.get("theme"),
         "severity": kwargs.get("severity"),
         "tool_name": kwargs.get("tool_name"),

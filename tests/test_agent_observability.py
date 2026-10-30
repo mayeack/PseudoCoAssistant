@@ -17,6 +17,7 @@ touches the network.
 
     venv/bin/python tests/test_agent_observability.py    # exit 0 = pass
 """
+import json
 import logging
 import os
 import sys
@@ -488,6 +489,58 @@ check("the retriever span carries the governance metadata, the doc ids and the s
 check("a retriever span is a leaf: the conclude count is unchanged",
       _seq.count("conclude") == _baseline.count("conclude"))
 check("additive: a turn without internal_docs emits no retriever span", "add_retriever_span" not in _baseline)
+
+# The attached document's read (attachment on the governance event,
+# docs/attachments.md) becomes flat attachment_* keys on every span and ONE leaf
+# tool span right after the workflow span (the read ran first in the PRE chain):
+# the document's metadata in, what was extracted out -- never the text.
+_ATT = {"tool_name": "attachment-intake.extract_text", "call_id": "att-0123456789ab", "kind": "pdf",
+        "name": "lab-results-summary.pdf", "mime": "application/pdf", "bytes": 2048, "sha256": "ab" * 32,
+        "pages": 2, "pages_read": 2, "chars": 1830, "truncated": False, "status": "ok", "duration_ms": 41.0}
+_ATT_FLAT = {"attachment_kind": "pdf", "attachment_name": "lab-results-summary.pdf", "attachment_sha256": "ab" * 32,
+             "attachment_pages": 2, "attachment_chars": 1830, "attachment_truncated": False,
+             "attachment_status": "ok"}
+_SPAN_CALLS = ("start_trace", "add_workflow_span", "add_agent_span", "add_llm_span", "add_tool_span")
+fake = _FakeLogger()
+ao._build_turn(fake, dict(_turn(), attachment=_ATT))
+_seq = _names(fake.calls)
+_att_spans = [c[1] for c in fake.calls if c[0] == "add_tool_span"]
+check("attachment -> the flat attachment_* keys ride on the trace and every span",
+      all({k: c[1].get("metadata", {}).get(k) for k in _ATT_FLAT} == _ATT_FLAT
+          for c in fake.calls if c[0] in _SPAN_CALLS))
+check("attachment -> exactly one attachment-intake.extract_text tool span carrying the read's call id",
+      len(_att_spans) == 1 and _att_spans[0].get("name") == "attachment-intake.extract_text"
+      and _att_spans[0].get("tool_call_id") == "att-0123456789ab" and _att_spans[0].get("status_code") == 200)
+check("the tool span is the read: the document's metadata in, what was extracted out",
+      json.loads(_att_spans[0]["input"]) == {k: _ATT[k] for k in ("kind", "name", "mime", "bytes", "sha256", "pages")}
+      and _att_spans[0]["output"] == "Extracted 1830 characters from 2 of 2 pages (ok)"
+      and _att_spans[0]["metadata"].get("attachment_call_id") == "att-0123456789ab"
+      and _att_spans[0]["metadata"].get("attachment_pages_read") == 2)
+check("the tool span follows the workflow span, starts at the turn start and lasts the read",
+      _seq.index("add_tool_span") == _seq.index("add_workflow_span") + 1
+      and _seq.index("add_tool_span") < _seq.index("add_agent_span")
+      and _att_spans[0].get("created_at") == _t0 and _att_spans[0].get("duration_ns") == 41_000_000)
+check("the attachment tool span is a leaf: the conclude count is unchanged",
+      _seq.count("conclude") == _baseline.count("conclude"))
+fake = _FakeLogger()
+ao._build_turn(fake, dict(_turn(), attachment=dict(_ATT, text="HIDDEN-DOCUMENT-TEXT", truncated=True)))
+check("the record's text never reaches the trace (metadata or tool span), even if a record carried it",
+      "HIDDEN-DOCUMENT-TEXT" not in str(fake.calls)
+      and [c[1]["output"] for c in fake.calls if c[0] == "add_tool_span"]
+      == ["Extracted 1830 characters from 2 of 2 pages (ok, truncated)"])
+fake = _FakeLogger()
+ao._build_turn(fake, dict(_turn(), attachment=dict(_ATT, status="error", chars=0, pages_read=0,
+                                                   error="WorkerTimeout: the PDF worker did not answer")))
+_att_err = [c[1] for c in fake.calls if c[0] == "add_tool_span"]
+check("a failed read is a status-500 tool span carrying the error",
+      len(_att_err) == 1 and _att_err[0].get("status_code") == 500
+      and _att_err[0]["output"] == "Text extraction failed: WorkerTimeout: the PDF worker did not answer"
+      and _att_err[0]["metadata"].get("attachment_status") == "error")
+fake = _FakeLogger()
+ao._build_turn(fake, _turn())
+check("additive: a turn without an attachment emits no tool span and no attachment_* keys",
+      "add_tool_span" not in _names(fake.calls)
+      and not any(k.startswith("attachment_") for c in fake.calls for k in (c[1].get("metadata") or {})))
 
 fake = _FakeLogger()
 fake.fail_start = True

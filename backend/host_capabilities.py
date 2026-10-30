@@ -8,6 +8,8 @@ Gate on the capability an option actually needs, not on a vendor name:
   running NIM serves can answer a chat turn.
 - the NemoClaw runtime needs Docker Engine / Docker Desktop / Colima (Podman is
   explicitly unsupported by NemoClaw) and Node >= 22.19.
+- PDF chat attachments need the pypdf package (docs/attachments.md); it is pure
+  Python, so "installed" is the whole check.
 
 Every probe is best-effort, short, cached, and never raises: a missing binary
 reads as "absent", not as an error. The Settings poll reads the cache;
@@ -15,6 +17,7 @@ reads as "absent", not as an error. The Settings poll reads the cache;
 """
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 import platform
@@ -124,6 +127,14 @@ def _gate(enabled: bool, reason: str = "") -> Dict[str, Any]:
     return {"enabled": bool(enabled), "reason": "" if enabled else reason}
 
 
+def pdf_attachments_gate() -> Dict[str, Any]:
+    """The ``pdf_attachments`` rule. A package lookup, no probe: ``gated_rules``
+    carries it, and ``attachments.pdf_support()`` evaluates it directly only
+    while there is no cached snapshot yet (before the first ``detect()``)."""
+    return _gate(importlib.util.find_spec("pypdf") is not None,
+                 "PDF support is not installed (pip install -r requirements.txt)")
+
+
 def gated_rules(caps: Dict[str, Any], settings) -> Dict[str, Dict[str, Any]]:
     """The single place the 'can this option work here' rules live. The UI and
     the API validation both read these; neither re-derives them."""
@@ -173,7 +184,10 @@ def gated_rules(caps: Dict[str, Any], settings) -> Dict[str, Dict[str, Any]]:
         else:
             models[f.id] = _gate(True)
     return {"provider_nvidia": provider_nvidia, "nim_local": nim_local,
-            "nemoclaw_runtime": nemoclaw, "nvidia_models": models}
+            "nemoclaw_runtime": nemoclaw, "nvidia_models": models,
+            # Chat attachments (docs/attachments.md): the Attach button's gate
+            # and the chat API's 503.
+            "pdf_attachments": pdf_attachments_gate()}
 
 
 # --------------------------------------------------------------------------- api

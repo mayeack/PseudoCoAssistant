@@ -45,6 +45,7 @@ SUITES=(
   tests/test_synthetic_content.py
   tests/test_ehr.py
   tests/test_internal_docs.py
+  tests/test_attachments.py
   tests/test_themes.py
   tests/test_token_cache_split.py
   tests/test_recommendation_formatting.py

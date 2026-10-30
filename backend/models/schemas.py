@@ -37,6 +37,18 @@ class SchedulingAction(BaseModel):
     appointment_id: Optional[str] = Field(default=None, max_length=64)
     page: int = Field(default=0, ge=0, le=50)
 
+class ChatAttachment(BaseModel):
+    """A document attached to one chat turn (docs/attachments.md). PDF only
+    today (backend/services/attachments.py SUPPORTED); images come later. The
+    bytes are validated and read for this turn only and never persisted — only
+    their metadata (kind, name, mime, bytes, sha256, pages) is."""
+    name: str = Field("document.pdf", max_length=255)
+    mime: str = Field("application/pdf", max_length=100)
+    # Base64 file content; a `data:<mime>;base64,` prefix is tolerated. No
+    # max_length here: the size limits answer 413 with a string detail
+    # (backend/middleware/body_limit.py, attachments.validate_upload).
+    data: str
+
 class ChatRequest(BaseModel):
     session_id: str
     message: str
@@ -59,6 +71,10 @@ class ChatRequest(BaseModel):
     client_id: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,64}$")
     client_tz: Optional[str] = Field(default=None, max_length=64)
     scheduling_action: Optional[SchedulingAction] = None
+    # Chat attachment (docs/attachments.md): a PDF whose extracted text is
+    # screened together with `message` by every enabled prompt guardrail —
+    # always, there is no toggle. Not a Demo Control, so not Optional[bool].
+    attachment: Optional[ChatAttachment] = None
 
 class ChatResponse(BaseModel):
     session_id: str
@@ -141,6 +157,12 @@ class GenAILogEntry(BaseModel):
     enduser_id: Optional[str] = None
     service_name: str = "pseudoco-assistant"
     client_address: Optional[str] = None
+
+    # Chat attachment (docs/attachments.md): the extraction's metadata record
+    # (attachments.governance_record — never the text, never the bytes) and
+    # what the turn carried: "text" or "text+pdf".
+    attachment: Optional[Dict[str, Any]] = None
+    input_modality: Optional[str] = None
 
     # Timestamp
     timestamp: datetime = Field(default_factory=datetime.utcnow)

@@ -24,6 +24,7 @@ from backend.agents.nodes.agent_common import (
     request_model,
     trace_entry,
 )
+from backend.agents.nodes.attachment import with_attachment_note
 from backend.agents.nodes.shared import build_llm_messages
 from backend.agents.token_usage import TokenTally
 from backend.agents.themes.base import build_coordinator_prompt
@@ -58,7 +59,9 @@ def make_coordinator_agent(theme_config) -> Callable[[Dict[str, Any]], Dict[str,
     agent_name = theme_config.coordinator_agent_name
 
     def coordinator_node(state: Dict[str, Any]) -> Dict[str, Any]:
-        messages = build_llm_messages(state.get("conversation_history", []))
+        # On a document turn the coordinator learns a document exists (its name,
+        # never its text -- docs/attachments.md), so it plans instead of asking for it.
+        messages = with_attachment_note(build_llm_messages(state.get("conversation_history", [])), state)
         provider = settings.ai_provider
         # Internal (non-user-facing) agent: run on the clean Ollama model so a
         # selected poisoned model only affects the user-facing synthesizer.

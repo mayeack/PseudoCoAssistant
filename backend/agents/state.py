@@ -116,6 +116,19 @@ class PseudoCoAssistantState(TypedDict, total=False):
     # of CORE_STATE_CONTRACT. Unset on an ordinary turn.
     internal_docs: Dict[str, Any]
 
+    # ---- Chat attachment (docs/attachments.md) ----
+    # ``attachment`` comes in from the request: the validated upload
+    # (``attachments.validate_upload`` -- metadata plus the bytes, for this turn
+    # only). The shared-chain ``attachment_intake`` PRE node reads it, replaces it
+    # with a metadata-only copy (the bytes go no further) and sets
+    # ``attachment_extraction``: the extracted text capped at
+    # ``attachment_max_chars`` plus its facts (status, pages, chars, truncated,
+    # sha256, call id). Produced by the shared chain, not a blueprint core, so
+    # (like ``internal_docs``) it is NOT part of CORE_STATE_CONTRACT. Unset on an
+    # ordinary turn.
+    attachment: Optional[Dict[str, Any]]
+    attachment_extraction: Dict[str, Any]
+
     # ---- LLM messages + raw model output (synthesizer; tokens summed) ----
     messages: List[Dict[str, Any]]
     recommendation: Dict[str, Any]
@@ -215,6 +228,7 @@ def build_initial_state(
     client_id: Optional[str] = None,
     client_tz: Optional[str] = None,
     scheduling_action: Optional[Dict[str, Any]] = None,
+    attachment: Optional[Dict[str, Any]] = None,
 ) -> PseudoCoAssistantState:
     """Build the initial graph state from an inbound chat request.
 
@@ -243,6 +257,7 @@ def build_initial_state(
         client_id=client_id,
         client_tz=client_tz,
         scheduling_action=scheduling_action,
+        attachment=attachment,
         terminal=False,
     )
 

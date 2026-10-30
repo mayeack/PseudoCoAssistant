@@ -18,6 +18,8 @@ nodes are driven directly with a synthetic state (like tests/test_guardrail_node
     between agent_control and response_defense (Cisco stays the last word).
   - Settings: the nemo_guardrails integration card fields + live reconfigure;
     the content-safety URL obeys the local-only rule; _BLOCK_GUARDRAILS maps it.
+  - prompts.yml: self_check_input's max_length fits a document turn (a message
+    plus a capped attachment, docs/attachments.md) instead of raising.
 
 Run:  venv/bin/python tests/test_nemo_guardrails.py    # exit 0 = pass
 """
@@ -254,6 +256,8 @@ def test_graph_order() -> None:
           and ("ehr_lookup", "internal_docs") in edges
           and ("internal_docs", "mcp_thrash_launch") in edges
           and ("mcp_thrash_launch", "intake") in edges)
+    check("attachment_intake -> policy: the attached document is read before every screen, the input rails included",
+          ("attachment_intake", "policy") in edges and ("nemo_input_rails", "attachment_intake") not in edges)
     check("agent_control -> nemo_output_rails -> response_defense (Cisco stays last)",
           ("agent_control", "nemo_output_rails") in edges and ("nemo_output_rails", "response_defense") in edges)
     check("both rails can short-circuit to END",
@@ -338,6 +342,52 @@ def test_ollama_judge_folds_call_kwargs_into_options() -> None:
         check("rail types fall back to strings without the package", ng._rail_type_enums(["input"]) == ["input"])
 
 
+def test_self_check_input_fits_a_document_turn() -> None:
+    """docs/attachments.md: on a document turn the input rails check the typed
+    message plus up to attachment_max_chars of extracted text. Under NeMo's
+    16,000-character default max_length a long message + document raises
+    "Prompt exceeds max length" in the task manager -- which fail-open turns into
+    a silent pass -- so guardrails/nemo/prompts.yml lifts self_check_input's."""
+    from backend.services import attachments
+
+    def composed(typed_chars: int) -> str:
+        text = ("Line item: balance carried forward. " * 400)[: int(settings.attachment_max_chars)]
+        return attachments.compose_user_turn("x" * typed_chars, {
+            "name": "statement.pdf", "pages": 50, "kind": "pdf", "status": "ok", "text": text, "truncated": True})
+
+    try:
+        from nemoguardrails import RailsConfig
+        from nemoguardrails.llm.taskmanager import LLMTaskManager
+    except ImportError:
+        import yaml
+
+        prompts = yaml.safe_load((ROOT / "guardrails" / "nemo" / "prompts.yml").read_text())["prompts"]
+        limits = [p.get("max_length") for p in prompts if p.get("task") == "self_check_input"]
+        check("self_check_input max_length >= 32000 (config only: nemoguardrails not installed)",
+              bool(limits) and (limits[0] or 0) >= 32000, str(limits))
+        return
+
+    cfg = RailsConfig.from_path(str(ROOT / "guardrails" / "nemo"))
+    limits = [p.max_length for p in cfg.prompts if p.task == "self_check_input"]
+    check("self_check_input max_length >= 32000", bool(limits) and (limits[0] or 0) >= 32000, str(limits))
+    check("the other judge prompts keep NeMo's default",
+          all(p.max_length == 16000 for p in cfg.prompts if p.task != "self_check_input"),
+          str([(p.task, p.max_length) for p in cfg.prompts]))
+    manager = LLMTaskManager(cfg)
+    rendered = {}
+    for typed in (2500, 4000):
+        prompt = composed(typed)
+        try:
+            rendered[typed] = manager.render_task_prompt("self_check_input", context={"user_input": prompt})
+            ok, detail = prompt in rendered[typed], f"{len(rendered[typed])} chars"
+        except Exception as exc:  # noqa: BLE001 - the task manager raises a bare Exception
+            ok, detail = False, f"{type(exc).__name__}: {exc}"
+        check(f"a document at the {settings.attachment_max_chars:,}-character cap plus a {typed:,}-character "
+              "message renders whole for self_check_input", ok, detail)
+    check("the longer one is past NeMo's 16,000-character default (why the limit is lifted)",
+          len(rendered.get(4000, "")) > 16000, str(len(rendered.get(4000, ""))))
+
+
 def test_client_degrades_without_package() -> None:
     """Without nemoguardrails installed (or with a broken config) the client must
     return an errored verdict — never raise into the graph."""
@@ -365,6 +415,7 @@ def main() -> int:
         test_graph_order,
         test_settings_card_and_mapping,
         test_ollama_judge_folds_call_kwargs_into_options,
+        test_self_check_input_fits_a_document_turn,
         test_client_degrades_without_package,
     ):
         try:

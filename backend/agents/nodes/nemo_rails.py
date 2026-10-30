@@ -5,7 +5,8 @@ unless the request opted in (``nemo_guardrails_review``) and the client is
 configured (``nemo_guardrails_enabled`` master switch + the rails directory).
 
 Placement (see backend/agents/blueprints/guardrails.py):
-  policy -> prompt_defense -> **nemo_input_rails** -> intake -> ...
+  attachment_intake -> policy -> prompt_defense -> agent_control_prompt
+    -> **nemo_input_rails** -> scheduling_intake -> ... -> intake -> ...
   ... -> compliance -> agent_control -> **nemo_output_rails** -> response_defense -> governance
 so Cisco AI Defense inspects the prompt first and stays the last word on output.
 
@@ -13,6 +14,11 @@ A fired rail withholds the turn through the same governance contract as the
 other blocking guardrails (``guardrail_ids=["nemo_guardrails"]``, the rails that
 fired in ``safety_categories``, ``policy_blocked=True``, a ``response_text``
 banner). Errors honor ``nemo_guardrails_fail_open``.
+
+The input rails check ``screened_prompt(state)``: the typed message plus, on a
+document turn, the attached document's text (docs/attachments.md;
+``self_check_input`` allows a prompt that long in guardrails/nemo/prompts.yml).
+The output rails keep the typed message as the answer's user context.
 """
 
 from __future__ import annotations
@@ -20,6 +26,11 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional
 
+from backend.agents.nodes.attachment import (
+    attachment_governance_fields,
+    block_banner_suffix,
+    screened_prompt,
+)
 from backend.agents.state import governance_identity_overrides
 from backend.agents.token_usage import governance_usage_data
 from backend.logging.governance_logger import active_response_model, governance_logger
@@ -79,7 +90,9 @@ def _blocked_result(
     """Withhold the turn and log the verdict — shaped exactly like the Agent
     Control / AI Defense block handlers so downstream consumers are indifferent
     to which guardrail fired. Only ``guardrail_ids`` and the metadata block
-    attribute it to NeMo Guardrails."""
+    attribute it to NeMo Guardrails. An input-rail block of a document turn
+    says the document was screened with the message, like the other
+    prompt-stage banners."""
     duration = time.time() - state["start_time"]
     if verdict.errored:
         reasons = [f"NeMo Guardrails unavailable (fail-closed): {verdict.error_message}"]
@@ -92,6 +105,7 @@ def _blocked_result(
         blocked_message = block_banner(
             _BLOCKED_INPUT if stage == "input" else _BLOCKED_OUTPUT,
             state.get("theme"),
+            note=block_banner_suffix(state) if stage == "input" else "",
         )
 
     governance_logger.log_response(
@@ -123,6 +137,7 @@ def _blocked_result(
         client_address=state.get("client_address"),
         enduser_id=state.get("enduser_id"),
         **governance_identity_overrides(state),
+        **attachment_governance_fields(state),
     )
 
     return {
@@ -144,8 +159,10 @@ def nemo_input_rails_node(state: Dict[str, Any]) -> Dict[str, Any]:
         return {}
 
     started = time.perf_counter()
+    # Exactly user_message without an attachment.
+    screened = screened_prompt(state)
     with otel.agent_span("nemo_guardrails_input_agent", theme=state.get("theme")):
-        verdict = nemo_guardrails_client.check_input(state["user_message"])
+        verdict = nemo_guardrails_client.check_input(screened)
         if not verdict.should_block:
             return {
                 "nemo_guardrails_input": verdict,
@@ -153,7 +170,7 @@ def nemo_input_rails_node(state: Dict[str, Any]) -> Dict[str, Any]:
             }
         result = _blocked_result(
             state, verdict, stage="input",
-            input_messages=[{"role": "user", "content": state["user_message"]}],
+            input_messages=[{"role": "user", "content": screened}],
         )
 
     return {

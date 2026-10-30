@@ -27,6 +27,7 @@ A macOS-compatible advice web application built with Python, FastAPI, and config
   - User explicitly requests professional review
 - **Safety Guardrails**: Never provides prescription dosages or pediatric medication advice
 - **Natural PII/PHI Integration**: Realistic synthetic patient data naturally woven into responses for governance testing (25% background rate by default, configurable per category; the UI toggles force a category ON)
+- **PDF Attachments, Always Screened**: Attach a PDF in the composer, or a one-click sample attack document from the Prompt Library (a realistic cover with an instruction hidden as white, 1-point or off-page text). Its extracted text is screened together with the message by every enabled prompt guardrail and is what the model reads, so turning Cisco AI Defense off vs on shows a document-borne prompt injection missed vs caught. No toggle; see [docs/attachments.md](docs/attachments.md)
 
 ### AI Governance Logging
 Comprehensive logging following OpenTelemetry semantic conventions:
@@ -76,10 +77,15 @@ subgraph: the shared guardrail chain wired around the selected **blueprint**'s
 generation core (`backend/agents/blueprints/`):
 
 ```
-policy -> prompt_defense -> agent_control_prompt -> nemo_input_rails -> <blueprint core>
-      -> safety -> injection -> compliance -> agent_control -> nemo_output_rails
-      -> response_defense -> governance
+attachment_intake -> policy -> prompt_defense -> agent_control_prompt -> nemo_input_rails
+      -> <blueprint core> -> safety -> injection -> compliance -> agent_control
+      -> nemo_output_rails -> response_defense -> governance
 ```
+
+`attachment_intake` reads an attached PDF's text layer in a killable worker
+process, so every prompt screen after it inspects the typed message plus the
+document, the same text the model gets. On a turn without an attachment it does
+nothing (see [docs/attachments.md](docs/attachments.md)).
 
 The two `agent_control` nodes are the **Agent Observability Controls** guardrail.
 They can target the Galileo console (default) or the Agent Control server hosted
@@ -278,7 +284,9 @@ even with the gateway down). Auto-start at login is opt-in:
 
 ### Chat API
 - `POST /api/chat/session/new` - Create new session
-- `POST /api/chat/message` - Send message
+- `POST /api/chat/message` - Send message (`/api/chat/message/stream` streams the pipeline stages). An optional `attachment: {name, mime, data}` carries one base64 PDF (5 MB, 50 pages); its text is screened together with the message. A rejected file gets 413 / 415 / 422 (503 without PDF support) with a plain-string `detail`, and nothing is recorded ([docs/attachments.md](docs/attachments.md))
+- `GET /api/attachments/samples?theme=<key>` - The theme's sample attack documents for the Prompt Library (one per hiding technique, plus a clean control)
+- `GET /api/attachments/samples/{id}.pdf?theme=<key>` - One sample PDF, rendered on demand
 - `GET /api/chat/session/{session_id}` - Get session history
 - `GET /api/chat/disclaimer` - Get medical disclaimer
 
@@ -631,5 +639,6 @@ For issues or questions:
 - **[Testing Guide](TESTING_GUIDE.md)** - Comprehensive testing procedures, including the synthetic PII/PHI injection reference
 - **[Quickstart](QUICKSTART.md)** - Fast setup and run instructions
 - **[OpenShift deployment](deploy/openshift/README.md)** - In-cluster build, remote NIM via `provider=openai`, AI Defense CA chain
+- **[PDF attachments](docs/attachments.md)** - Document-borne prompt injection: request contract, pipeline placement, what is logged where, sample documents, the live probe
 - **[System Policies](SYSTEM_POLICIES.md)** - Internal policy / guardrail reference
 - **[Project Summary](PROJECT_SUMMARY.md)** - High-level project overview

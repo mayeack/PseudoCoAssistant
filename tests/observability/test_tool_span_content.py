@@ -18,11 +18,17 @@ Two things must hold for the demo telemetry to work:
      call's wall time -- not a near-zero span opened after the call returned --
      and a call that raises ends the span with an ERROR status.
 
+  4. The same holds for the attached document's read (attachment_intake,
+     docs/attachments.md): the span wraps the extraction, never carries the
+     document text, and a read that fails ends it with ERROR while the node
+     still records the read (status "error") and lets the turn go on.
+
 Code-level check (no live Splunk): drives the helpers through an in-memory
 exporter. Run: venv/bin/python tests/observability/test_tool_span_content.py
 """
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -174,6 +180,95 @@ def check_failed_call_ends_span_with_error():
     assert span.status.status_code == StatusCode.ERROR, "a failed search's span must end with ERROR"
 
 
+# The read is stubbed at the worker boundary (pdf_worker.run_extract), so the
+# real attachments.extract_text and node run without pypdf or a child process.
+_DOC_TEXT = "Lab Results Summary\nHemoglobin: within the reference range"
+
+
+def _run_attachment_node(run_extract):
+    """Drive attachment_intake_node on a one-page PDF turn with ``run_extract``
+    in place of the worker; returns (node output, logged tool calls)."""
+    from backend.agents.nodes import attachment as att_node
+    from backend.services import pdf_worker
+
+    state = {"theme": "medadvice", "session_id": "s", "request_id": "r", "trace_id": "t",
+             "user_message": "Can you summarize this document for me?",
+             "attachment": {"kind": "pdf", "name": "lab-results-summary.pdf", "mime": "application/pdf",
+                            "bytes": 13, "sha256": "ab" * 32, "pages": 1, "data": b"%PDF-1.4 stub"}}
+    logged = []
+    orig_extract, orig_log = pdf_worker.run_extract, att_node.governance_logger.log_tool_call
+    pdf_worker.run_extract = run_extract
+    att_node.governance_logger.log_tool_call = lambda **kw: logged.append(kw)
+    att_node.logger.disabled = True          # the failed read's traceback is expected
+    _enable_in_memory()
+    try:
+        out = att_node.attachment_intake_node(state)
+    finally:
+        pdf_worker.run_extract = orig_extract
+        att_node.governance_logger.log_tool_call = orig_log
+        att_node.logger.disabled = False
+        _disable()
+    return out, logged
+
+
+def check_attachment_span_wraps_the_read():
+    """attachment_intake opens execute_tool AROUND the extraction: the span lasts
+    at least the (slowed) read, carries the call id the governance event and
+    the extraction record carry, the read's facts -- and never the text."""
+    from opentelemetry.trace import StatusCode
+
+    from backend.services import attachments
+
+    delay_s = 0.05
+
+    def slow_extract(data, *, max_chars, max_pages, timeout_s):
+        time.sleep(delay_s)
+        return {"text": _DOC_TEXT, "pages_read": 1, "chars": len(_DOC_TEXT), "truncated": False}
+
+    out, logged = _run_attachment_node(slow_extract)
+    extraction = out.get("attachment_extraction") or {}
+    assert extraction.get("status") == "ok" and extraction.get("text") == _DOC_TEXT, \
+        f"the read did not produce an ok extraction: {extraction.get('status')}"
+    span = _find(f"execute_tool {attachments.TOOL_NAME}")
+    assert span is not None, f"no 'execute_tool {attachments.TOOL_NAME}' span was emitted"
+    dur_s = (span.end_time - span.start_time) / 1e9
+    assert dur_s >= delay_s * 0.9, \
+        f"the span lasted {dur_s * 1000:.2f} ms, shorter than the {delay_s * 1000:.0f} ms read"
+    assert len(logged) == 1 and logged[0]["tool_name"] == attachments.TOOL_NAME, \
+        f"expected one tool_call governance event, got {len(logged)}"
+    assert _attr(span, "gen_ai.tool.call.id") == logged[0]["tool_call_id"] == extraction["call_id"], \
+        "span call id != governance tool_call_id != extraction call_id"
+    assert _attr(span, "pseudoco-assistant.tool.decision") == "allow", "missing decision"
+    assert _attr(span, "pseudoco-assistant.attachment.status") == "ok", "missing attachment status"
+    assert _attr(span, "pseudoco-assistant.attachment.chars") == len(_DOC_TEXT), "missing attachment chars"
+    assert "Hemoglobin" not in str(dict(span.attributes or {})), "the span carries the document text"
+    assert span.status.status_code != StatusCode.ERROR, "a successful read's span ended with ERROR"
+
+
+def check_attachment_failed_read_ends_span_with_error():
+    """A read that raises (worker timeout) still emits its span, ended with
+    ERROR; the node records the failed read and never breaks the turn."""
+    from opentelemetry.trace import StatusCode
+
+    from backend.services import attachments, pdf_worker
+
+    def hung_extract(data, *, max_chars, max_pages, timeout_s):
+        raise pdf_worker.WorkerTimeout("the PDF worker did not answer in time")
+
+    out, logged = _run_attachment_node(hung_extract)
+    extraction = out.get("attachment_extraction") or {}
+    assert not out.get("terminal"), "a failed read must never end the turn"
+    assert extraction.get("status") == "error" and str(extraction.get("error", "")).startswith("WorkerTimeout"), \
+        f"the failed read was not recorded as status 'error': {extraction}"
+    assert extraction.get("text") == "" and "data" not in (out.get("attachment") or {}), \
+        "a failed read must leave no text and no bytes behind"
+    assert len(logged) == 1 and logged[0]["tool_call_id"] == extraction["call_id"], \
+        "the failed read must still be logged as one governed tool call"
+    span = _find(f"execute_tool {attachments.TOOL_NAME}")
+    assert span is not None, "a failed read must still emit its execute_tool span"
+    assert span.status.status_code == StatusCode.ERROR, "a failed read's span must end with ERROR"
+
+
 def main():
     ok = True
     for name, fn in [
@@ -181,6 +276,9 @@ def main():
         ("tool_span no-op when telemetry disabled", check_tool_span_disabled),
         ("node execute_tool spans wrap the synthetic call", check_node_spans_wrap_the_call),
         ("a failed call ends its span with ERROR", check_failed_call_ends_span_with_error),
+        ("attachment execute_tool span wraps the document read", check_attachment_span_wraps_the_read),
+        ("a failed document read ends its span with ERROR, the turn goes on",
+         check_attachment_failed_read_ends_span_with_error),
     ]:
         try:
             fn()

@@ -36,9 +36,9 @@
 │                                                                 │
 │   Per-theme pipeline = shared guardrail chain around the        │
 │   selected BLUEPRINT core (backend/agents/blueprints):          │
-│   policy ▶ prompt_defense ▶ nemo_input_rails ▶ <core> ▶ safety  │
-│     ▶ injection ▶ compliance ▶ agent_control ▶ nemo_output_rails│
-│     ▶ response_defense ▶ governance                             │
+│   attachment_intake ▶ policy ▶ prompt_defense ▶ nemo_input_rails│
+│     ▶ <core> ▶ safety ▶ injection ▶ compliance ▶ agent_control  │
+│     ▶ nemo_output_rails ▶ response_defense ▶ governance         │
 │   cores: pseudoco_multi_agent (intake ▶ [coordinator ▶           │
 │          specialists] ▶ synthesizer) | nvidia_virtual_assistant │
 │          (fetch_record ▶ ask_clarification ▶ primary_assistant  │
@@ -131,6 +131,9 @@
 - Color-coded message types
 - Session management
 - Disclaimer acceptance
+- PDF attachments: the 📎 Attach button (or drag and drop), greyed out by the
+  `pdf_attachments` host gate, and the Prompt Library's sample attack documents
+  (`docs/attachments.md`)
 
 #### Admin Dashboard (`admin.html`)
 - Real-time metrics visualization
@@ -145,6 +148,7 @@
 - PII/safety flag visualization
 - Escalation details
 - Performance metrics
+- 📎 lines for a message's attachments (metadata only)
 
 ### 2. API Gateway Layer
 
@@ -160,6 +164,9 @@
 - Error handling
 - Request ID injection
 - Performance monitoring
+- Chat body-size guard (`ChatBodyLimitMiddleware`): 413 for a POST to
+  `/api/chat/message[/stream]` larger than the biggest allowed attachment plus
+  headroom; it sits inside the access-key gate, so 401 still comes first
 
 ### 3. Agentic Orchestration Layer (LangGraph)
 
@@ -174,8 +181,8 @@ START -> router -> {theme}_subgraph -> END
 
 **Per-theme decomposed pipeline** (`build_theme_subgraph`):
 ```
-policy -> prompt_defense -> intake -> domain(theme) -> safety
-      -> injection -> compliance -> response_defense -> governance
+attachment_intake -> policy -> prompt_defense -> intake -> domain(theme)
+      -> safety -> injection -> compliance -> response_defense -> governance
 ```
 
 **Components:**
@@ -187,6 +194,13 @@ policy -> prompt_defense -> intake -> domain(theme) -> safety
   final `result` dict between nodes.
 - **Specialist nodes** (`nodes/`): each node wraps an existing service so the
   business logic and governance contract are unchanged:
+  - `attachment_intake` - first in the shared chain: when the turn carries a PDF,
+    extracts its text layer in a killable worker process
+    (`services/pdf_worker.py`) as a governed tool call (`execute_tool
+    attachment-intake.extract_text` + a `tool_call` event). Every prompt screen
+    below and the answering agent then get the same composed text (typed message
+    plus document); internal agents get only a metadata note; deterministic logic
+    keeps the typed message (`docs/attachments.md`)
   - `policy` - internal policy block check
   - `prompt_defense` / `response_defense` - Cisco AI Defense guardrail
   - `intake` - clarifying questions
@@ -205,7 +219,8 @@ policy -> prompt_defense -> intake -> domain(theme) -> safety
 
 Any node may set `terminal` to short-circuit the remaining pipeline straight to
 the subgraph's `END` (policy block, AI Defense block, clarifying question, or
-generation error).
+generation error). `attachment_intake` never does: a failed extraction is
+recorded as `status: "error"` and the turn goes on.
 
 **Feature flag & fallback:** `settings.use_agentic_engine` gates the workflow in
 `routers/chat.py`. If the agentic dependencies are missing or the graph fails to
@@ -392,10 +407,16 @@ single source of truth.
 3. Request Logging Middleware logs request
    ↓
 4. Chat Router validates input and dispatches the turn
-   (settings.use_agentic_engine → LangGraph workflow; else legacy engine)
+   (settings.use_agentic_engine → LangGraph workflow; else legacy engine).
+   An attached PDF is validated first (413/415/422, 503 without PDF
+   support); a rejected file records nothing. Only its metadata is stored.
    ↓
 5. Workflow span opens; router sets request_id/trace_id, resolves theme,
    logs the input event, and routes to the {theme}_subgraph
+   ↓
+5a. attachment_intake → attached PDF? extract its text (killable worker,
+                       execute_tool span + tool_call event); steps 6-7 and
+                       the domain agent then see typed message + document
    ↓
 6. policy            → internal policy block? ── yes → END (blocked)
    ↓
@@ -600,7 +621,9 @@ Docker Container
 ## Future Enhancements
 
 1. **Real-time Streaming**: WebSocket support for streaming responses
-2. **Multi-modal**: Image upload for symptom photos
+2. **Image attachments**: a vision model in `attachment_intake` transcribing an
+   uploaded image into the same screened text (PDF attachments shipped in
+   4.20.0; see `docs/attachments.md` follow-ups)
 3. **Voice Input**: Speech-to-text integration
 4. **Multi-language**: i18n support
 5. **Mobile Apps**: React Native apps

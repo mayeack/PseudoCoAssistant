@@ -46,6 +46,7 @@ from backend.agents.blueprints import data, retrieval
 from backend.agents.blueprints.base import Blueprint
 from backend.agents.llm import ChatModelError, invoke_agent
 from backend.agents.nodes.agent_common import handle_agent_error, request_model, trace_entry
+from backend.agents.nodes.attachment import with_attachment_note
 from backend.agents.nodes.clarify import intake_node
 from backend.agents.nodes.shared import build_llm_messages
 from backend.agents.nodes.synthesizer import make_synthesizer_agent
@@ -221,7 +222,9 @@ def make_primary_assistant(theme_config) -> Callable[[Dict[str, Any]], Dict[str,
         allow_multi = state.get("multi_agent_mode") is True
         limit = 2 if allow_multi else 1
         system = build_primary_prompt(theme_config, allow_multi=allow_multi)
-        messages = build_llm_messages(state.get("conversation_history", []))
+        # On a document turn the router learns a document exists (its name, never
+        # its text -- docs/attachments.md), as the PseudoCo Assistant coordinator does.
+        messages = with_attachment_note(build_llm_messages(state.get("conversation_history", [])), state)
         provider = settings.ai_provider
         override = _internal_override()
         mode = routing_mode()
@@ -275,9 +278,12 @@ def make_sub_assistant(theme_config) -> Callable[[Dict[str, Any]], Dict[str, Any
             # HandleOtherTalk: the responder handles small talk / out-of-scope directly.
             return {"specialist_outputs": [], "blueprint_tools": []}
 
-        messages = build_llm_messages(state.get("conversation_history", []))
+        # The document's name, never its text, as the PseudoCo Assistant specialists
+        # get it: their findings reach the responder, which does read the text.
+        messages = with_attachment_note(build_llm_messages(state.get("conversation_history", [])), state)
         provider = settings.ai_provider
         override = _internal_override()
+        # Retrieval stays on the typed message (deterministic; docs/attachments.md).
         user_message = state.get("user_message", "")
         record = state.get("blueprint_record") or {}
         trace: List[Dict[str, Any]] = list(state.get("agent_trace", []))

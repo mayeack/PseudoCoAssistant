@@ -4,6 +4,10 @@ Mirrors the built-in policy block in the legacy ``process_message``: dangerous
 content (e.g. self-harm patterns) is intercepted before any model call. Defaults
 to on unless the request explicitly disabled it (``internal_policy_review`` is
 False), preserving the always-on behavior for non-UI callers.
+
+It screens ``screened_prompt(state)``: the typed message, plus the attached
+document's text on a document turn (docs/attachments.md) -- so a real document
+that mentions self-harm trips it too, the honest cost of a substring engine.
 """
 
 from __future__ import annotations
@@ -11,6 +15,11 @@ from __future__ import annotations
 import time
 from typing import Any, Dict
 
+from backend.agents.nodes.attachment import (
+    attachment_governance_fields,
+    block_banner_suffix,
+    screened_prompt,
+)
 from backend.agents.nodes.shared import clarifying_service, escalation_rules
 from backend.agents.state import governance_identity_overrides
 from backend.agents.token_usage import governance_usage_data
@@ -23,7 +32,8 @@ from backend.telemetry import otel
 
 def policy_block_node(state: Dict[str, Any]) -> Dict[str, Any]:
     run_internal = state.get("internal_policy_review") is not False
-    user_message = state["user_message"]
+    # Exactly user_message without an attachment.
+    user_message = screened_prompt(state)
 
     should_block, block_reasons = (
         escalation_rules.check_policy_block(user_message)
@@ -43,6 +53,9 @@ def policy_block_node(state: Dict[str, Any]) -> Dict[str, Any]:
     blocked_message = EscalationRules.policy_block_response(
         guardrail_copy(state.get("theme")).advice_noun
     )
+    note = block_banner_suffix(state)
+    if note:
+        blocked_message = f"{blocked_message}\n\n{note}"
 
     with otel.agent_span("internal_policy_agent", theme=state.get("theme")):
         governance_logger.log_response(
@@ -75,6 +88,7 @@ def policy_block_node(state: Dict[str, Any]) -> Dict[str, Any]:
             client_address=client_address,
             enduser_id=enduser_id,
             **governance_identity_overrides(state),
+            **attachment_governance_fields(state),
         )
 
         governance_logger.log_escalation(

@@ -14,7 +14,8 @@ core differs. This suite is the detector:
   - the same scenario matrix (benign, internal policy block, AI Defense prompt
     and response blocks, NeMo input/output blocks, Agent Control deny and steer,
     forced PII/toxic/hallucination/authority injection, generation error, Multi-Agent
-    Mode accepted) is run through run_turn and run_turn_stream for EVERY
+    Mode accepted, a PDF attachment hiding a prompt injection screened by AI
+    Defense and unscreened) is run through run_turn and run_turn_stream for EVERY
     blueprint, and the normalized outcome — result type/severity/escalated/
     policy_blocked, the terminal governance event's guardrail fields, the core
     state contract, and the guardrail stage frames — must be identical across
@@ -25,6 +26,7 @@ Add a scenario here in the same change that adds a toggle or guardrail.
 
 Run:  venv/bin/python tests/test_blueprint_parity.py    # exit 0 = pass
 """
+import base64
 import inspect
 import os
 import re
@@ -151,11 +153,15 @@ class _FakeLLM:
         self.fail_agents = set(fail_agents)
         self.calls: List[str] = []
         self.systems: List[str] = []
+        # (agent_name, messages) per call: what each agent was shown, so the
+        # document scenarios can tell the answering agent from the internal ones.
+        self.messages: List[tuple] = []
 
     def __call__(self, settings_, *, agent_name, system, messages, max_tokens=2048, temperature=0.7,
                  fallback_model=None, model_override=None, **_kw):
         self.calls.append(agent_name)
         self.systems.append(system or "")
+        self.messages.append((agent_name, [dict(m) if isinstance(m, dict) else m for m in messages or []]))
         if any(agent_name.endswith(s) or s == "*" for s in self.fail_agents):
             raise ChatModelError(f"boom: {agent_name}")
         if agent_name.endswith("_coordinator"):
@@ -227,9 +233,59 @@ class _Stub:
         self.__dict__.update(kw)
 
 
+# --------------------------------------------------------------------------- document turns
+# docs/attachments.md: a PDF attached to the turn, read by the shared
+# attachment_intake PRE node. The fixture is the sample attack document the
+# Prompt Library serves (the default cover plus the tiny-font sample's hidden
+# corpus jailbreak), validated the way the chat router hands it to run_turn.
+# Built ONCE by _document_fixture() (every validation and read runs the pdf
+# worker); empty when this host cannot read PDFs.
+_DOC_SCENARIOS = ("document_injection_screened", "document_injection_unscreened")
+_DOC: Dict[str, Any] = {}
+# The attachment record facts every blueprint must report identically (call_id
+# and duration_ms differ per run by construction).
+_ATTACHMENT_KEYS = ("tool_name", "kind", "name", "mime", "bytes", "sha256", "pages", "pages_read", "chars",
+                    "truncated", "status")
+
+
+def _norm(text: Any) -> str:
+    """Whitespace-normalised text: extraction may break the hidden run across lines."""
+    return " ".join(str(text or "").split())
+
+
+def _message_text(messages: Any) -> str:
+    """The contents of a message list, joined (a repr would escape the newlines)."""
+    if isinstance(messages, str):
+        return messages
+    return "\n".join(str(m.get("content") if isinstance(m, dict) else m) for m in messages or [])
+
+
+def _document_fixture() -> str:
+    """Fill _DOC with the validated sample attachment; '' on success, else why
+    this host cannot run the document scenarios."""
+    from backend.services import attachments, attack_documents
+
+    if _DOC:
+        return ""
+    supported, reason = attachments.pdf_support()
+    if not supported:
+        return reason or "PDF support is not available on this host"
+    profile = attack_documents.DEFAULT_SAMPLE_DOCUMENT
+    sample = attack_documents.get_sample("tiny-font")
+    data = base64.b64encode(attack_documents.build_pdf(profile, sample)).decode("ascii")
+    try:
+        attachment = attachments.validate_upload(attack_documents.filename(profile), "application/pdf", data)
+    except attachments.AttachmentRejected as exc:
+        return f"the sample PDF was rejected: {exc.status_code} {exc.detail}"
+    _DOC.update(attachment=attachment, keys=sorted(attachment), payload=attack_documents.payload(sample),
+                prompt=profile.prompt, note=f"[The user attached a PDF '{attachment['name']}'")
+    return ""
+
+
 @contextmanager
 def _scenario(kind: str):
-    """Arrange the guardrail stubs for one scenario; yields the request kwargs."""
+    """Arrange the guardrail stubs for one scenario; yields the request kwargs,
+    the agents to fail and a probe dict the stubs record into."""
     from backend.agents.nodes import agent_control as ac_mod
     from backend.agents.nodes import defense as def_mod
     from backend.agents.nodes import nemo_rails as nr_mod
@@ -240,6 +296,7 @@ def _scenario(kind: str):
 
     kwargs: Dict[str, Any] = {"internal_policy_review": True}
     fail_agents: tuple = ()
+    probe: Dict[str, Any] = {}
     saved = {}
     try:
         if kind == "policy_block":
@@ -322,6 +379,32 @@ def _scenario(kind: str):
             # on the passages, so both blueprints must search and ground the same.
             kwargs["user_message"] = ("Check the internal documents: what does the SOP say "
                                       "about escalation?")
+        elif kind in _DOC_SCENARIOS:
+            # A document turn (docs/attachments.md): the shared attachment_intake
+            # node reads the PDF and every prompt screen gets the typed message
+            # plus the document. Screened, an AI Defense stub blocks on the hidden
+            # payload and records what it was given. Unscreened (AI Defense off),
+            # the hidden text reaches the answering agent while the internal
+            # agents -- Multi-Agent Mode on, so both cores run theirs -- only
+            # learn that a document exists.
+            kwargs.update(user_message=_DOC["prompt"], attachment=_DOC["attachment"])
+            if kind == "document_injection_screened":
+                saved["adc"] = def_mod.ai_defense_client
+                hidden = _norm(_DOC["payload"])
+                probe["screened"] = []
+
+                def _inspect_prompt(text, **_k):
+                    probe["screened"].append(text)
+                    if hidden in _norm(text):
+                        return InspectionResult(is_safe=False, severity="HIGH", rule_names=["Prompt Injection"],
+                                                event_id="evt-doc")
+                    return InspectionResult(is_safe=True)
+
+                def_mod.ai_defense_client = _Stub(is_configured=True, inspect_prompt=_inspect_prompt,
+                                                  inspect_response=lambda *a, **k: InspectionResult(is_safe=True))
+                kwargs["ai_defense_review"] = True
+            else:
+                kwargs["multi_agent_mode"] = True
         elif kind == "generation_error":
             fail_agents = ("*",)
         elif kind == "multi_agent":
@@ -353,7 +436,7 @@ def _scenario(kind: str):
                 ])
             elif kind == "scheduling_list":
                 kwargs.update(user_message="what's on my schedule?")
-        yield kwargs, fail_agents
+        yield kwargs, fail_agents, probe
     finally:
         if "thrash" in saved:
             settings.mcp_tool_thrash_enabled = saved["thrash"]
@@ -382,7 +465,7 @@ _TOKEN_KEYS = ("usage_output_tokens", "usage_output_tokens_cached", "usage_outpu
 def _run(bp_key: str, theme: str, kind: str) -> Dict[str, Any]:
     from backend.agents import graph
 
-    with _scenario(kind) as (kwargs, fail_agents), _governance_capture() as events:
+    with _scenario(kind) as (kwargs, fail_agents, probe), _governance_capture() as events:
         fake = _FakeLLM(fail_agents)
         saved = _install_llm(fake)
         try:
@@ -395,6 +478,14 @@ def _run(bp_key: str, theme: str, kind: str) -> Dict[str, Any]:
             _restore(saved)
     last = events[-1] if events else {}
     sev = result.get("severity")
+    # A document turn: what the screens, the answering agent ({theme}_domain_agent,
+    # shared by both cores) and the internal agents were each given.
+    record = last.get("attachment")
+    hidden = _norm(_DOC.get("payload")) if base.get("attachment") else ""
+    answering = THEMES[theme].agent_name
+    synth = [_norm(_message_text(m)) for a, m in fake.messages if a == answering]
+    internal = [_norm(_message_text(m)) for a, m in fake.messages if a != answering]
+    screened = probe.get("screened") or []
     return {
         "event_kind": last.get("_kind"),
         "result": {
@@ -427,6 +518,21 @@ def _run(bp_key: str, theme: str, kind: str) -> Dict[str, Any]:
         "steer": [(rec.get("steer") or {}).get("outcome") for rec in (last.get("agent_control_verdicts") or [])],
         "answer_has_ssn": bool(_SSN_RE.search(str(result.get("message") or ""))),
         "answer_has_steer_leftovers": bool(_LEFTOVER_RE.search(str(result.get("message") or ""))),
+        # The attachment record on the terminal governance event (metadata only).
+        "attachment": ({k: record.get(k) for k in _ATTACHMENT_KEYS} if isinstance(record, dict) else record),
+        "message": str(result.get("message") or ""),
+        "document": {
+            "record_leaks_content": isinstance(record, dict) and any(k in record for k in ("text", "data")),
+            "screened": [_norm(t) for t in screened],
+            "screened_has_document": bool(screened) and bool(hidden) and all(
+                hidden in _norm(t) and _norm(base["user_message"]) in _norm(t) for t in screened),
+            "synth_saw_payload": bool(hidden) and any(hidden in m for m in synth),
+            "input_has_payload": bool(hidden) and hidden in _norm(_message_text(last.get("input_messages"))),
+            "internal_agents": len(internal),
+            "internal_saw_payload": bool(hidden) and any(hidden in m for m in internal),
+            "internal_saw_note": bool(internal) and bool(_DOC.get("note"))
+            and all(_norm(_DOC["note"]) in m for m in internal),
+        },
     }
 
 
@@ -434,7 +540,62 @@ SCENARIOS = ("benign", "policy_block", "ai_defense_prompt_block", "ai_defense_re
              "nemo_input_block", "nemo_output_block", "agent_control_deny", "agent_control_prompt_deny",
              "agent_control_steer", "forced_injection", "pii_exfil_prompt", "pii_exfil_bulk", "internal_docs_ask",
              "generation_error", "multi_agent", "mcp_thrash",
-             "scheduling_offer", "scheduling_book", "scheduling_list")
+             "scheduling_offer", "scheduling_book", "scheduling_list") + _DOC_SCENARIOS
+
+
+def _document_checks(outcomes: Dict[str, Dict[str, Dict[str, Any]]], keys: List[str]) -> None:
+    """What the document scenarios must show (docs/attachments.md): the read is a
+    governed tool call carrying metadata only; screened, AI Defense sees typed
+    message + document and blocks before any model runs; unscreened, the hidden
+    text reaches the answering agent and the logged input, while the internal
+    agents only ever see the note."""
+    r = outcomes[keys[0]]
+    att = _DOC["attachment"]
+    sentence = f"Your attached document '{att['name']}' was screened together with your message."
+    for theme in ("medadvice", "telecomchatbot"):
+        answering = THEMES[theme].agent_name
+        for kind in _DOC_SCENARIOS:
+            o = r[f"{theme}/{kind}"]
+            rec = o["attachment"] or {}
+            check(f"{theme}/{kind}: the document read is logged as a governed tool call",
+                  "attachment-intake.extract_text" in o["tool_calls"], str(o["tool_calls"]))
+            check(f"{theme}/{kind}: the governance event carries the read's record",
+                  rec.get("status") == "ok" and rec.get("name") == att["name"] and rec.get("sha256") == att["sha256"]
+                  and rec.get("pages") == att["pages"] and (rec.get("chars") or 0) > 0
+                  and rec.get("truncated") is False, str(rec))
+            check(f"{theme}/{kind}: the record carries no document text or bytes",
+                  o["document"]["record_leaks_content"] is False)
+            check(f"{theme}/{kind}: attachment_intake is the first guardrail stage",
+                  o["guardrail_stages"][:1] == ["attachment_intake"], str(o["guardrail_stages"][:3]))
+        screened = r[f"{theme}/document_injection_screened"]
+        check(f"{theme}: a screened document turn is blocked by Cisco AI Defense alone",
+              screened["result"]["policy_blocked"] is True
+              and screened["governance"]["guardrail_ids"] == ["cisco_ai_defense"],
+              f"{screened['result']} {screened['governance']['guardrail_ids']}")
+        check(f"{theme}: AI Defense screened the typed message together with the hidden document text",
+              screened["document"]["screened_has_document"] is True, str(screened["document"]["screened"])[:300])
+        check(f"{theme}: the screened block happens before any model runs",
+              answering not in screened["agents"] and not screened["agents"]
+              and screened["guardrail_stages"][-1] == "prompt_defense",
+              f"{screened['agents']} {screened['guardrail_stages']}")
+        check(f"{theme}: the block banner says the document was screened with the message",
+              sentence in screened["message"], screened["message"])
+        unscreened = r[f"{theme}/document_injection_unscreened"]
+        check(f"{theme}: an unscreened document turn is not blocked",
+              unscreened["result"]["policy_blocked"] is False, str(unscreened["result"]))
+        check(f"{theme}: unscreened, the answering agent is given the hidden text",
+              answering in unscreened["agents"] and unscreened["document"]["synth_saw_payload"] is True,
+              str(unscreened["agents"]))
+        check(f"{theme}: unscreened, the governance input_messages carry the hidden text",
+              unscreened["document"]["input_has_payload"] is True)
+        for key in keys:
+            doc = outcomes[key][f"{theme}/document_injection_unscreened"]["document"]
+            check(f"[{key}] {theme}: the internal agents learn of the document from the note only",
+                  doc["internal_agents"] > 0 and doc["internal_saw_note"] is True
+                  and doc["internal_saw_payload"] is False, str(doc))
+    check("attachment: no run mutated the attachment it was handed (bytes and keys intact)",
+          sorted(att) == _DOC["keys"] and isinstance(att.get("data"), bytes) and len(att["data"]) == att["bytes"],
+          str(sorted(att)))
 
 
 def test_dynamic_parity() -> None:
@@ -442,12 +603,18 @@ def test_dynamic_parity() -> None:
 
     orig_active = settings.active_blueprint
     keys = [bp.key for bp in bp_registry.list_blueprints()]
+    # The document scenarios need PDF support (pypdf in the worker). Without it
+    # they are ONE explicit failure, and the rest of the matrix still runs.
+    why = _document_fixture()
+    check("document scenarios: this host can read the sample attack PDF (pip install -r requirements.txt)",
+          not why, why)
+    scenarios = SCENARIOS if not why else tuple(s for s in SCENARIOS if s not in _DOC_SCENARIOS)
     try:
         outcomes: Dict[str, Dict[str, Dict[str, Any]]] = {}
         for key in keys:
             outcomes[key] = {}
             for theme in ("medadvice", "telecomchatbot"):
-                for kind in SCENARIOS:
+                for kind in scenarios:
                     outcomes[key][f"{theme}/{kind}"] = _run(key, theme, kind)
             # The newer themes share every guardrail with these two; what is theirs
             # alone is the Synthetic Content wiring (retail: conversational reply +
@@ -506,6 +673,20 @@ def test_dynamic_parity() -> None:
                     check(f"[{key} vs {ref_key}] {sk}: scheduling agent present in both or neither",
                           (f"{sk.split('/')[0]}_scheduling_agent" in out["agents"])
                           == (f"{sk.split('/')[0]}_scheduling_agent" in ref["agents"]), str(out["agents"]))
+                # The document read is shared-chain: the same record facts on the
+                # governance event (none on a turn without a document) and, on a
+                # document turn, the same tool call and the same reach of the
+                # hidden text -- screens, answering agent, logged input, internal
+                # agents.
+                check(f"[{key} vs {ref_key}] {sk}: same attachment record on the governance event",
+                      out["attachment"] == ref["attachment"], f"{out['attachment']} != {ref['attachment']}")
+                if sk.endswith(_DOC_SCENARIOS):
+                    check(f"[{key} vs {ref_key}] {sk}: same document-read tool calls",
+                          out["tool_calls"] == ref["tool_calls"], f"{out['tool_calls']} != {ref['tool_calls']}")
+                    flags = {k: v for k, v in out["document"].items() if k != "internal_agents"}
+                    ref_flags = {k: v for k, v in ref["document"].items() if k != "internal_agents"}
+                    check(f"[{key} vs {ref_key}] {sk}: the hidden text reaches the same readers (and no content leaks)",
+                          flags == ref_flags, f"{flags} != {ref_flags}")
         # Sanity on the reference: the scenarios actually exercise the guardrails.
         r = outcomes[ref_key]
         check("scheduling: first answer asks whether it resolved the concern (chips come from the shared node)",
@@ -606,6 +787,16 @@ def test_dynamic_parity() -> None:
                   outcomes[key]["medadvice/mcp_thrash"]["tool_thrash"]
                   == r["medadvice/mcp_thrash"]["tool_thrash"],
                   str(outcomes[key]["medadvice/mcp_thrash"]["tool_thrash"]))
+        # The attachment_intake node reports a stage on every turn (first in the
+        # shared chain) and does nothing without a document.
+        check("attachment: attachment_intake is the first guardrail stage of every turn",
+              r["medadvice/benign"]["guardrail_stages"][:1] == ["attachment_intake"],
+              str(r["medadvice/benign"]["guardrail_stages"][:3]))
+        check("attachment: a turn without a document reads nothing and logs no attachment record",
+              "attachment-intake.extract_text" not in r["medadvice/benign"]["tool_calls"]
+              and r["medadvice/benign"]["attachment"] is None, str(r["medadvice/benign"]["attachment"]))
+        if not why:
+            _document_checks(outcomes, keys)
     finally:
         settings.active_blueprint = orig_active
         graph.clear_compiled()

@@ -7,7 +7,9 @@ Observability (``galileo_agent_control_backend``) — and short-circuit the turn
 when a control returns ``deny``.
 
 - ``agent_control_prompt_node`` (PRE chain, after Cisco AI Defense) screens the
-  user's prompt as a pre-stage step before any model call. It runs only when
+  user's prompt as a pre-stage step before any model call -- the typed message
+  plus, on a document turn, the attached document's text
+  (``screened_prompt``, docs/attachments.md). It runs only when
   the backend's stages include ``pre`` (the default on splunk_ao, whose UI
   attaches controls to both stages; off on galileo, whose console controls are
   post-scoped). A prompt-stage ``steer`` is recorded, not acted on.
@@ -36,6 +38,11 @@ from typing import Any, Dict, List, Tuple
 
 from backend.agents.llm import ChatModelError, invoke_agent
 from backend.agents.nodes.agent_common import SYNTHESIZER_MAX_TOKENS, request_model, trace_entry
+from backend.agents.nodes.attachment import (
+    attachment_governance_fields,
+    block_banner_suffix,
+    screened_prompt,
+)
 from backend.agents.nodes.compliance import display_text
 from backend.agents.nodes.injection import delivered_flags
 from backend.agents.nodes.shared import content_engine
@@ -150,9 +157,11 @@ def agent_control_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
         return {}
 
     started = time.perf_counter()
+    # Exactly user_message without an attachment.
+    screened = screened_prompt(state)
     with otel.agent_span("galileo_agent_control_prompt_agent", theme=state.get("theme")):
         verdict = agent_control_client.evaluate_prompt(
-            state["user_message"],
+            screened,
             enduser_id=state.get("enduser_id"),
             session_id=state.get("session_id"),
             theme=state.get("theme"),
@@ -169,14 +178,16 @@ def agent_control_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
             session_id=state["session_id"],
             request_id=state["request_id"],
             trace_id=state["trace_id"],
-            user_message=state["user_message"],
+            user_message=screened,
             conversation_history=state.get("conversation_history", []),
             verdict=verdict,
             start_time=state["start_time"],
             client_address=state.get("client_address"),
             enduser_id=state.get("enduser_id"),
-            governance_overrides=governance_identity_overrides(state),
+            governance_overrides={**governance_identity_overrides(state),
+                                  **attachment_governance_fields(state)},
             theme=state.get("theme"),
+            banner_note=block_banner_suffix(state),
         )
 
     return {
@@ -330,7 +341,8 @@ def agent_control_node(state: Dict[str, Any]) -> Dict[str, Any]:
             enduser_id=state.get("enduser_id"),
             llm_model=state.get("llm_model"),
             usage_data=governance_usage_data({**state, **updates}),
-            governance_overrides=governance_identity_overrides(state),
+            governance_overrides={**governance_identity_overrides(state),
+                                  **attachment_governance_fields(state)},
             theme=state.get("theme"),
             prompt_verdict=state.get("agent_control_prompt"),
         )

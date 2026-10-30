@@ -50,7 +50,7 @@ def guardrail_copy(theme: Optional[str]) -> "GuardrailCopy":
     return get_theme(theme).guardrails
 
 
-def block_banner(body: str, theme: Optional[str]) -> str:
+def block_banner(body: str, theme: Optional[str], note: str = "") -> str:
     """Close a guardrail's block explanation with the theme's urgent-help line.
 
     ``body`` is the theme-neutral part -- which guardrail withheld the turn and
@@ -58,7 +58,14 @@ def block_banner(body: str, theme: Optional[str]) -> str:
     only the domain can write. Before this, every banner ended by telling the
     user to call 911, so a blocked telecom or tax turn pointed the audience at
     an emergency room.
+
+    ``note`` is one more theme-neutral sentence after the body (a prompt-stage
+    block of a turn that carried a document says the document was screened with
+    the message -- ``attachments.block_note``); the urgent-help line still
+    closes the banner.
     """
+    if note:
+        body = f"{body} {note}"
     return f"{body} {guardrail_copy(theme).urgent_help}"
 
 
@@ -1840,19 +1847,23 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
         start_time: float,
         client_address: Optional[str],
         enduser_id: Optional[str],
-        governance_overrides: Optional[Dict[str, str]] = None,
+        governance_overrides: Optional[Dict[str, Any]] = None,
         theme: Optional[str] = None,
+        banner_note: str = "",
     ) -> Dict[str, Any]:
         """Block a prompt that AI Defense flagged (or that errored under
         fail-closed policy), logging the verdict to the governance pipeline.
 
         ``governance_overrides`` carries per-turn identity (``service_name`` /
-        ``deployment_id``) for the spray campaign; it is empty for ordinary
-        chat, leaving the governance log's own defaults in place. ``theme``
-        picks the banner's closing urgent-help line (see :func:`block_banner`)
-        and rides on the governance event like every other chat turn's, so
-        the block lands in its theme's Agent stream rather than the default
-        one (``agent_observability._stream_for``)."""
+        ``deployment_id``) for the spray campaign, plus the turn's additive
+        fields (the ``attachment`` record of a document turn); it is empty for
+        ordinary chat, leaving the governance log's own defaults in place.
+        ``theme`` picks the banner's closing urgent-help line (see
+        :func:`block_banner`) and rides on the governance event like every
+        other chat turn's, so the block lands in its theme's Agent stream rather
+        than the default one (``agent_observability._stream_for``).
+        ``banner_note`` is added to a policy-violation banner (the
+        attached-document sentence); an errored review never claims a screen."""
         duration = time.time() - start_time
 
         if inspection.errored:
@@ -1880,6 +1891,7 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                 "was not sent to the assistant. Please rephrase your message without "
                 "sensitive, unsafe, or disallowed content.",
                 theme,
+                note=banner_note,
             )
 
         governance_logger.log_response(
@@ -1952,13 +1964,14 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
         enduser_id: Optional[str],
         llm_model: Optional[str] = None,
         usage_data: Optional[Dict[str, Any]] = None,
-        governance_overrides: Optional[Dict[str, str]] = None,
+        governance_overrides: Optional[Dict[str, Any]] = None,
         theme: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Withhold a model response that AI Defense flagged (or that errored
         under fail-closed policy), logging the verdict to the governance
         pipeline. Unlike the prompt handler, the model was already called, so
-        the user-facing message explains the *response* was withheld.
+        the user-facing message explains the *response* was withheld (no
+        attached-document sentence: that belongs to the prompt-stage banners).
 
         Because the call did complete, callers that have the real model id and
         token usage on hand should pass them (``llm_model``/``usage_data``) so
@@ -2068,8 +2081,9 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
         start_time: float,
         client_address: Optional[str],
         enduser_id: Optional[str],
-        governance_overrides: Optional[Dict[str, str]] = None,
+        governance_overrides: Optional[Dict[str, Any]] = None,
         theme: Optional[str] = None,
+        banner_note: str = "",
     ) -> Dict[str, Any]:
         """Block a prompt that an Agent Control pre-stage control denied (or
         that errored under a fail-closed policy), logging the verdict to the
@@ -2079,7 +2093,8 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
         same governance fields, zero token usage because no model ran — so the
         two prompt guardrails are interchangeable downstream; only
         ``guardrail_ids`` and the metadata block name the source. ``theme``
-        rides on the event so the block lands in its theme's Agent stream."""
+        rides on the event so the block lands in its theme's Agent stream;
+        ``governance_overrides`` and ``banner_note`` work as they do there."""
         duration = time.time() - start_time
 
         if verdict.errored:
@@ -2105,6 +2120,7 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                 "This request was withheld by our agent control policy and was not "
                 "sent to the assistant. Please rephrase your message.",
                 theme,
+                note=banner_note,
             )
 
         governance_logger.log_response(
@@ -2316,6 +2332,11 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
         client_id: Optional[str] = None,
         client_tz: Optional[str] = None,
         scheduling_action: Optional[Dict[str, Any]] = None,
+        # kwargs parity; chat attachments (docs/attachments.md) are read and
+        # screened by the agentic graph's attachment_intake node. The legacy
+        # engine neither shows the document to the model nor screens it, so it
+        # opens no unscreened path.
+        attachment: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Process user message and generate response

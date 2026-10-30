@@ -177,6 +177,46 @@ def test_current_revalidates_a_stale_snapshot() -> None:
         hc._cache.clear(); hc._cached_at = 0.0; hc._refreshing = False
 
 
+def test_pdf_attachments_rule() -> None:
+    """Chat attachments (docs/attachments.md): PDF support needs pypdf. The rule
+    lives here only; the chat API (503) and the Attach button (greyed out) read it."""
+    from backend.services import attachments  # noqa: PLC0415 - imports backend.config
+
+    g = hc.gated_rules(_caps(gpu_present=False), _Settings())
+    check("gated_rules carries pdf_attachments, enabled with pypdf installed",
+          g.get("pdf_attachments") == {"enabled": True, "reason": ""}, str(g.get("pdf_attachments")))
+    check("the rule does not depend on the GPU / runtime probes",
+          hc.gated_rules(_caps(gpu_present=True, runtime="none", available=False), _Settings())["pdf_attachments"]
+          == g["pdf_attachments"])
+
+    real_find_spec = hc.importlib.util.find_spec
+
+    def _no_pypdf(name, *a, **k):
+        return None if name == "pypdf" else real_find_spec(name, *a, **k)
+
+    orig_now = hc._detect_now
+    try:
+        hc.importlib.util.find_spec = _no_pypdf
+        off = hc.gated_rules(_caps(gpu_present=False), _Settings())["pdf_attachments"]
+        check("no pypdf -> pdf_attachments gated off with the install hint",
+              off == {"enabled": False, "reason": "PDF support is not installed (pip install -r requirements.txt)"},
+              str(off))
+        hc._cache.clear(); hc._cached_at = 0.0; hc._refreshing = False
+        check("pdf_support() evaluates the rule itself before the first detect()",
+              attachments.pdf_support() == (False, off["reason"]), str(attachments.pdf_support()))
+        hc.importlib.util.find_spec = real_find_spec
+        hc._detect_now = lambda _settings: _caps(gpu_present=False)  # type: ignore[assignment]
+        hc.detect(force=True)
+        check("pdf_support() reads the cached gate once detected", attachments.pdf_support() == (True, ""))
+        hc._cache["gated"] = {**hc._cache["gated"], "pdf_attachments": off}
+        check("pdf_support() never re-derives a cached gate (one gating channel)",
+              attachments.pdf_support() == (False, off["reason"]), str(attachments.pdf_support()))
+    finally:
+        hc.importlib.util.find_spec = real_find_spec
+        hc._detect_now = orig_now
+        hc._cache.clear(); hc._cached_at = 0.0; hc._refreshing = False
+
+
 def main() -> int:
     for fn in (
         test_gpu_less_mac_greys_nvidia_and_nemoclaw_on_podman,
@@ -185,6 +225,7 @@ def main() -> int:
         test_nemoclaw_runtime_rules,
         test_probes_never_raise_and_cache_refreshes,
         test_current_revalidates_a_stale_snapshot,
+        test_pdf_attachments_rule,
     ):
         try:
             fn()

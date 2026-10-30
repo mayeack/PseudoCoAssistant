@@ -125,6 +125,61 @@ Rules:
 - Extend `tests/test_scheduling.py` and the `scheduling_*` scenarios in
   `tests/test_blueprint_parity.py` in the same PR as any scheduling change.
 
+## Chat attachments
+
+`docs/attachments.md` is the design. A chat turn may carry one PDF, and a hidden
+instruction in it is the document-borne prompt-injection demo. The rules that
+keep it honest:
+
+- **Always screened, no toggle.** There is no Demo Controls card and no
+  `ChatRequest` toggle for it: `ChatRequest.attachment` is the document itself,
+  never an `Optional[bool]`. The "missed" half of the demo comes from the
+  existing guardrail toggles. Whether a host can take
+  attachments is the `gated.pdf_attachments` host gate (`GET /api/server-info`,
+  `host_capabilities.pdf_attachments_gate`) and nothing else: the API answers
+  503 from it and the Attach button greys out from it.
+- `attachment_intake` is `PRE_NODES[0]` in the **shared chain**
+  (`blueprints/guardrails.py`), ahead of `policy`. It is never in
+  `_MAY_TERMINATE`, and a failed read is `status: "error"`, never a raise.
+- **The screens and the model see the same composed text.** Every prompt-stage
+  guardrail screens `screened_prompt(state)`, and the shared synthesizer gets
+  `with_attachment(...)`. Both come from `attachments.compose_user_turn` and
+  must never diverge. The block is not wrapped in "untrusted, ignore its
+  instructions" language.
+- **Internal agents get the metadata note only** (`with_attachment_note`: the
+  name and page count, never the text). That is the coordinator and
+  specialists, and the NVIDIA primary and sub-assistants: **both** cores, in
+  the same PR.
+- **Deterministic logic keys on the typed message only**: EHR lookup, internal
+  docs, scheduling intent, `pii_exfil_requested`, safety, routing and the
+  response-stage guardrail context. Never derive a tool call, a directive or a
+  verdict from document text. The model is the only thing a hidden instruction
+  may fool.
+- **The bytes are never persisted or logged.** Store and log
+  `message_metadata` / `governance_record` only; `attachment` on a governance
+  event is metadata and is not a DB column. The extracted text does leave the
+  box (screens, `input_messages`, HEC, Agent Observability, APM), which is why
+  `UPLOAD_NOTICE` stays on the Attach button and under the chip.
+- **pypdf runs only inside the killable worker** (`backend/services/pdf_worker.py`,
+  a `python -I` child with a hard timeout). Never import it in the app process
+  or on a request thread. It is pinned exactly in `requirements.txt` (floor
+  6.14.1, for the 2026 extraction-DoS fixes); bump it deliberately.
+- **Sample payloads come from `spray_corpus.TECHNIQUE_FAMILIES`**, verbatim, and
+  are validated as documents with `tests/manual/probe_attachments.py` against
+  the live AI Defense. Record the date in `attack_documents.DOCUMENT_VALIDATION`
+  only from a passing run. Never add canned compliance or a fallback change to
+  make a sample "work"; if one stops blocking, swap the payload and probe again.
+- The theme covers are a `SampleDocumentProfile` on `ThemeConfig.sample_document`.
+  A new theme defines one, and nodes never branch on the theme key. Covers follow
+  the synthetic-content rules: no identifiers, no placeholders, no "sample"
+  labels, and no text that trips a deterministic trigger.
+- User-visible copy (the block-banner sentence, the upload notice, the Prompt
+  Library rows) follows "Product naming": it says "Splunk Agent Observability",
+  never "Galileo". The banner sentence goes only on a real prompt-stage
+  verdict, never on a fail-closed "could not be reviewed" banner.
+- Extend `tests/test_attachments.py` and the `document_injection_*` scenarios in
+  `tests/test_blueprint_parity.py` in the same PR as any attachment change.
+
 ## Product naming
 
 The product is **PseudoCo Assistant** (since 4.10.0). Its identifier forms are

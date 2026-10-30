@@ -152,6 +152,7 @@ def _build_turn_state(
     client_id: Optional[str] = None,
     client_tz: Optional[str] = None,
     scheduling_action: Optional[Dict[str, Any]] = None,
+    attachment: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the initial workflow state shared by run_turn / run_turn_stream."""
     bp = get_blueprint(blueprint or active_blueprint_key())
@@ -176,6 +177,7 @@ def _build_turn_state(
         client_id=client_id,
         client_tz=client_tz,
         scheduling_action=scheduling_action,
+        attachment=attachment,
     )
     state["request_id"] = str(uuid.uuid4())
     # Provisional: replaced by the OTel trace id once the workflow span is open
@@ -227,6 +229,7 @@ def run_turn(
     client_id: Optional[str] = None,
     client_tz: Optional[str] = None,
     scheduling_action: Optional[Dict[str, Any]] = None,
+    attachment: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run one chat turn through the multi-agent workflow.
 
@@ -256,6 +259,7 @@ def run_turn(
         client_id=client_id,
         client_tz=client_tz,
         scheduling_action=scheduling_action,
+        attachment=attachment,
     )
     runner = get_agentic_runner(state["blueprint"])
     request_id = state["request_id"]

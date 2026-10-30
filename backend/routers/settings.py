@@ -382,6 +382,7 @@ async def hec_stats_for(dest_id: str):
 # ---------------------------------------------------------------------------
 def _server_info() -> dict:
     from backend import host_capabilities
+    from backend.services import attachments
 
     caps = host_capabilities.current()
     return {
@@ -395,6 +396,9 @@ def _server_info() -> dict:
         # Read from the cache — never probed on the request path.
         "capabilities": caps.get("capabilities", {}),
         "gated": caps.get("gated", {}),
+        # Chat attachment limits and copy for the composer (docs/attachments.md).
+        # Whether attachments work here at all is gated.pdf_attachments above.
+        "attachments": attachments.client_config(),
     }
 
 

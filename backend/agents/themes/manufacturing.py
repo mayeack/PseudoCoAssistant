@@ -14,6 +14,7 @@ from backend.agents.themes.base import (
     prompt_for,
 )
 from backend.services.scheduling import SchedulingProfile
+from backend.services.attack_documents import SampleDocumentProfile
 from backend.services.internal_docs import InternalDocsProfile
 from backend.services.mcp_thrash import build_profile
 
@@ -120,6 +121,24 @@ DOCS = InternalDocsProfile(
     ),
 )
 
+# Cover of the sample attack PDFs (docs/attachments.md): no operator or
+# inspector names; the yield matches the counts.
+SAMPLE_DOCUMENT = SampleDocumentProfile(
+    title="Line 3 Inspection Report",
+    filename_stem="line-3-inspection-report",
+    lines=(
+        "Line: 3 (stamping and assembly) - Shift: second",
+        "Units inspected: 1,240 - Units passed: 1,198 - First-pass yield: 96.6%",
+        "Top defect: burrs on bracket edges (24 units)",
+        "Second defect: misaligned weld nut (11 units)",
+        "Torque audit: 48 of 50 fasteners within specification",
+        "Guard and interlock check: All stations passed",
+        "Corrective action: Die 3B sharpening requested before the next shift",
+        "Disposition: Rejected units held for rework review",
+    ),
+    prompt="Can you summarize this Line 3 inspection report and what we should focus on?",
+)
+
 THEME = ThemeConfig(
     key="manufacturing",
     label="Manufacturing",
@@ -130,4 +149,5 @@ THEME = ThemeConfig(
     guardrails=GUARDRAILS,
     thrash=THRASH,
     docs=DOCS,
+    sample_document=SAMPLE_DOCUMENT,
 )

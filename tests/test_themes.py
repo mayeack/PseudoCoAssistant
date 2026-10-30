@@ -28,6 +28,7 @@ from backend.agents.nodes import injection as inj  # noqa: E402
 from backend.agents.themes import THEMES  # noqa: E402
 from backend.agents.themes.base import DEFAULT_GUARDRAIL_COPY  # noqa: E402
 from backend.services.recommendation_engine import RecommendationEngine as RE  # noqa: E402
+from backend.services.attack_documents import DEFAULT_SAMPLE_DOCUMENT  # noqa: E402
 from backend.services.scheduling import DEFAULT_PROFILE  # noqa: E402
 
 _fails = 0
@@ -91,6 +92,16 @@ for key, cfg in THEMES.items():
     check(f"{key}: blueprint records", bool(bp_data.records_for(key)))
     check(f"{key}: blueprint knowledge docs", bool(bp_data.docs_for(key)))
 
+    # Chat attachments (docs/attachments.md): the Prompt Library's sample attack
+    # PDFs are drawn on this theme's own cover document.
+    check(f"{key}: has its own sample document cover",
+          cfg.sample_document is not DEFAULT_SAMPLE_DOCUMENT
+          and bool(cfg.sample_document.title) and bool(cfg.sample_document.lines)
+          and bool(cfg.sample_document.prompt) and bool(cfg.sample_document.filename_stem))
+
+check("every theme's sample document has its own file name",
+      len({cfg.sample_document.filename_stem for cfg in THEMES.values()}) == len(THEMES))
+
 # The labels the drawer shows for the fourth Synthetic Content toggle are what the
 # directives solicit.
 check("retail: Unauthorized Refund solicits a refund, a discount and a warranty",
@@ -128,6 +139,17 @@ for page, pattern in (("login.html", r"^      (\w+):\s+\["), ("settings-login.ht
     check(f"{page} brands every theme", _keys(brand, pattern) == KEYS, str(_keys(brand, pattern)))
 labels = _block((FRONTEND / "js" / "appointments.js").read_text(), "const THEME_LABELS = {", "};")
 check("My Appointments labels every theme", sorted(re.findall(r"(\w+): '", labels)) == sorted(KEYS))
+
+# The paperclip is one of the composer's outline buttons, so a theme switch
+# recolours it with Prompts / Show Recent (applyTheme colorSwapTargets).
+swap = _block(CHAT_JS, "const colorSwapTargets = [", "];")
+check("applyTheme recolours the Attach button with the other outline buttons",
+      "document.getElementById('attachButton'), classes: ['border-{c}-600', 'text-{c}-600', 'hover:bg-{c}-50']"
+      in swap)
+_attach_at = INDEX.index('id="attachButton"')
+_attach_button = INDEX[INDEX.rindex("<button", 0, _attach_at):INDEX.index(">", _attach_at)]
+check("the Attach button starts in the default (violet) outline the swap expects",
+      all(c in _attach_button for c in ("border-violet-600", "text-violet-600", "hover:bg-violet-50")))
 
 # ------------------------------------------------------------------- header layout
 header = _block(INDEX, '<div class="container mx-auto p-4">', 'id="emergencyBanner"')

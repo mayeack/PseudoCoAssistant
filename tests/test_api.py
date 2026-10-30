@@ -45,10 +45,14 @@ from backend.agents.llm import NormalizedLLMResponse  # noqa: E402
 # Captures the last system prompt handed to the (stubbed) model so the suite can
 # assert the governance directive is appended to the INPUT, not the output.
 _last_system = {"v": ""}
+# Every message list handed to the (stubbed) model, so the attachment checks can
+# assert the model saw the document text the screens inspected.
+_llm_messages: list = []
 
 
 def _fake_llm(*_a, **_k):
     _last_system["v"] = _k.get("system", "")
+    _llm_messages.append(_k.get("messages") or [])
     return NormalizedLLMResponse(
         id="test-id", content="LOW\nAssessment: test. Guidance: rest, fluids.",
         model="test-model", input_tokens=5, output_tokens=7, stop_reason="end_turn",
@@ -91,6 +95,186 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         _fails += 1
 
 
+def _attachment_api_checks(c) -> None:
+    """Chat attachments over HTTP (docs/attachments.md): a valid PDF turn on both
+    endpoints, every rejection as a plain-string detail recorded nowhere, the
+    body cap (declared and chunked), the sample-document API and server-info."""
+    import hashlib  # noqa: PLC0415
+    import uuid  # noqa: PLC0415
+
+    from backend.agents.themes import THEMES  # noqa: PLC0415
+    from backend.services import attachments  # noqa: PLC0415
+    from backend.services import attack_documents as ad  # noqa: PLC0415
+
+    def b64(data: bytes) -> str:
+        return base64.b64encode(data).decode("ascii")
+
+    def norm(text: str) -> str:
+        return " ".join((text or "").split())
+
+    def body(sid, message, att=None):
+        payload = {"session_id": sid, "message": message, "disclaimer_accepted": True, "theme": "retail"}
+        if att is not None:
+            payload["attachment"] = att
+        return payload
+
+    def stored(sid):
+        r = c.get(f"/api/chat/session/{sid}", headers=AUTH)
+        return r.json().get("messages", []) if r.status_code == 200 else []
+
+    def frames_of(text):
+        return [json.loads(f[len("data: "):]) for f in text.split("\n\n") if f.startswith("data: ")]
+
+    profile = THEMES["retail"].sample_document
+    sample = ad.get_sample("tiny-font")
+    pdf = ad.build_pdf(profile, sample)
+    att = {"name": ad.filename(profile), "mime": "application/pdf", "data": b64(pdf)}
+
+    # ---- a valid PDF: 200, metadata stored (never the bytes), the model saw the text ----
+    sid = str(uuid.uuid4())
+    _llm_messages.clear()
+    r = c.post("/api/chat/message", headers=AUTH, json=body(sid, profile.prompt, att))
+    check("attachment: valid PDF /message -> 200 + message",
+          r.status_code == 200 and bool(r.json().get("message")), f"{r.status_code} {r.text[:200]}")
+    user = [m for m in stored(sid) if m.get("role") == "user"]
+    meta = ((user[-1].get("attachments") or [{}])[0]) if user else {}
+    check("attachment: the stored user message carries the metadata, typed text as content",
+          bool(user) and user[-1].get("content") == profile.prompt
+          and set(meta) == {"kind", "name", "mime", "bytes", "sha256", "pages"}, str(user[-1:])[:300])
+    check("attachment: stored sha256 / size / pages are the file's",
+          meta.get("sha256") == hashlib.sha256(pdf).hexdigest() and meta.get("bytes") == len(pdf)
+          and meta.get("pages") == 1 and meta.get("name") == "order-receipt.pdf" and meta.get("kind") == "pdf")
+    flat = json.dumps(stored(sid))
+    check("attachment: the stored session holds neither the bytes nor the document text",
+          "data" not in meta and b64(pdf)[:120] not in flat and norm(ad.payload(sample)) not in norm(flat))
+    seen = [norm(" ".join(str(m.get("content", "")) for m in msgs)) for msgs in _llm_messages]
+    check("attachment: the model saw the hidden payload in the composed turn",
+          any(norm(ad.payload(sample)) in s and "[Attached document: order-receipt.pdf (1 page, PDF)]" in s
+              for s in seen), str([s[:120] for s in seen]))
+
+    sid_only = str(uuid.uuid4())
+    r = c.post("/api/chat/message", headers=AUTH, json=body(sid_only, "   ", att))
+    u_only = [m for m in stored(sid_only) if m.get("role") == "user"]
+    check("attachment: an attachment-only turn runs as the default prompt",
+          r.status_code == 200 and bool(u_only) and u_only[-1]["content"] == attachments.ATTACHMENT_ONLY_PROMPT,
+          f"{r.status_code} {str(u_only)[:200]}")
+
+    # ---- the stream endpoint: the attachment_intake stage, then one final frame ----
+    rs = c.post("/api/chat/message/stream", headers=AUTH, json=body(str(uuid.uuid4()), profile.prompt, att))
+    frames = frames_of(rs.text)
+    stages = [f.get("node") for f in frames if f.get("event") == "stage"]
+    check("attachment: stream -> 200 with exactly one final frame",
+          rs.status_code == 200 and sum(f.get("event") == "final" for f in frames) == 1
+          and frames[-1].get("event") == "final", f"{rs.status_code} {str(frames[-1:])[:200]}")
+    check("attachment: stream shows the attachment_intake stage before policy",
+          "attachment_intake" in stages and "policy" in stages
+          and stages.index("attachment_intake") < stages.index("policy"), str(stages))
+
+    # ---- rejections: status + string detail, JSON (never SSE), nothing recorded ----
+    sid_rej = str(uuid.uuid4())
+    c.post("/api/chat/message", headers=AUTH, json=body(sid_rej, "hello"))
+    before = len(stored(sid_rej))
+    cases = (
+        ("image/png -> 415", {"name": "x.png", "mime": "image/png", "data": b64(b"\x89PNG\r\n\x1a\n....")}, 415),
+        ("non-PDF bytes -> 415", {"name": "x.pdf", "mime": "application/pdf", "data": b64(b"hello world")}, 415),
+        ("bad base64 -> 422", {"name": "x.pdf", "mime": "application/pdf", "data": "!!!not base64!!!"}, 422),
+        ("corrupt PDF -> 422", {"name": "x.pdf", "mime": "application/pdf", "data": b64(b"%PDF-1.4\ngarbage")}, 422),
+    )
+    for name, bad, code in cases:
+        r = c.post("/api/chat/message", headers=AUTH, json=body(sid_rej, "hi", bad))
+        check(f"attachment: /message {name} with a string detail",
+              r.status_code == code and isinstance(r.json().get("detail"), str), f"{r.status_code} {r.text[:200]}")
+        r = c.post("/api/chat/message/stream", headers=AUTH, json=body(sid_rej, "hi", bad))
+        check(f"attachment: /message/stream {name} as JSON, not SSE",
+              r.status_code == code and r.headers.get("content-type", "").startswith("application/json")
+              and isinstance(r.json().get("detail"), str), f"{r.status_code} {r.headers.get('content-type')}")
+    check("attachment: a rejected file adds no message", len(stored(sid_rej)) == before,
+          f"{before} -> {len(stored(sid_rej))}")
+    sid_new = str(uuid.uuid4())
+    c.post("/api/chat/message", headers=AUTH, json=body(sid_new, "hi", cases[0][1]))
+    check("attachment: a rejected first turn creates no session",
+          c.get(f"/api/chat/session/{sid_new}", headers=AUTH).status_code == 404)
+
+    # ---- size limits: the validator's 413, then the body cap (declared and chunked) ----
+    saved = settings.attachment_max_bytes
+    settings.attachment_max_bytes = 1000
+    try:
+        r = c.post("/api/chat/message", headers=AUTH, json=body(sid_rej, "hi", att))
+        check("attachment: over a lowered attachment_max_bytes -> 413 from the validator",
+              r.status_code == 413 and "the limit is 1000 bytes" in r.json().get("detail", ""),
+              f"{r.status_code} {r.text[:200]}")
+        limit = attachments.max_request_body_bytes()
+        huge = json.dumps(body(sid_rej, "hi", {"name": "a.pdf", "mime": "application/pdf",
+                                                "data": "A" * (limit + 10)})).encode()
+        r = c.post("/api/chat/message", content=huge, headers={"content-type": "application/json"})
+        check("attachment: an oversized POST without the key is still a 401 first", r.status_code == 401,
+              str(r.status_code))
+        for path in ("/api/chat/message", "/api/chat/message/stream"):
+            r = c.post(path, content=huge, headers={**AUTH, "content-type": "application/json"})
+            check(f"attachment: {path} oversized body (Content-Length) -> 413 from the body cap",
+                  r.status_code == 413 and r.json().get("detail", "").startswith("Request body too large (limit "),
+                  f"{r.status_code} {r.text[:200]}")
+
+            def chunks():
+                for i in range(0, len(huge), 65536):
+                    yield huge[i:i + 65536]
+
+            r = c.post(path, content=chunks(), headers={**AUTH, "content-type": "application/json"})
+            check(f"attachment: {path} oversized CHUNKED body (no Content-Length) -> 413",
+                  r.status_code == 413 and r.json().get("detail", "").startswith("Request body too large"),
+                  f"{r.status_code} {r.text[:200]}")
+        small = json.dumps(body(sid_rej, "hello again")).encode()
+
+        def small_chunks():
+            yield small[:20]
+            yield small[20:]
+
+        r = c.post("/api/chat/message", content=small_chunks(), headers={**AUTH, "content-type": "application/json"})
+        check("attachment: a chunked body under the cap still works", r.status_code == 200,
+              f"{r.status_code} {r.text[:200]}")
+    finally:
+        settings.attachment_max_bytes = saved
+
+    real_support = attachments.pdf_support
+    attachments.pdf_support = lambda: (False, "PDF support is not installed (pip install -r requirements.txt)")
+    try:
+        r = c.post("/api/chat/message", headers=AUTH, json=body(sid_rej, "hi", att))
+        check("attachment: no PDF support on the host -> 503 with the gate's reason",
+              r.status_code == 503
+              and r.json().get("detail") == "PDF support is not installed (pip install -r requirements.txt)",
+              f"{r.status_code} {r.text[:200]}")
+    finally:
+        attachments.pdf_support = real_support
+
+    # ---- the sample attack documents (Prompt Library) ----
+    rcat = c.get("/api/attachments/samples?theme=retail", headers=AUTH)
+    rows = rcat.json().get("samples", []) if rcat.status_code == 200 else []
+    check("GET /api/attachments/samples -> 200 + the four samples",
+          rcat.status_code == 200 and rcat.json().get("theme") == "retail"
+          and [s["id"] for s in rows] == ["white-text", "tiny-font", "off-page", "clean"], rcat.text[:200])
+    check("GET /api/attachments/samples defaults to medadvice",
+          c.get("/api/attachments/samples", headers=AUTH).json().get("theme") == "medadvice")
+    check("GET /api/attachments/samples unknown theme -> 404",
+          c.get("/api/attachments/samples?theme=nope", headers=AUTH).status_code == 404)
+    for row in rows:
+        r = c.get(row["url"], headers=AUTH)
+        check(f"GET {row['url']} -> 200 application/pdf",
+              r.status_code == 200 and r.headers.get("content-type") == "application/pdf"
+              and r.content.startswith(b"%PDF-") and r.headers.get("cache-control") == "no-store"
+              and r.content == ad.build_pdf(profile, ad.get_sample(row["id"])),
+              f"{r.status_code} {r.headers.get('content-type')}")
+    check("GET /api/attachments/samples/<unknown>.pdf -> 404",
+          c.get("/api/attachments/samples/nope.pdf?theme=retail", headers=AUTH).status_code == 404)
+
+    # ---- server-info: the UI's limits and the pdf_attachments gate ----
+    info = c.get("/api/server-info", headers=AUTH).json()
+    check("server-info carries attachments (client_config)", info.get("attachments") == attachments.client_config(),
+          str(info.get("attachments")))
+    gated = c.post("/api/server-info/refresh", headers=AUTH).json().get("gated") or {}
+    check("server-info gated.pdf_attachments is enabled with pypdf installed",
+          gated.get("pdf_attachments") == {"enabled": True, "reason": ""}, str(gated.get("pdf_attachments")))
+
+
 def main() -> int:
     with TestClient(app) as c:
         # ---- public (no key) ----
@@ -101,7 +285,8 @@ def main() -> int:
         for path in ("/api/chat/auto-prompt/status", "/api/incident/status",
                      "/api/spray/status", "/api/appointments?client_id=x",
                      "/api/settings", "/api/hec/destinations", "/admin/logs/metrics",
-                     "/api/settings/emit-model"):
+                     "/api/settings/emit-model", "/api/attachments/samples",
+                     "/api/attachments/samples/white-text.pdf"):
             r = c.get(path)
             check(f"GET {path} -> 401 without key", r.status_code == 401, f"got {r.status_code}")
 
@@ -349,6 +534,9 @@ def main() -> int:
         check("resume: the resumed user message is in the stored history",
               any(m.get("content") == "after the restart" for m in _msgs),
               str([m.get("content") for m in _msgs][-4:]))
+
+        # ---- chat attachments (docs/attachments.md) ----
+        _attachment_api_checks(c)
 
         check("GET /api/chat/auto-prompt/status -> 200", c.get("/api/chat/auto-prompt/status", headers=AUTH).status_code == 200)
         check("POST /api/chat/auto-prompt/start -> 200 (stubbed)", c.post("/api/chat/auto-prompt/start", headers=AUTH).status_code == 200)
@@ -833,6 +1021,23 @@ def main() -> int:
               'id="showRecentButton"' in a_html and 'id="recentSessionsModal"' in a_html)
         check("chat.js: Show Recent reloads via the existing session endpoint",
               "function loadRecentSession(" in _chat_js and "'/api/chat/session/' + encodeURIComponent(id)" in _chat_js)
+        # Chat attachments live in the composer, never as a Demo Controls card
+        # (always screened, no toggle).
+        _attach_btn = re.search(r'<button[^>]*id="attachButton"[^>]*>', a_html, re.S)
+        check("Composer: Attach button (type=button, starts disabled until server-info gates it)",
+              _attach_btn is not None and 'type="button"' in _attach_btn.group(0)
+              and re.search(r"\sdisabled\s", _attach_btn.group(0)) is not None)
+        check("Composer: hidden file input accepts PDFs only",
+              re.search(r'<input[^>]*id="attachmentInput"[^>]*accept="application/pdf,\.pdf"', a_html) is not None)
+        check("Composer: attachment chip row present", 'id="attachmentChip"' in a_html)
+        check("Composer: the attachment controls are outside the Demo Controls drawer",
+              all(f'id="{i}"' not in _drawer for i in ("attachButton", "attachmentInput", "attachmentChip")))
+        check("Chat: chat.js cache-buster bumped to v=33", "/static/js/chat.js?v=33" in a_html)
+        check("chat.js: a stage label for attachment_intake", "attachment_intake:" in _chat_js)
+        check("chat.js: the payload carries the attachment and keeps the hidden-control line",
+              "attachment: attachment ?" in _chat_js and "_hiddenControls.has(key)) payload[flag] = null" in _chat_js)
+        check("chat.js: the Attach button is gated by the pdf_attachments rule",
+              "gateFor('pdf_attachments')" in _chat_js)
 
     # ---- AI Defense per-direction guardrail config (no client needed) ----
     prompt_rules = {r["rule_name"] for r in settings.ai_defense_rule_config}
