@@ -114,9 +114,10 @@ _BY_ID: Dict[str, AttackSample] = {s.id: s for s in SAMPLES}
 
 #: The date ``tests/manual/probe_attachments.py`` last confirmed, against the
 #: live Cisco AI Defense, that every attack sample is blocked as a DOCUMENT on
-#: every theme (and the clean control allowed). None until that run is recorded:
-#: the corpus validation (2026-06-24) covers the payloads typed, not embedded.
-DOCUMENT_VALIDATION: Optional[str] = None
+#: every theme (and the clean control allowed). The corpus validation
+#: (2026-06-24) covers the payloads typed; this covers them embedded. 2026-10-30:
+#: Tier 1 56/56 (8 themes x 4 samples + 24 ~11k-character long_pdf runs).
+DOCUMENT_VALIDATION: Optional[str] = "2026-10-30"
 
 
 def get_sample(sample_id: Optional[str]) -> Optional[AttackSample]:
