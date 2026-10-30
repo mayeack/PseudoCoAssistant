@@ -20,8 +20,15 @@ _COOKIE_MAX_AGE = 60 * 60 * 12  # 12 hours
 
 
 def _safe_next(next_path: str, default: str = "/app") -> str:
-    """Only redirect to local paths — blocks open-redirect to other sites."""
-    if next_path and next_path.startswith("/") and not next_path.startswith("//"):
+    """Only redirect to local paths — blocks open-redirect to other sites.
+
+    Browsers read a backslash as a slash, so "/\\evil.example" is the same
+    protocol-relative URL as "//evil.example"; control characters are refused
+    for the same reason.
+    """
+    if (next_path and next_path.startswith("/") and not next_path.startswith("//")
+            and "\\" not in next_path
+            and not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in next_path)):
         return next_path
     return default
 
