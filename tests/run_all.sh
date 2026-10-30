@@ -17,6 +17,7 @@ if ! "$PY" -c "import fastapi" >/dev/null 2>&1; then
 fi
 
 SUITES=(
+  tests/test_access_gate.py
   tests/test_nvidia_provider.py
   tests/test_host_capabilities.py
   tests/test_ec2_scripts.py
