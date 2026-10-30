@@ -7,11 +7,12 @@
 # =============================================================================
 
 # Web Framework
-fastapi==0.109.0
+fastapi==0.141.1   # security (CVE-2024-24762); the last release before FastAPI requires opentelemetry-api>=1.44 (the OTel pins below stay on 1.38)
+starlette==1.3.1   # security: was 0.35.1 via fastapi 0.109 (CVE-2024-47874, CVE-2025-54121, CVE-2026-48710/48817/48818/54282/54283)
 uvicorn[standard]==0.27.0
 python-dotenv==1.2.2   # splunk-ao needs >=1.2.2 (backend/config.py hand-loads .env itself)
 pydantic==2.13.4
-pydantic-settings==2.14.1   # bumped from 2.1.0 for galileo-core (splunk-ao + legacy galileo; compatible)
+pydantic-settings==2.14.2   # bumped from 2.1.0 for galileo-core (splunk-ao + legacy galileo; compatible); 2.14.2 for CVE-2026-58203
 
 # Database
 sqlalchemy==2.0.25
@@ -24,10 +25,10 @@ openai==2.43.0          # OpenAI-compatible APIs (OpenAI, DeepSeek, etc.)
 
 # Utilities
 aiofiles==23.2.1
-python-multipart==0.0.6
+python-multipart==0.0.32   # security: the public POST /login parses form bodies before auth (CVE-2024-24762, CVE-2024-53981, CVE-2026-24486/40347/42561/53538/53539/53540)
 sse-starlette==1.8.2
 websockets==12.0
-httpx==0.27.2   # galileo-core / splunk-ao need >=0.27,<0.29; 0.27.x keeps Starlette 0.35 TestClient's app= shortcut (httpx 0.28 removed it)
+httpx==0.27.2   # galileo-core / splunk-ao need >=0.27,<0.29 (Starlette 1.3's TestClient works with 0.27.x)
 
 # =============================================================================
 # Agentic orchestration (LangChain + LangGraph)
@@ -46,9 +47,8 @@ langchain-ollama==1.1.0        # ChatOllama (local UNCENSORED model via Ollama d
 
 # NVIDIA NeMo Guardrails — the "NeMo Guardrails" drawer toggle (backend/services/
 # nemo_guardrails.py runs the rails IN-PROCESS against the active chat model).
-# CORE package only: the [server] extra needs starlette>=0.49, which would drag
-# fastapi past 0.109 and break the httpx-0.27 TestClient pin above. LangChain is
-# not a core dependency of 0.24 (the LangChain judge is adapted at runtime).
+# CORE package only: the rails run in-process, so the [server] extra isn't needed.
+# LangChain is not a core dependency of 0.24 (the LangChain judge is adapted at runtime).
 nemoguardrails==0.24.0
 
 # =============================================================================
