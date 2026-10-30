@@ -40,9 +40,13 @@ def check(name: str, cond: bool) -> None:
         _fails += 1
 
 
-# SPLUNK_AO_O11Y_API_TOKEN is scrubbed too: _session_for branches on it to
-# explain a sessions failure, so a real value in .env would otherwise change
-# which message [6] sees.
+# backend.config copies .env into os.environ at import, so it is imported
+# before the scrub — scrubbing first would let that import put the box's real
+# values back. SPLUNK_AO_O11Y_API_TOKEN is scrubbed too: _session_for branches
+# on it to explain a sessions failure, so a real value in .env would otherwise
+# change which message [6] sees.
+import backend.config  # noqa: E402,F401
+
 for _k in ("SPLUNK_AO_O11Y_TOKEN", "SPLUNK_AO_REALM", "SPLUNK_AO_LOGGING_DISABLED",
            "SPLUNK_AO_PROJECT", "SPLUNK_AO_AGENT_STREAM", "SPLUNK_AO_O11Y_API_TOKEN"):
     os.environ.pop(_k, None)
