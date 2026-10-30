@@ -118,9 +118,6 @@ async def _validated_attachment(chat_request: ChatRequest) -> Optional[Dict[str,
     attachment = chat_request.attachment
     if attachment is None:
         return None
-    supported, reason = attachments.pdf_support()
-    if not supported:
-        raise HTTPException(status_code=503, detail=reason)
     try:
         return await run_in_threadpool(
             attachments.validate_upload, attachment.name, attachment.mime, attachment.data

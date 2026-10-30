@@ -1398,6 +1398,8 @@ async function sendMessage(presetText = null, schedulingAction = null) {
         const refusal = attachment && ATTACHMENT_REJECTIONS.has(error.status)
             ? (error.detail || 'The attachment could not be accepted.') : null;
         addMessageToChat('assistant', refusal || theme.errorFallback, 'safety_warning');
+        // A failure that was not about the file: put it back so a retry needs no re-pick.
+        if (attachment && !refusal && !pendingAttachment) setPendingAttachment(attachment);
     } finally {
         input.disabled = false;
         document.getElementById('sendButton').disabled = false;

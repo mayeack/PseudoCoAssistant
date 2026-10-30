@@ -29,6 +29,7 @@ from typing import Optional
 from fastapi import HTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from backend.config import settings
 from backend.services import attachments
 
 #: The routes whose JSON body may carry an attachment.
@@ -38,7 +39,10 @@ LIMITED_PATHS = frozenset({"/api/chat/message", "/api/chat/message/stream"})
 def too_large_detail(limit: int) -> str:
     """The 413 detail: a plain string, like every other chat error."""
     mb = f"{limit / (1024 * 1024):.1f}".rstrip("0").rstrip(".")
-    return f"Request body too large (limit {mb} MB)"
+    file_mb = f"{settings.attachment_max_bytes / (1024 * 1024):.1f}".rstrip("0").rstrip(".")
+    # The body limit is the base64 of the largest file plus headroom; name the
+    # file limit too, the number the composer and the docs quote.
+    return f"Request body too large (limit {mb} MB; attachments are limited to {file_mb} MB)"
 
 
 def _declared_length(scope: Scope) -> Optional[int]:
