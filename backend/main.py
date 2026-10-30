@@ -14,7 +14,11 @@ from backend.middleware.request_logging import RequestLoggingMiddleware
 from backend.middleware.access_key import AccessKeyMiddleware
 from backend.middleware.settings_gate import has_settings_access
 from backend.routers import chat, admin, auth, settings as settings_routes, incident, spray, toolguard, analytics, appointments
-from backend.telemetry import otel
+from backend.telemetry import otel, tracestate_guard
+
+# Cap inbound W3C tracestate before OpenTelemetry parses it (CVE-2026-114603).
+# Must run before the first request; see backend/telemetry/tracestate_guard.py.
+tracestate_guard.install()
 
 # Setup logging
 setup_logging()
