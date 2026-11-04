@@ -157,6 +157,7 @@ async def startup_event():
         settings_store.apply_ai_provider_from_store()
         # Same for the AI Defense / Splunk Agent Observability integration creds.
         # (Collector-consumed keys are .env-owned and already loaded by config.)
+        # It also reconfigures the live clients, which were built at import time.
         settings_store.apply_integration_creds_from_store()
         # The NemoClaw Guardrails drawer toggle is server-side state: restore it.
         settings_store.apply_nemoclaw_guardrails_from_store()
