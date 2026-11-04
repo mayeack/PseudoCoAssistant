@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Defense AI Red Teaming against PseudoCo Assistant</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 880px; margin: 2rem auto; padding: 0 1rem; color: #1f2937; line-height: 1.55; }
+  h1, h2, h3 { color: #111827; line-height: 1.25; }
+  h1 { font-size: 1.9rem; border-bottom: 2px solid #e5e7eb; padding-bottom: .4rem; }
+  h2 { font-size: 1.35rem; margin-top: 2rem; border-bottom: 1px solid #e5e7eb; padding-bottom: .25rem; }
+  h3 { font-size: 1.1rem; margin-top: 1.4rem; }
+  code { background: #f3f4f6; padding: .1rem .3rem; border-radius: 3px; font-size: .92em; }
+  pre { background: #f3f4f6; padding: .8rem 1rem; border-radius: 6px; overflow-x: auto; font-size: .88em; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .93em; }
+  th, td { border: 1px solid #e5e7eb; padding: .4rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #f9fafb; }
+  ul { padding-left: 1.4rem; }
+  li { margin: .25rem 0; }
+  .note { font-size: .9em; color: #6b7280; }
+</style>
+</head>
+<body>
+<h1>AI Defense AI Red Teaming against PseudoCo Assistant</h1>
+<p>Cisco AI Defense <strong>AI Red Teaming</strong> (Security Cloud Control → AI Defense → AI Red
+Teaming) sends a library of attack prompts to a <em>target</em> and scores the answers.
+This page covers the endpoint that target points at and how to configure it.</p>
+<h2>Why a separate endpoint</h2>
+<p>A red-teaming target is a URL plus a JSON request template. The only thing AI
+Defense fills into that template is <code>{{prompt}}</code>. The UI's own validator rejects
+a template without it and knows no other placeholder.</p>
+<p><code>POST /api/chat/message</code> needs a <code>session_id</code> and replays that session's whole
+history to the model on every turn. A template can only hold a fixed
+<code>session_id</code>, so every attack in a run would pile into one conversation. Each
+attack would then see all the earlier ones, and the prompt would keep growing.</p>
+<p><code>POST /api/chat/completions</code> removes that problem. It is stateless and
+OpenAI-compatible:</p>
+<ul>
+<li><strong>Every call is a brand-new session</strong> with its own uuid, persisted and
+  governed like any chat session.</li>
+<li><code>messages</code> is an OpenAI-style list. The <strong>last message is the turn</strong> and must
+  be a non-empty <code>user</code> message. Earlier <code>user</code> / <code>assistant</code> messages become
+  the session's history, in order. That is how a multi-turn attack reaches the
+  model.</li>
+<li><code>system</code>, <code>developer</code> and <code>tool</code> messages are <strong>dropped</strong>. The app's own
+  system prompt is part of what is under test, so a caller cannot replace it.</li>
+<li>The turn is exactly the <code>/api/chat/message</code> turn: same shared chain,
+  guardrails, governance events, Splunk HEC / Agent Observability / APM
+  telemetry and DB rows. Calling the endpoint counts as accepting the
+  disclaimer.</li>
+<li>The answer is <code>choices[0].message.content</code>. A turn a guardrail blocks still
+  returns <strong>200</strong>, with the block banner as the content, which is what the chat
+  UI would show. The red team scores that text.</li>
+</ul>
+<pre><code class="language-json">POST /api/chat/completions
+{
+  &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;...&quot;}],
+  &quot;theme&quot;: &quot;medadvice&quot;,
+  &quot;ai_defense_review&quot;: false
+}
+
+200
+{
+  &quot;id&quot;: &quot;chatcmpl-…&quot;,
+  &quot;object&quot;: &quot;chat.completion&quot;,
+  &quot;model&quot;: &quot;pseudoco-assistant&quot;,
+  &quot;choices&quot;: [{&quot;index&quot;: 0, &quot;message&quot;: {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: &quot;…&quot;}, &quot;finish_reason&quot;: &quot;stop&quot;}],
+  &quot;pseudoco_assistant_turn&quot;: {&quot;session_id&quot;: &quot;…&quot;, &quot;type&quot;: &quot;recommendation&quot;, &quot;severity&quot;: &quot;LOW&quot;, &quot;escalated&quot;: false}
+}
+</code></pre>
+<p><code>content</code> may also be a list of OpenAI content parts. Only the <code>text</code> parts are
+read. <code>model</code>, <code>temperature</code>, <code>max_tokens</code> and other OpenAI parameters are
+accepted and ignored. <code>stream: true</code> gets 400.</p>
+<h3>Guardrail state rides in the body</h3>
+<p>Every <code>ChatRequest</code> flag is also a field here, with the same meaning and the
+same default: <code>theme</code>, <code>ai_defense_review</code>, <code>internal_policy_review</code>,
+<code>agent_control_review</code>, <code>nemo_guardrails_review</code>, <code>multi_agent_mode</code>, the four
+<code>force_*_injection</code> flags and <code>blueprint</code>. Put them in the request template as
+constants. <code>tests/test_chat_completions.py</code> fails if a new <code>ChatRequest</code> flag
+is not carried over.</p>
+<table>
+<thead>
+<tr>
+<th>Run</th>
+<th>Template constants</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Unprotected baseline</td>
+<td><code>"ai_defense_review": false</code></td>
+</tr>
+<tr>
+<td>AI Defense runtime protection on</td>
+<td><code>"ai_defense_review": true</code></td>
+</tr>
+<tr>
+<td>Another theme</td>
+<td><code>"theme": "retail"</code> (any theme key)</td>
+</tr>
+</tbody>
+</table>
+<p>An unset flag means the server default. For API callers that is <strong>off</strong> for
+AI Defense review, so a template that leaves it out runs unprotected.</p>
+<h2>Authentication</h2>
+<p>The endpoint sits behind the app's access key like every other route. Besides
+the login cookie and HTTP Basic (<code>curl -u x:$ACCESS_KEY</code>), the gate accepts the
+raw key in an <strong><code>X-Access-Key</code></strong> header. That matches the target's "API Token"
+setting, which is a header name plus a value.</p>
+<h2>Configuring the target</h2>
+<p>AI Red Teaming → <strong>Add component → Add target</strong>:</p>
+<ol>
+<li><strong>Target details.</strong> Name: <code>PseudoCo Assistant - MedAdvice (pseudocoassistant.com)</code>.
+   Target type: <strong>Agent</strong>. Modality: <strong>Text</strong>.</li>
+<li><strong>Connection settings.</strong></li>
+<li>Provider: <strong>Custom Endpoint</strong>. Data plane: <strong>Cisco AI Defense SaaS</strong>.</li>
+<li>Model endpoint URL: <code>https://pseudocoassistant.com/api/chat/completions</code>
+     (or another box's public URL). The red team calls it from Cisco's cloud,
+     so it has to be the public tunnel, not localhost.</li>
+<li>Enable endpoint streaming: <strong>off</strong>.</li>
+<li>API provider: <strong>OpenAI</strong>. That prefills the multi-turn
+     <code>message_request_config</code> (<code>messages</code> / <code>role</code> / <code>content</code>) that this
+     endpoint speaks.</li>
+<li>Request body template (baseline):
+     <code>json
+     {"messages": [{"role": "user", "content": "{{prompt}}"}], "theme": "medadvice", "ai_defense_review": false}</code></li>
+<li>Path to model response: <code>choices[0].message.content</code></li>
+<li>Authentication: <strong>API Token</strong>. Key <code>X-Access-Key</code>, value = the box's
+     <code>ACCESS_KEY</code>. Paste it yourself; it is a secret.</li>
+<li><strong>Advanced settings</strong> and <strong>Summary</strong>, then save. Run <strong>Test connection</strong>
+   before a full run.</li>
+</ol>
+<p>Then <strong>Start red teaming</strong>, pick the target and a profile.</p>
+<h2>What a run costs and where it lands</h2>
+<ul>
+<li>Every attack is a real governed turn. It writes a conversation row and a
+  governance event (Splunk <code>gen_ai:json</code>). It sends a trace to the theme's
+  Agent Observability stream and spans to APM. Expect the Governance Logs page
+  and the MedAdvice stream to fill with attack traffic during a run.</li>
+<li>The Mac runs the local Ollama model by default (<code>mistral-nemo:12b</code>): no API
+  cost, but roughly 20–30 s per single-agent turn, and parallel attacks queue
+  on the one local model. A large profile takes hours. With
+  <code>multi_agent_mode: true</code> each turn makes several model calls and takes
+  longer still.</li>
+<li>The tunnel and the app have to stay up for the whole run.</li>
+</ul>
+</body>
+</html>

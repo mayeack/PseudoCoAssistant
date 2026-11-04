@@ -285,6 +285,7 @@ even with the gateway down). Auto-start at login is opt-in:
 ### Chat API
 - `POST /api/chat/session/new` - Create new session
 - `POST /api/chat/message` - Send message (`/api/chat/message/stream` streams the pipeline stages). An optional `attachment: {name, mime, data}` carries one base64 PDF (5 MB, 50 pages); its text is screened together with the message. A rejected file gets 413 / 415 / 422 (503 without PDF support) with a plain-string `detail`, and nothing is recorded ([docs/attachments.md](docs/attachments.md))
+- `POST /api/chat/completions` - Stateless, OpenAI-compatible version of the same governed turn: `{"messages": [...]}` in, `choices[0].message.content` out, and a fresh session on every call. Earlier user/assistant messages become the history; Demo Controls flags such as `ai_defense_review` ride in the body. This is what an AI Defense AI Red Teaming target points at ([docs/red-teaming.md](docs/red-teaming.md))
 - `GET /api/attachments/samples?theme=<key>` - The theme's sample attack documents for the Prompt Library (one per hiding technique, plus a clean control)
 - `GET /api/attachments/samples/{id}.pdf?theme=<key>` - One sample PDF, rendered on demand
 - `GET /api/chat/session/{session_id}` - Get session history

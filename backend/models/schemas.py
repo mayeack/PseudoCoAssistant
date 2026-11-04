@@ -76,6 +76,46 @@ class ChatRequest(BaseModel):
     # always, there is no toggle. Not a Demo Control, so not Optional[bool].
     attachment: Optional[ChatAttachment] = None
 
+class ChatCompletionMessage(BaseModel):
+    """One OpenAI-style chat message. ``content`` is a string or a list of
+    content parts (only ``{"type": "text", "text": ...}`` parts are read).
+    Unknown keys (``name``, ``tool_calls``, ...) are ignored."""
+    role: str = Field(..., max_length=32)
+    content: Optional[Any] = None
+
+
+class ChatCompletionRequest(BaseModel):
+    """``POST /api/chat/completions`` (docs/red-teaming.md): a stateless,
+    OpenAI-compatible way into the same governed turn as ``/api/chat/message``.
+
+    Every call is a brand-new session. The last message is the turn and must
+    be a user message. Earlier user/assistant messages become that session's
+    history, which is how a red-teaming tool runs a multi-turn attack. System,
+    developer and tool messages are dropped: the app's own system prompt is
+    part of what is under test.
+
+    The PseudoCo Assistant fields after ``messages`` carry the same meaning
+    and defaults as on ``ChatRequest``. A caller sets them as constants in its
+    request template, for example ``"ai_defense_review": true`` for a
+    protected run. OpenAI parameters such as ``model``, ``temperature`` and
+    ``max_tokens`` are accepted and ignored.
+    """
+    messages: List[ChatCompletionMessage] = Field(..., min_length=1, max_length=100)
+    model: Optional[str] = None
+    stream: Optional[bool] = False
+    theme: Optional[str] = "medadvice"
+    force_pii_injection: Optional[bool] = None
+    force_toxic_injection: Optional[bool] = None
+    force_hallucination_injection: Optional[bool] = None
+    force_boundary_injection: Optional[bool] = None
+    ai_defense_review: Optional[bool] = None
+    internal_policy_review: Optional[bool] = None
+    multi_agent_mode: Optional[bool] = None
+    agent_control_review: Optional[bool] = None
+    nemo_guardrails_review: Optional[bool] = None
+    blueprint: Optional[str] = None
+
+
 class ChatResponse(BaseModel):
     session_id: str
     message: str

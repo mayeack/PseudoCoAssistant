@@ -2,15 +2,23 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 import asyncio
 import logging
+import time
 import uuid
 import json
 from datetime import datetime, timedelta
 
 from backend.config import settings
-from backend.models.schemas import ChatRequest, ChatResponse, MessageRole, MessageType
+from backend.models.schemas import (
+    ChatCompletionMessage,
+    ChatCompletionRequest,
+    ChatRequest,
+    ChatResponse,
+    MessageRole,
+    MessageType,
+)
 from backend.models.db_models import Conversation
 from backend.database.db import get_db
 from backend.services import attachments
@@ -142,13 +150,15 @@ def _prepare_session(
     *,
     typed: Optional[str] = None,
     attachment: Optional[Dict[str, Any]] = None,
+    history: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Load or create the chat session and record the incoming user message.
 
     Shared by the JSON and SSE message endpoints; raises 400 when a new session
     hasn't accepted the disclaimer. ``typed`` overrides the stored text (see
     ``_typed_message``); a validated ``attachment`` is recorded on the message
-    as metadata only -- never its bytes.
+    as metadata only -- never its bytes. ``history`` seeds the earlier turns
+    of a brand-new session (``/completions``); an existing session ignores it.
     """
     session_id = chat_request.session_id
 
@@ -188,7 +198,7 @@ def _prepare_session(
 
             sessions[session_id] = {
                 "created_at": datetime.utcnow(),
-                "messages": [],
+                "messages": list(history or []),
                 "disclaimer_accepted": True,
                 "escalated": False,
                 "enduser_id": pick_enduser_id(),
@@ -354,6 +364,137 @@ async def send_message(
         timestamp=datetime.utcnow(),
         scheduling=response_data.get("scheduling"),
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/chat/completions -- stateless, OpenAI-compatible (docs/red-teaming.md)
+# ---------------------------------------------------------------------------
+
+# The ChatCompletionRequest fields that carry over to ChatRequest unchanged:
+# the theme, every Demo Controls flag and the blueprint override.
+# tests/test_chat_completions.py fails if a ChatRequest flag is missing here.
+COMPLETION_TURN_FIELDS = frozenset(ChatCompletionRequest.model_fields) - {"messages", "model", "stream"}
+
+# Roles a caller may send. Only user and assistant messages become history.
+_COMPLETION_ROLES = frozenset({"system", "developer", "user", "assistant", "tool", "function"})
+
+
+def _completion_text(message: ChatCompletionMessage) -> str:
+    """Plain text of one OpenAI-style message: the string itself, or the text
+    parts of a content-part list, joined with newlines."""
+    content = message.content
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif (isinstance(part, dict) and part.get("type") in ("text", "input_text")
+                  and isinstance(part.get("text"), str)):
+                parts.append(part["text"])
+        return "\n".join(parts)
+    raise HTTPException(status_code=422,
+                        detail="message content must be a string or a list of text parts")
+
+
+def _completion_turn(body: ChatCompletionRequest) -> tuple:
+    """Split a /completions body into (the turn's text, the history to seed).
+
+    The last message is the turn and must be a non-empty user message. Earlier
+    user/assistant messages become the history, in order. System, developer
+    and tool messages are dropped, because the app's own system prompt is part
+    of what is under test. Empty turns are dropped too: Anthropic rejects an
+    empty message when the history is replayed.
+    """
+    if body.stream:
+        raise HTTPException(status_code=400,
+                            detail="stream is not supported on /api/chat/completions")
+    for message in body.messages:
+        if message.role not in _COMPLETION_ROLES:
+            raise HTTPException(status_code=422,
+                                detail=f"unsupported message role: {message.role!r}")
+    last = body.messages[-1]
+    if last.role != "user":
+        raise HTTPException(status_code=422, detail="the last message must be a user message")
+    typed = _completion_text(last)
+    if not typed.strip():
+        raise HTTPException(status_code=422, detail="the last user message is empty")
+
+    now = datetime.utcnow().isoformat()
+    history: List[Dict[str, Any]] = []
+    for message in body.messages[:-1]:
+        if message.role not in ("user", "assistant"):
+            continue
+        text = _completion_text(message)
+        if not text.strip():
+            continue
+        is_user = message.role == "user"
+        history.append({
+            "role": MessageRole.USER if is_user else MessageRole.ASSISTANT,
+            "content": text,
+            "timestamp": now,
+            "type": MessageType.USER_MESSAGE if is_user else MessageType.RECOMMENDATION,
+        })
+    return typed, history
+
+
+@router.post("/completions")
+async def chat_completions(
+    body: ChatCompletionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """OpenAI-compatible, stateless entry to the governed chat turn.
+
+    Built for AI Defense AI Red Teaming and similar tools, whose request
+    templates can only fill in ``{{prompt}}``, so they cannot supply a fresh
+    ``session_id`` per attack (docs/red-teaming.md). Every call starts a new
+    session seeded with the caller's earlier turns, then runs exactly the
+    ``/api/chat/message`` turn: same shared chain, guardrails, governance
+    events and persistence. The access-key gate applies as usual, and calling
+    this endpoint counts as accepting the disclaimer.
+
+    The answer is ``choices[0].message.content``. A turn a guardrail blocks
+    returns 200 with the block banner as the content, exactly as the chat UI
+    would show it.
+    """
+    client_host = request.client.host if request.client else None
+    typed, history = _completion_turn(body)
+
+    await _apply_incident_mode()
+
+    chat_request = ChatRequest(
+        session_id=str(uuid.uuid4()),
+        message=typed,
+        disclaimer_accepted=True,
+        **body.model_dump(include=COMPLETION_TURN_FIELDS),
+    )
+    session = _prepare_session(chat_request, client_host, db, history=history)
+    response_data = await run_in_threadpool(
+        _dispatch_chat_turn, **_turn_kwargs(chat_request, session, client_host)
+    )
+    _record_assistant_turn(chat_request.session_id, session, response_data, db)
+
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": "pseudoco-assistant",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": response_data["message"]},
+            "finish_reason": "stop",
+        }],
+        "pseudoco_assistant_turn": {
+            "session_id": chat_request.session_id,
+            "type": response_data["type"],
+            "severity": response_data.get("severity"),
+            "escalated": response_data.get("escalated", False),
+        },
+    }
 
 
 def _turn_event_stream(**kwargs: Any):
