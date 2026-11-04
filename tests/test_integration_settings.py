@@ -158,6 +158,109 @@ def test_ai_defense_save_reaches_the_live_client() -> None:
         ai_defense_client.reconfigure()
 
 
+def test_startup_applies_saved_ai_defense_key_to_the_live_client() -> None:
+    """A box whose AI Defense key lives ONLY in the Settings page (app_settings
+    row, nothing in .env) must come up configured after a restart.
+
+    ai_defense_client is built at import time (backend.main -> routers.chat ->
+    recommendation_engine), BEFORE the startup hook overlays the saved creds onto
+    ``settings`` — so the hook itself has to push them into the singleton, the way
+    a Settings save does. Before the fix the client kept its import-time snapshot
+    and the per-chat AI Defense toggle silently did nothing."""
+    from backend.services.ai_defense import ai_defense_client
+
+    attrs = ("ai_defense_enabled", "ai_defense_api_key", "ai_defense_region",
+             "ai_defense_endpoint")
+    orig = {a: getattr(settings, a) for a in attrs}
+    try:
+        with _TempStore() as data:
+            # .env without an AI Defense key: the import-time snapshot is empty.
+            settings.ai_defense_enabled = False
+            settings.ai_defense_api_key = ""
+            settings.ai_defense_region = "us"
+            settings.ai_defense_endpoint = ""
+            ai_defense_client.reconfigure()
+            check("precondition: client imported unconfigured",
+                  not ai_defense_client.is_configured)
+
+            # The app_settings row a Settings-page save leaves behind.
+            data["integration_creds"] = {"ai_defense": {
+                "enabled": "true",
+                "api_key": "sentinel-startup-key",
+                "endpoint": "https://sentinel.example.invalid",
+            }}
+            settings_store.apply_integration_creds_from_store()  # main.py startup hook
+
+            check("startup: settings carry the saved key",
+                  settings.ai_defense_api_key == "sentinel-startup-key")
+            check("startup: the live client is configured from the saved row",
+                  ai_defense_client.is_configured)
+            check("startup: the live client holds the saved key",
+                  ai_defense_client._api_key == "sentinel-startup-key")
+            check("startup: the live client targets the saved endpoint",
+                  ai_defense_client._url
+                  == "https://sentinel.example.invalid/api/v1/inspect/chat")
+    finally:
+        for a, v in orig.items():
+            setattr(settings, a, v)
+        ai_defense_client.reconfigure()
+
+
+def test_startup_reconfigures_only_integrations_it_applied() -> None:
+    """The startup hook runs the same _reconfigure_integration path as a save, for
+    every integration whose saved values it applied — and only those: an empty
+    blob must not touch a consumer, and a .env-owned key (splunk_o11y, SPLUNK_AO_*)
+    in the blob is skipped, so it is not "applied"."""
+    calls = []
+    orig_reconf = settings_store._reconfigure_integration
+    settings_store._reconfigure_integration = calls.append
+    attrs = ("ai_defense_api_key", "nemo_guardrails_rails")
+    orig = {a: getattr(settings, a) for a in attrs}
+    orig_ac = os.environ.get("AGENT_CONTROL_API_KEY")
+    try:
+        with _TempStore() as data:
+            settings_store.apply_integration_creds_from_store()
+            check("startup: an empty blob reconfigures nothing", calls == [])
+
+            data["integration_creds"] = {
+                "ai_defense": {"api_key": "k-ai"},
+                "agent_observability": {"agent_control_api_key": "k-ac"},
+                "nemo_guardrails": {"rails": "overreach"},
+                "splunk_o11y": {"realm": "ignored"},  # env_file: not applied here
+            }
+            settings_store.apply_integration_creds_from_store()
+            check("startup: every applied integration is reconfigured once",
+                  sorted(calls) == ["agent_observability", "ai_defense", "nemo_guardrails"])
+
+            calls.clear()
+            data["integration_creds"] = {"agent_observability": {"project": "env-owned"}}
+            settings_store.apply_integration_creds_from_store()
+            check("startup: a blob holding only .env-owned keys reconfigures nothing",
+                  calls == [])
+
+            def _boom(integration):
+                calls.append(integration)
+                raise RuntimeError("consumer down")
+
+            calls.clear()
+            settings_store._reconfigure_integration = _boom
+            data["integration_creds"] = {"ai_defense": {"api_key": "k-ai"},
+                                         "nemo_guardrails": {"rails": "overreach"}}
+            settings_store.apply_integration_creds_from_store()  # must not raise
+            check("startup: one failing consumer does not stop the others",
+                  sorted(calls) == ["ai_defense", "nemo_guardrails"])
+    finally:
+        settings_store._reconfigure_integration = orig_reconf
+        for a, v in orig.items():
+            setattr(settings, a, v)
+        if orig_ac is None:
+            os.environ.pop("AGENT_CONTROL_API_KEY", None)
+        else:
+            os.environ["AGENT_CONTROL_API_KEY"] = orig_ac
+        from backend.services.ai_defense import ai_defense_client
+        ai_defense_client.reconfigure()
+
+
 def test_agent_observability_save_sets_env() -> None:
     """The four SPLUNK_AO_* keys have two consumers: the SDK path (os.environ, live)
     and the collector overlay (.env at start). A save must feed both, retire the
@@ -394,6 +497,8 @@ def main() -> int:
         test_blank_secret_keeps_existing,
         test_boolean_false_is_a_real_value,
         test_ai_defense_save_reaches_the_live_client,
+        test_startup_applies_saved_ai_defense_key_to_the_live_client,
+        test_startup_reconfigures_only_integrations_it_applied,
         test_agent_observability_save_sets_env,
         test_agent_control_creds_are_blob_persisted,
         test_env_writer_replaces_in_place,

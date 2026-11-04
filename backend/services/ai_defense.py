@@ -88,7 +88,9 @@ class AIDefenseClient:
 
         This client is constructed once at import time and snapshots the URL, key
         and timeout, so mutating ``settings.ai_defense_*`` alone would not take
-        effect. Called by settings_store.set_integration_creds — the analog of
+        effect. Called by settings_store.set_integration_creds, and at startup by
+        apply_integration_creds_from_store (this client is built before that hook
+        overlays the Settings-page creds) — the analog of
         ``llm.clear_caches()`` on the provider path. The enabled_rules probe is
         reset too: a new API key means a different SCC connection, whose policy
         binding may differ from the one we discovered."""
