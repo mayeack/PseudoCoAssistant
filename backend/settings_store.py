@@ -1024,7 +1024,16 @@ def set_integration_creds(integration: str, fields: Dict[str, str]) -> List[str]
 
 
 def apply_integration_creds_from_store() -> None:
-    """Startup hook: apply any persisted integration creds over the .env defaults."""
+    """Startup hook: apply any persisted integration creds over the .env defaults.
+
+    The consumers are module-level singletons built at IMPORT time —
+    ``ai_defense_client`` is constructed when ``backend.main`` imports the chat
+    router, long before this hook runs — and some snapshot their config in
+    ``__init__``. Overlaying ``settings`` / ``os.environ`` alone would leave them on
+    the .env values, so a key saved only through the Settings page read as
+    unconfigured after every restart. Each integration whose saved values were
+    applied therefore goes through the same ``_reconfigure_integration`` path as a
+    Settings save."""
     from backend.config import settings
 
     store = load().get("integration_creds") or {}
@@ -1037,6 +1046,7 @@ def apply_integration_creds_from_store() -> None:
                                      ("console_url", "agent_control_console_url")):
                 if saved.get(old_key) and not saved.get(new_key):
                     saved[new_key] = saved[old_key]
+        applied: List[str] = []
         for f in fields:
             if f.env_file:
                 continue  # .env-owned; already loaded by backend.config
@@ -1047,6 +1057,16 @@ def apply_integration_creds_from_store() -> None:
                 setattr(settings, f.settings_attr, _as_bool(val) if f.boolean else val)
             if f.env:
                 os.environ[f.env] = val
+            applied.append(f.key)
+        if not applied:
+            continue
+        # Log field NAMES only — never values.
+        logger.info("applied saved %s integration fields at startup: %s",
+                    integration, ", ".join(applied))
+        try:
+            _reconfigure_integration(integration)
+        except Exception:
+            logger.exception("failed to reconfigure %s after applying saved creds", integration)
 
 
 # ---------------------------------------------------------------------------
