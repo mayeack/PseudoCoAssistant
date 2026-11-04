@@ -47,12 +47,26 @@ def _has_valid_basic_auth(request: Request) -> bool:
     return secrets.compare_digest(password, settings.access_key)
 
 
+# Header that carries the raw key, for API clients whose auth settings take a
+# header name and a token value, such as an AI Defense red-teaming target's
+# "API Token" (docs/red-teaming.md).
+ACCESS_KEY_HEADER = "X-Access-Key"
+
+
+def _has_valid_key_header(request: Request) -> bool:
+    presented = request.headers.get(ACCESS_KEY_HEADER, "")
+    return bool(presented) and secrets.compare_digest(
+        presented.encode("utf-8"), settings.access_key.encode("utf-8")
+    )
+
+
 class AccessKeyMiddleware(BaseHTTPMiddleware):
     """Gate every request behind a single shared access key.
 
-    Two accepted ways to present it:
+    Three accepted ways to present it:
       * Browser  -> log in at /login, which sets an HttpOnly session cookie.
       * API/curl -> HTTP Basic Auth  (curl -u x:$ACCESS_KEY ...).
+      * API      -> an ``X-Access-Key: $ACCESS_KEY`` header.
     No-op when settings.access_key is empty (local development).
     """
 
@@ -66,7 +80,8 @@ class AccessKeyMiddleware(BaseHTTPMiddleware):
                 or request.method == "OPTIONS"
                 or request.url.path in PUBLIC_PATHS
                 or _has_valid_cookie(request)
-                or _has_valid_basic_auth(request)):
+                or _has_valid_basic_auth(request)
+                or _has_valid_key_header(request)):
             return await call_next(request)
 
         logger.warning(
