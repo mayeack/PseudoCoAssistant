@@ -150,11 +150,23 @@ keep it honest:
   name and page count, never the text). That is the coordinator and
   specialists, and the NVIDIA primary and sub-assistants: **both** cores, in
   the same PR.
-- **Deterministic logic keys on the typed message only**: EHR lookup, internal
-  docs, scheduling intent, `pii_exfil_requested`, safety, routing and the
-  response-stage guardrail context. Never derive a tool call, a directive or a
-  verdict from document text. The model is the only thing a hidden instruction
-  may fool.
+- **Most deterministic logic keys on the typed message only**: internal docs,
+  scheduling intent, safety, routing and the response-stage guardrail context.
+  Never derive a tool call, a directive or a verdict for those from document
+  text.
+- **The PII/PHI exfiltration detector is the one deliberate exception.**
+  `pii_exfil_requested` -- and so `ehr_lookup` and the forced synthetic-PII
+  category (`injection.decide_requested_categories`) -- reads
+  `screened_prompt(state)`: the typed message plus an attached document's text,
+  exactly what the prompt screens inspect. This is the data-exfiltration attack
+  class the feature exists to show: a hidden instruction pulling the synthetic
+  record it names into context, and the model disclosing it. It stays safe to
+  always evaluate because `ehr_lookup` sits AFTER every prompt-stage guardrail
+  in `PRE_NODES` -- a bound Cisco AI Defense policy still blocks the turn
+  before this node ever runs, when it is on -- the record is still a fixed,
+  per-theme synthetic set (`backend/services/ehr.py`), and the model is still
+  the thing that actually discloses it; nothing is stitched into the answer
+  outside the LLM call. Every other deterministic trigger stays typed-only.
 - **The bytes are never persisted or logged.** Store and log
   `message_metadata` / `governance_record` only; `attachment` on a governance
   event is metadata and is not a DB column. The extracted text does leave the

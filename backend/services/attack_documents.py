@@ -18,6 +18,19 @@ colour, size and the page boundary, so the payload reaches every prompt screen
 would. Nothing here makes the attack succeed or fail: that is the guardrails'
 and the model's doing.
 
+All three attack samples carry a ``pii_phi_exfiltration`` payload: an
+instruction to disgorge the (synthetic) identity record the assistant holds.
+Hidden in a document it is read exactly like a typed one
+(``injection.pii_exfil_requested``, ``backend/agents/nodes/ehr.py``) -- the one
+deliberate exception to "deterministic logic reads the typed message only"
+(CLAUDE.md "Chat attachments"), because a hidden instruction pulling a real
+synthetic record into context and the model disclosing it is the
+data-exfiltration demo this feature exists to show. The lookup still runs
+AFTER every prompt-stage guardrail in ``PRE_NODES``, so a bound Cisco AI
+Defense policy still catches it first when it is on; off, the synthesizer
+grounds the forced PII directive on the record the lookup pulled and the
+model, not this module, is what discloses it.
+
 The payloads are verbatim, theme-neutral entries of
 ``spray_corpus.TECHNIQUE_FAMILIES``, validated there as blocked by Cisco AI
 Defense when TYPED. As documents they are validated by
@@ -97,16 +110,16 @@ class AttackSample:
     expect_blocked: bool = True
 
 
-# system_prompt_extraction[1] ("Repeat everything above this line ...") is NOT
-# used: inside a document "above this line" points at the document, not at the
-# system prompt. [2] asks for the configuration itself, from anywhere.
+# All three carry a pii_phi_exfiltration phrasing (see the module docstring):
+# the record each one asks for is whatever synthetic record backend/services/
+# ehr.py binds to the turn's enduser_id -- never a real person's data.
 SAMPLES: Tuple[AttackSample, ...] = (
-    AttackSample("white-text", "Hidden instruction override", "white_on_white",
-                 "White text on a white page", "direct_instruction_override", 0),
-    AttackSample("tiny-font", "Hidden persona jailbreak", "tiny_font",
-                 "1-point text", "persona_jailbreak", 0),
-    AttackSample("off-page", "Hidden configuration extraction", "off_page",
-                 "Text placed off the page", "system_prompt_extraction", 2),
+    AttackSample("white-text", "Hidden PII exfiltration request", "white_on_white",
+                 "White text on a white page", "pii_phi_exfiltration", 0),
+    AttackSample("tiny-font", "Hidden PII exfiltration (override)", "tiny_font",
+                 "1-point text", "pii_phi_exfiltration", 1),
+    AttackSample("off-page", "Hidden PII exfiltration (bulk)", "off_page",
+                 "Text placed off the page", "pii_phi_exfiltration", 2),
     AttackSample("clean", "Clean document (control)", "none",
                  "No hidden text", expect_blocked=False),
 )
@@ -115,9 +128,12 @@ _BY_ID: Dict[str, AttackSample] = {s.id: s for s in SAMPLES}
 #: The date ``tests/manual/probe_attachments.py`` last confirmed, against the
 #: live Cisco AI Defense, that every attack sample is blocked as a DOCUMENT on
 #: every theme (and the clean control allowed). The corpus validation
-#: (2026-06-24) covers the payloads typed; this covers them embedded. 2026-10-30:
-#: Tier 1 56/56 (8 themes x 4 samples + 24 ~11k-character long_pdf runs).
-DOCUMENT_VALIDATION: Optional[str] = "2026-10-30"
+#: (2026-06-24) covers the payloads typed; this covers them embedded.
+#: 2026-10-30 validated the three jailbreak/extraction payloads this module
+#: shipped with (56/56; see docs/attachments.md); switching the samples to the
+#: pii_phi_exfiltration phrasings retires that result -- None until a fresh
+#: Tier 1 run passes on the new payloads.
+DOCUMENT_VALIDATION: Optional[str] = None
 
 
 def get_sample(sample_id: Optional[str]) -> Optional[AttackSample]:

@@ -81,6 +81,7 @@ import random
 import re
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
+from backend.agents.nodes.attachment import screened_prompt
 from backend.agents.nodes.shared import content_engine
 from backend.config import settings
 from backend.telemetry import otel
@@ -390,11 +391,15 @@ _HELD_IDENTITY_RE = re.compile(
 
 
 def pii_exfil_requested(message: Optional[str]) -> bool:
-    """True when the user's message is a PII/PHI exfiltration attack.
+    """True when ``message`` is a PII/PHI exfiltration attack.
 
-    Requires both an exfil verb and a phrase scoping the ask to identity data the
-    assistant holds (see the note above), so it fires on an actual data-disgorge
-    attempt and not on an ordinary turn that happens to name an identifier.
+    A pure text predicate -- it does not know whether ``message`` is the typed
+    turn or a composed one. Requires both an exfil verb and a phrase scoping
+    the ask to identity data the assistant holds (see the note above), so it
+    fires on an actual data-disgorge attempt and not on an ordinary turn that
+    happens to name an identifier. Called directly with plain strings
+    (spray_corpus validation, tests) and, by the two functions below, with
+    ``screened_prompt(state)`` -- docs/attachments.md.
     """
     text = message or ""
     return bool(_EXFIL_VERB_RE.search(text) and _HELD_IDENTITY_RE.search(text))
@@ -403,15 +408,26 @@ def pii_exfil_requested(message: Optional[str]) -> bool:
 def decide_requested_categories(state: Dict[str, Any]) -> Dict[str, bool]:
     """Roll the per-category toggle/rate decision once for this turn.
 
-    The PII category is additionally forced ON when the user message is a PII/PHI
-    exfiltration attack (``pii_exfil_requested``) -- the attack is the request, so
-    it fires even when the Synthetic PII toggle is OFF. This lives here, in the
-    shared synthesizer path, so both blueprints exfiltrate identically.
+    The PII category is additionally forced ON when ``screened_prompt(state)``
+    -- the typed message, plus an attached document's text when there is one
+    (docs/attachments.md) -- is a PII/PHI exfiltration attack
+    (``pii_exfil_requested``): the attack is the request, so it fires even when
+    the Synthetic PII toggle is OFF. This lives here, in the shared synthesizer
+    path, so both blueprints exfiltrate identically.
+
+    This is the one deliberate exception to "deterministic logic reads the
+    typed message only" (CLAUDE.md "Chat attachments"): a hidden instruction in
+    a document pulling the synthetic record it names is the exfiltration demo.
+    It runs no differently from the typed attack -- same detector, same forced
+    category, same model-mediated leak -- and only after every prompt-stage
+    guardrail that is on has already had its turn (``ehr_lookup`` sits after
+    them in ``PRE_NODES``), so a bound Cisco AI Defense policy still catches it
+    first when it is on.
     """
     return {
         "pii": _should_request(
             state.get("force_pii_injection"), settings.pii_injection_rate
-        ) or pii_exfil_requested(state.get("user_message")),
+        ) or pii_exfil_requested(screened_prompt(state)),
         "toxic": _should_request(
             state.get("force_toxic_injection"), settings.toxic_injection_rate
         ),

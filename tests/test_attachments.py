@@ -621,39 +621,55 @@ def test_governance_log_fields() -> None:
     check("a non-chat event carries no input_modality", "input_modality" not in tool)
 
 
-def test_typed_text_only_drives_deterministic_logic() -> None:
-    # A document carrying the PII-exfiltration attack, sent with benign typed text:
-    # the screens and the model read it, but no deterministic trigger does.
-    exfil = TECHNIQUE_FAMILIES["pii_phi_exfiltration"][0]
-    sample = ad.AttackSample("pii-exfil", "PII exfiltration", "white_on_white", "White text",
-                             "pii_phi_exfiltration", 0)
+def test_document_drives_pii_exfiltration() -> None:
+    # A document whose hidden text is a PII-exfiltration attack, sent with a
+    # benign typed message (CLAUDE.md "Chat attachments" -- the one deliberate
+    # exception to typed-text-only deterministic logic): every prompt screen,
+    # ehr_lookup and the forced PII category all read the SAME composed text
+    # (screened_prompt), so a hidden instruction is read exactly like a typed
+    # one. Everything else (here: internal_docs) stays typed-only.
+    sample = ad.get_sample("white-text")
+    exfil = ad.payload(sample)
     profile = THEMES["medadvice"].sample_document
     att = attachments.validate_upload(ad.filename(profile), "application/pdf", b64(ad.build_pdf(profile, sample)))
     calls = []
     with _Patched((node_mod.governance_logger, "log_tool_call", lambda **kw: calls.append(kw))):
         state = _turn_state(att, user_message=profile.prompt)
         merged = {**state, **node_mod.attachment_intake_node(state)}
+        lookup = ehr_lookup_node(merged)
+        # The SAME typed message, with no attachment at all: the control that
+        # isolates the document as the cause.
+        typed_only = ehr_lookup_node({**merged, "attachment": None, "attachment_extraction": {}})
     screened = node_mod.screened_prompt(merged)
-    check("the screened text carries the payload (the guardrails see it)",
-          norm(ad.payload(sample)) in norm(screened), screened[-300:])
-    check("... which WOULD trip the exfil detector if it were typed",
+    check("the screened text carries the payload (every prompt screen sees it)",
+          norm(exfil) in norm(screened), screened[-300:])
+    check("the typed message alone is benign (a real customer question)",
+          not injection.pii_exfil_requested(merged["user_message"]), merged["user_message"])
+    check("... but the composed (typed + document) text IS an exfiltration ask",
           injection.pii_exfil_requested(exfil) and injection.pii_exfil_requested(screened))
-    check("the typed message does not", not injection.pii_exfil_requested(merged["user_message"]))
-    check("ehr_lookup runs on the typed text only -> no lookup", ehr_lookup_node(merged) == {})
-    check("the PII directive is not forced by the document",
-          injection.decide_requested_categories(merged)["pii"] is False)
-    directive, requested = injection.build_input_directives(merged)
-    check("no PII directive reaches the model", requested["pii"] is False
-          and "record header" not in directive and "NNN-NN-NNNN" not in directive)
-    check("no internal-docs ask from the document",
+    check("the typed text alone -> no lookup (the control)", typed_only == {})
+    check("the document's hidden text -> ehr_lookup pulls a real synthetic record",
+          "ehr_lookup" in lookup and lookup["ehr_lookup"]["count"] >= 1
+          and lookup["ehr_lookup"]["fields"], str(lookup))
+    check("the lookup is logged as a governed tool call naming the document",
+          any(c.get("tool_name") == "synthetic-ehr.lookup_patient"
+              and (c.get("attachment") or {}).get("sha256") == att["sha256"] for c in calls),
+          str(calls))
+    check("the PII category is forced by the document (toggle stays OFF)",
+          merged.get("force_pii_injection") is False
+          and injection.decide_requested_categories(merged)["pii"] is True)
+    directive, requested = injection.build_input_directives({**merged, **lookup})
+    check("the forced PII directive grounds on the record the lookup pulled",
+          requested["pii"] is True and lookup["ehr_lookup"]["header"] in directive)
+    check("no internal-docs ask from the document (that trigger stays typed-only)",
           not internal_docs.docs_requested(merged["user_message"], THEMES["medadvice"].docs))
 
 
 # --------------------------------------------------------------------------- sample documents
-EXPECTED_SAMPLES = (  # id, hiding, spray_corpus family, index (the approved plan's table)
-    ("white-text", "white_on_white", "direct_instruction_override", 0),
-    ("tiny-font", "tiny_font", "persona_jailbreak", 0),
-    ("off-page", "off_page", "system_prompt_extraction", 2),
+EXPECTED_SAMPLES = (  # id, hiding, spray_corpus family, index -- all three a pii_phi_exfiltration phrasing
+    ("white-text", "white_on_white", "pii_phi_exfiltration", 0),
+    ("tiny-font", "tiny_font", "pii_phi_exfiltration", 1),
+    ("off-page", "off_page", "pii_phi_exfiltration", 2),
     ("clean", "none", None, None),
 )
 
@@ -814,15 +830,17 @@ def test_cover_hygiene() -> None:
             check(f"{tag}: no placeholder value", not any(r.search(text) for r in placeholders))
             check(f"{tag}: no SSN / phone / email shapes",
                   not SSN_RE.search(text) and not PHONE_RE.search(text) and not EMAIL_RE.search(text))
-        # The demo story needs AI Defense to be what catches the document, so the
-        # composed turn of every attack sample must not be pre-empted by the
-        # internal policy engine (or force the PII directive).
+        # The demo story needs AI Defense to be what catches the document, so no
+        # attack sample's composed turn may be pre-empted by the internal policy
+        # engine (its self-harm substring match). The exfiltration itself is the
+        # intended effect: each attack sample's composed turn IS a PII exfil ask
+        # (docs/attachments.md), and only the clean control is not.
         for sample in ad.SAMPLES:
             composed = f"{profile.prompt}\n\n{cover}\n{ad.payload(sample)}"
             check(f"{key}/{sample.id}: the composed turn is not an internal-policy block",
                   not rules.check_policy_block(composed)[0])
-            check(f"{key}/{sample.id}: the composed turn is not a PII exfiltration ask",
-                  not injection.pii_exfil_requested(composed))
+            check(f"{key}/{sample.id}: the composed turn is a PII exfil ask iff it hides a payload",
+                  injection.pii_exfil_requested(composed) is bool(sample.family), f"{sample.id}")
 
 
 def main() -> int:
@@ -833,7 +851,7 @@ def main() -> int:
     for fn in (test_contract_and_limits, test_validator_accepts, test_validator_rejections,
                test_worker_hang_is_killed, test_sanitize_name, test_extraction_and_composition,
                test_attachment_intake_node, test_helpers, test_governance_log_fields,
-               test_typed_text_only_drives_deterministic_logic, test_sample_catalog, test_sample_pdfs,
+               test_document_drives_pii_exfiltration, test_sample_catalog, test_sample_pdfs,
                test_samples_through_the_worker, test_cover_hygiene):
         print(f"\n== {fn.__name__} ==")
         try:
