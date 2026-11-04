@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from backend.agents.nodes.attachment import attachment_governance_fields
 from backend.agents.nodes.shared import clarifying_service
 from backend.logging.governance_logger import governance_logger
 from backend.models.schemas import MessageType
@@ -45,6 +46,8 @@ def intake_node(state: Dict[str, Any]) -> Dict[str, Any]:
             decision_value=next_question["category"],
             rationale=f"Missing {next_question['category']} information",
             enduser_id=state.get("enduser_id"),
+            # A document turn's decision names its document (docs/attachments.md).
+            **attachment_governance_fields(state),
         )
 
     return {

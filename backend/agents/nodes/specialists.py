@@ -28,6 +28,7 @@ from backend.agents.nodes.agent_common import (
     request_model,
     trace_entry,
 )
+from backend.agents.nodes.attachment import with_attachment_note
 from backend.agents.nodes.shared import build_llm_messages
 from backend.agents.token_usage import TokenTally
 from backend.agents.themes.base import build_specialist_prompt
@@ -41,7 +42,10 @@ def make_specialists_agent(theme_config) -> Callable[[Dict[str, Any]], Dict[str,
     """Build the specialists node for a specific theme."""
 
     def specialists_node(state: Dict[str, Any]) -> Dict[str, Any]:
-        messages = build_llm_messages(state.get("conversation_history", []))
+        # On a document turn each specialist learns a document exists (its name,
+        # never its text -- docs/attachments.md): its findings reach the
+        # synthesizer, which does read the text, so they must not deny it exists.
+        messages = with_attachment_note(build_llm_messages(state.get("conversation_history", [])), state)
         provider = settings.ai_provider
         # Internal (non-user-facing) agents: run on the clean Ollama model so a
         # selected poisoned model only affects the user-facing synthesizer.

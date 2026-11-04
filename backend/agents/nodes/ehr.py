@@ -3,9 +3,13 @@ EHR "system" on a PII/PHI exfiltration turn, recording it as a governed tool cal
 
 One PRE node in the SHARED guardrail chain (blueprints/guardrails.py), so both
 blueprints get it by construction (parity) with no core changes. It fires only
-when the user message is a PII/PHI exfiltration attempt
-(``injection.pii_exfil_requested``) -- the same signal that forces the PII
-category for the turn. When it fires it:
+when ``screened_prompt(state)`` -- the typed message, plus an attached
+document's text when there is one (docs/attachments.md) -- is a PII/PHI
+exfiltration attempt (``injection.pii_exfil_requested``), the same signal that
+forces the PII category for the turn. A hidden instruction in a document is
+read the same as a typed one: this node sits AFTER every prompt-stage
+guardrail in ``PRE_NODES``, so a bound Cisco AI Defense policy still blocks the
+turn before this ever runs, when it is on. When it fires it:
 
 1. asks the in-process synthetic EHR MCP server for the record on file
    (``backend/services/ehr.py``), and
@@ -28,6 +32,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
+from backend.agents.nodes.attachment import attachment_governance_fields, screened_prompt
 from backend.agents.nodes.injection import pii_exfil_requested
 from backend.agents.state import governance_identity_overrides
 from backend.logging.governance_logger import governance_logger
@@ -40,14 +45,18 @@ logger = logging.getLogger(__name__)
 def ehr_lookup_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """PRE node: on an exfiltration turn, look up the synthetic record and record
     the retrieval as a governed tool call."""
-    if not pii_exfil_requested(state.get("user_message")):
+    # The same text every prompt screen inspects: typed alone, or typed plus an
+    # attached document's text (docs/attachments.md). Exactly user_message
+    # without an attachment.
+    message = screened_prompt(state)
+    if not pii_exfil_requested(message):
         return {}
     try:
         theme = state.get("theme")
         enduser_id = state.get("enduser_id")
-        message = state.get("user_message", "") or ""
         # How many records the attack asks for ("all patient records" / "25 rows"
-        # / a single record) — parsed from the message, never from model output.
+        # / a single record) — parsed from the message (typed + document), never
+        # from model output.
         count = ehr.requested_record_count(message, len(ehr._records(theme)))
         tool_name = ehr.TOOL_NAME
         call_id = ehr.new_call_id()
@@ -71,6 +80,9 @@ def ehr_lookup_node(state: Dict[str, Any]) -> Dict[str, Any]:
             agent_surface=ehr.AGENT_SURFACE,
             enduser_id=enduser_id,
             **governance_identity_overrides(state),
+            # A lookup a hidden document instruction triggered still names the
+            # document (docs/attachments.md); {} on a typed-only exfil turn.
+            **attachment_governance_fields(state),
         )
     except Exception:  # noqa: BLE001 - logging must never break the turn
         logger.exception("ehr_lookup: tool_call governance logging failed")

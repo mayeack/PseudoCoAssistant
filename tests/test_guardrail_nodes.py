@@ -440,6 +440,261 @@ finally:
         os.environ["SPLUNK_AO_AGENT_STREAM_PER_THEME"] = _saved_per_theme
 
 
+# --- document turns: every prompt screen sees the attached document ----------
+# docs/attachments.md: on a document turn the four prompt-stage guardrails
+# (policy, Cisco AI Defense, the Agent Control prompt stage, the NeMo input rails)
+# screen the typed message PLUS the document text (attachment.screened_prompt),
+# log that composed text as the turn's input with a metadata-only ``attachment``
+# record, and their verdict banner says the document was screened too. The
+# response-stage guardrails only gain the record. Without an attachment nothing
+# changes: the screens get exactly user_message. The extraction is built by hand
+# here (no pdf worker); tests/test_attachments.py covers the read itself.
+from backend.agents.nodes.attachment import screened_prompt  # noqa: E402
+from backend.agents.nodes.shared import escalation_rules as shared_escalation_rules  # noqa: E402
+from backend.services import attachments as attachments_svc  # noqa: E402
+from backend.services.attack_documents import get_sample, payload as sample_payload  # noqa: E402
+
+_PAYLOAD = sample_payload(get_sample("white-text"))
+_DOC_NAME = "monthly-service-bill.pdf"
+
+
+def _extraction(text):
+    """The record attachment_intake leaves in state for a one-page PDF."""
+    return {"tool_name": attachments_svc.TOOL_NAME, "call_id": "att-0123456789ab", "kind": "pdf",
+            "name": _DOC_NAME, "mime": "application/pdf", "bytes": 2048, "sha256": "ab" * 32, "pages": 1,
+            "pages_read": 1, "chars": len(text), "truncated": False, "status": "ok", "text": text,
+            "duration_ms": 12.0}
+
+
+_DOC_EXTRACTION = _extraction("Monthly Service Bill\nPlan: Unlimited Talk and Text\nBalance carried forward: none\n"
+                              + _PAYLOAD)
+_DOC_RECORD = attachments_svc.governance_record(_DOC_EXTRACTION)
+_DOC_SENTENCE = f"Your attached document '{_DOC_NAME}' was screened together with your message."
+
+
+def doc_state(extraction=_DOC_EXTRACTION, **over):
+    """A telecom document turn, as attachment_intake leaves it."""
+    return base_state(**{**_tele, "attachment": attachments_svc.message_metadata(extraction),
+                         "attachment_extraction": dict(extraction), **over})
+
+
+def captured_turn(run):
+    """``(node output, chat turn events)``: blocked_turn_events, keeping the output."""
+    out = {}
+    events = blocked_turn_events(lambda: out.update(run()))
+    return out, events
+
+
+def _norm(text):
+    return " ".join(str(text or "").split())
+
+
+_SCREENED = screened_prompt(doc_state())
+check("document: the screened text is the typed message, then the delimited document with its hidden text",
+      _SCREENED.startswith(_tele["user_message"] + "\n\n[Attached document: " + _DOC_NAME)
+      and _norm(_PAYLOAD) in _norm(_SCREENED) and _SCREENED.endswith("[End of attached document]"), _SCREENED)
+check("document: without an attachment the screened text is exactly the typed message",
+      screened_prompt(base_state(**_tele)) == _tele["user_message"])
+check("document: the block banner sentence is the factual one-liner",
+      attachments_svc.block_note(_DOC_EXTRACTION) == _DOC_SENTENCE, attachments_svc.block_note(_DOC_EXTRACTION))
+check("document: the governance record carries no text and no bytes",
+      "text" not in _DOC_RECORD and "data" not in _DOC_RECORD and _DOC_RECORD["sha256"] == "ab" * 32, str(_DOC_RECORD))
+
+
+def check_document_block(label, out, events, *, extraction=_DOC_EXTRACTION, hidden=_PAYLOAD,
+                         urgent_help_last=True):
+    """A prompt-stage block of the document turn: the composed text is the logged
+    input, the record rides on the event, the banner names the document."""
+    ev = events[0] if len(events) == 1 else {}
+    msg = (out.get("result") or {}).get("message", "")
+    screened = screened_prompt(doc_state(extraction=extraction))
+    check(f"{label} (document): the block is terminal and logs one chat turn",
+          out.get("terminal") is True and ev.get("policy_blocked") is True, f"{len(events)} event(s)")
+    check(f"{label} (document): the logged input is the screened text, hidden document included",
+          ev.get("input_messages") == [{"role": "user", "content": screened}]
+          and _norm(hidden) in _norm(_message_text(ev.get("input_messages"))), str(ev.get("input_messages"))[:200])
+    check(f"{label} (document): the event carries the metadata-only attachment record",
+          ev.get("attachment") == attachments_svc.governance_record(extraction), str(ev.get("attachment")))
+    check(f"{label} (document): the executive overlay reads input_modality text+pdf",
+          ev.get("input_modality") == "text+pdf", repr(ev.get("input_modality")))
+    check(f"{label} (document): the banner says the document was screened with the message",
+          _DOC_SENTENCE in msg and _DOC_SENTENCE in ev.get("response_text", ""), msg)
+    if urgent_help_last:
+        check(f"{label} (document): the banner still closes with the theme's urgent-help line",
+              msg.endswith(_tele_line), msg)
+
+
+def check_plain_block(label, out, events):
+    """The same block without an attachment: unchanged."""
+    ev = events[0] if len(events) == 1 else {}
+    msg = (out.get("result") or {}).get("message", "")
+    check(f"{label} (no document): the logged input is the typed message, no record, no sentence",
+          ev.get("input_messages") == [{"role": "user", "content": _tele["user_message"]}]
+          and "attachment" not in ev and "attached document" not in msg and ev.get("input_modality") == "text",
+          f"{ev.get('input_messages')} {ev.get('input_modality')} {msg[-120:]}")
+
+
+def _message_text(messages):
+    return "\n".join(str(m.get("content")) for m in messages or [] if isinstance(m, dict))
+
+
+class _RecordingDefense(_StubClient):
+    def __init__(self, result):
+        super().__init__(result)
+        self.prompts, self.responses = [], []
+
+    def inspect_prompt(self, text, *a, **k):
+        self.prompts.append(text)
+        return self._result
+
+    def inspect_response(self, *a, **k):
+        self.responses.append(k)
+        return self._result
+
+
+class _RecordingControl:
+    is_configured = True
+    stages = ["pre", "post"]
+
+    def __init__(self, deny):
+        self.deny, self.prompts, self.responses = deny, [], []
+
+    def evaluate_prompt(self, text, *a, **k):
+        self.prompts.append(text)
+        if self.deny:
+            return ControlVerdict(is_safe=False, matched_controls=["x"], decisions=["deny"], stage="pre")
+        return ControlVerdict(stage="pre")
+
+    def evaluate_response(self, *a, **k):
+        self.responses.append(k)
+        if self.deny:
+            return ControlVerdict(is_safe=False, matched_controls=["x"], decisions=["deny"])
+        return ControlVerdict()
+
+
+class _RecordingRails:
+    is_configured = True
+
+    def __init__(self, block):
+        self.block, self.inputs, self.outputs = block, [], []
+
+    def check_input(self, text):
+        self.inputs.append(text)
+        return RailVerdict(is_safe=not self.block, stage="input",
+                           rule_names=["self check input"] if self.block else [])
+
+    def check_output(self, **k):
+        self.outputs.append(k)
+        return RailVerdict(is_safe=not self.block, stage="output",
+                           rule_names=["self check output"] if self.block else [])
+
+
+_saved_rails_client = nemo_rails.nemo_guardrails_client
+_saved_cpb = shared_escalation_rules.check_policy_block
+_policy_seen = []
+settings.ai_defense_enabled = True
+try:
+    # Internal policy engine: the REAL substring engine, wrapped to record what
+    # it was asked. A benign document passes; a document that mentions self-harm
+    # trips it even though the typed message is benign (docs/attachments.md).
+    shared_escalation_rules.check_policy_block = lambda msg: (_policy_seen.append(msg), _saved_cpb(msg))[1]
+    out, _ = captured_turn(lambda: policy_block_node(doc_state()))
+    check("policy (document): the engine screened the typed message plus the document text",
+          _policy_seen[-1:] == [_SCREENED] and out == {}, str(out)[:120])
+    out, _ = captured_turn(lambda: policy_block_node(base_state(**_tele)))
+    check("policy (no document): the engine screened exactly the typed message",
+          _policy_seen[-1:] == [_tele["user_message"]] and out == {})
+    _harm_line = "Some days i want to kill myself, and that is when to call 988."
+    _harm = _extraction("Wellness leaflet\n" + _harm_line)
+    out, events = captured_turn(lambda: policy_block_node(doc_state(extraction=_harm)))
+    check_document_block("policy", out, events, extraction=_harm, hidden=_harm_line, urgent_help_last=False)
+    check("policy (document): the crisis resources stay in the banner",
+          "988" in (out.get("result") or {}).get("message", ""))
+
+    # Cisco AI Defense: prompt stage screens the document; response stage keeps
+    # the typed message as the answer's user context and adds no sentence.
+    defense_node_mod.ai_defense_client = _rec = _RecordingDefense(_Insp(is_safe=True))
+    out, _ = captured_turn(lambda: defense_node_mod.prompt_defense_node(doc_state(ai_defense_review=True)))
+    check("ai_defense prompt (document): AI Defense received the hidden document text",
+          _rec.prompts == [_SCREENED] and not out.get("terminal"), str(_rec.prompts)[:200])
+    defense_node_mod.prompt_defense_node(base_state(ai_defense_review=True, **_tele))
+    check("ai_defense prompt (no document): AI Defense received exactly the typed message",
+          _rec.prompts[-1] == _tele["user_message"])
+    defense_node_mod.ai_defense_client = _rec = _RecordingDefense(_Insp(is_safe=False, rules=["Prompt Injection"]))
+    check_document_block("ai_defense prompt", *captured_turn(
+        lambda: defense_node_mod.prompt_defense_node(doc_state(ai_defense_review=True))))
+    check_plain_block("ai_defense prompt", *captured_turn(
+        lambda: defense_node_mod.prompt_defense_node(base_state(ai_defense_review=True, **_tele))))
+    out, events = captured_turn(lambda: defense_node_mod.response_defense_node(doc_state(ai_defense_review=True)))
+    _ev = events[0] if events else {}
+    check("ai_defense response (document): the answer is judged against the typed message",
+          _rec.responses and _rec.responses[-1].get("user_message") == _tele["user_message"])
+    check("ai_defense response (document): the record rides on the event; no screened-document sentence",
+          _ev.get("attachment") == _DOC_RECORD and _DOC_SENTENCE not in out["result"]["message"],
+          out["result"]["message"])
+    # Errored + fail-closed: nothing was screened, so the banner must not say it was.
+    defense_node_mod.ai_defense_client = _RecordingDefense(_Insp(errored=True))
+    _saved_fo = settings.ai_defense_fail_open
+    try:
+        settings.ai_defense_fail_open = False
+        out, events = captured_turn(lambda: defense_node_mod.prompt_defense_node(doc_state(ai_defense_review=True)))
+    finally:
+        settings.ai_defense_fail_open = _saved_fo
+    check("ai_defense prompt errored (document): withheld without claiming the document was screened",
+          out.get("terminal") is True and _DOC_SENTENCE not in out["result"]["message"]
+          and (events[0] if events else {}).get("attachment") == _DOC_RECORD, out.get("result", {}).get("message"))
+
+    # Agent Control: the pre stage screens the document; the post stage does not.
+    agent_control_node_mod.agent_control_client = _ctl = _RecordingControl(deny=False)
+    out, _ = captured_turn(lambda: agent_control_node_mod.agent_control_prompt_node(
+        doc_state(agent_control_review=True)))
+    check("agent_control prompt (document): the pre stage received the hidden document text",
+          _ctl.prompts == [_SCREENED] and not out.get("terminal"), str(_ctl.prompts)[:200])
+    agent_control_node_mod.agent_control_prompt_node(base_state(agent_control_review=True, **_tele))
+    check("agent_control prompt (no document): the pre stage received exactly the typed message",
+          _ctl.prompts[-1] == _tele["user_message"])
+    agent_control_node_mod.agent_control_client = _ctl = _RecordingControl(deny=True)
+    check_document_block("agent_control prompt", *captured_turn(
+        lambda: agent_control_node_mod.agent_control_prompt_node(doc_state(agent_control_review=True))))
+    check_plain_block("agent_control prompt", *captured_turn(
+        lambda: agent_control_node_mod.agent_control_prompt_node(base_state(agent_control_review=True, **_tele))))
+    out, events = captured_turn(lambda: agent_control_node_mod.agent_control_node(
+        doc_state(agent_control_review=True)))
+    _ev = events[0] if events else {}
+    check("agent_control response (document): the post stage keeps the typed message as user context",
+          _ctl.responses and _ctl.responses[-1].get("user_message") == _tele["user_message"], str(_ctl.responses[-1:]))
+    check("agent_control response (document): the record rides on the event; no screened-document sentence",
+          _ev.get("attachment") == _DOC_RECORD and _DOC_SENTENCE not in out["result"]["message"],
+          out["result"]["message"])
+
+    # NeMo Guardrails: the input rails check the document; the output rails do not.
+    nemo_rails.nemo_guardrails_client = _rails = _RecordingRails(block=False)
+    out, _ = captured_turn(lambda: nemo_rails.nemo_input_rails_node(doc_state(nemo_guardrails_review=True)))
+    check("nemo input rails (document): the rails received the hidden document text",
+          _rails.inputs == [_SCREENED] and not out.get("terminal"), str(_rails.inputs)[:200])
+    nemo_rails.nemo_input_rails_node(base_state(nemo_guardrails_review=True, **_tele))
+    check("nemo input rails (no document): the rails received exactly the typed message",
+          _rails.inputs[-1] == _tele["user_message"])
+    nemo_rails.nemo_guardrails_client = _rails = _RecordingRails(block=True)
+    check_document_block("nemo input rails", *captured_turn(
+        lambda: nemo_rails.nemo_input_rails_node(doc_state(nemo_guardrails_review=True))))
+    check_plain_block("nemo input rails", *captured_turn(
+        lambda: nemo_rails.nemo_input_rails_node(base_state(nemo_guardrails_review=True, **_tele))))
+    out, events = captured_turn(lambda: nemo_rails.nemo_output_rails_node(doc_state(nemo_guardrails_review=True)))
+    _ev = events[0] if events else {}
+    check("nemo output rails (document): the output rails keep the typed message as user context",
+          _rails.outputs and _rails.outputs[-1].get("user_message") == _tele["user_message"])
+    check("nemo output rails (document): the record rides on the event; no screened-document sentence",
+          _ev.get("attachment") == _DOC_RECORD and _DOC_SENTENCE not in out["result"]["message"],
+          out["result"]["message"])
+finally:
+    shared_escalation_rules.check_policy_block = _saved_cpb
+    defense_node_mod.ai_defense_client = _saved_client
+    agent_control_node_mod.agent_control_client = _saved_control_client
+    nemo_rails.nemo_guardrails_client = _saved_rails_client
+    settings.ai_defense_enabled = _saved_enabled
+
+
 print()
 if _failures:
     print(f"FAILED ({len(_failures)}): {', '.join(_failures)}")

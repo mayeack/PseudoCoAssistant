@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
+from backend.services.attack_documents import DEFAULT_SAMPLE_DOCUMENT, SampleDocumentProfile
 from backend.services.internal_docs import DEFAULT_DOCS, InternalDocsProfile
 from backend.services.mcp_thrash import DEFAULT_THRASH, McpThrashProfile
 from backend.services.recommendation_engine import RecommendationEngine
@@ -127,6 +128,12 @@ class ThemeConfig:
     # Defaulted (no collection, so no search) so a ThemeConfig built without one
     # keeps working; never branch on the theme key in the node.
     docs: InternalDocsProfile = field(default=DEFAULT_DOCS)
+    # The cover document of the theme's sample attack PDFs
+    # (backend/services/attack_documents.py, docs/attachments.md): what this
+    # vertical's customer would upload, and what they would ask about it.
+    # Defaulted (a neutral service summary) so a ThemeConfig built without one
+    # keeps working; every shipped theme sets its own.
+    sample_document: SampleDocumentProfile = field(default=DEFAULT_SAMPLE_DOCUMENT)
 
     @property
     def agent_name(self) -> str:

@@ -218,6 +218,38 @@ aud = create_audit_log("A1", "S14", "R14", "session_started", "user", {},
 check("cim: audit event carries user + src",
       aud.get("user") == "t.nguyen" and aud.get("src") == "10.72.14.37", str(aud))
 
+# 9f. input_modality (docs/attachments.md) ------------------------------------
+# What the user sent on a chat turn: "text", or "text+pdf" when the turn carried
+# a document (the metadata-only ``attachment`` record every chat event of a
+# document turn carries, blocked ones too). Additive; absent on non-chat events.
+_att = {"tool_name": "attachment-intake.extract_text", "call_id": "att-0123456789ab", "kind": "pdf",
+        "name": "lab-results-summary.pdf", "mime": "application/pdf", "bytes": 2048, "sha256": "ab" * 32,
+        "pages": 1, "pages_read": 1, "chars": 640, "truncated": False, "status": "ok", "duration_ms": 41.0}
+check("modality: a plain chat turn is text", derive_executive_fields(_base())["input_modality"] == "text")
+check("modality: a chat turn with a PDF attachment is text+pdf",
+      derive_executive_fields(_base(attachment=_att))["input_modality"] == "text+pdf")
+check("modality: an empty attachment record is still text",
+      derive_executive_fields(_base(attachment={}))["input_modality"] == "text")
+check("modality: non-chat events carry no modality",
+      derive_executive_fields(_base(operation_name="tool_call"))["input_modality"] is None
+      and derive_executive_fields(_base(operation_name="error"))["input_modality"] is None)
+doc = create_governance_log(
+    operation_name="chat", request_model="m", conversation_id="S15", session_id="S15",
+    input_messages=[{"role": "user", "content": "Summarize this.\n\n[Attached document: lab-results-summary.pdf "
+                                                "(1 page, PDF)]\n...\n[End of attached document]"}],
+    token_type="output", request_id="R15", trace_id="T15", attachment=_att, policy_blocked=True,
+    guardrail_ids=["cisco_ai_defense"],
+)
+check("modality: create_governance_log passes the attachment record through and derives text+pdf",
+      doc.get("attachment") == _att and doc.get("input_modality") == "text+pdf",
+      str({k: doc.get(k) for k in ("attachment", "input_modality")}))
+check("modality: a document turn's block keeps its block outcome",
+      doc.get("business_outcome") == "blocked_by_ai_defense", str(doc.get("business_outcome")))
+check("modality: a chat event without a document has no attachment key and reads text",
+      "attachment" not in anon and anon.get("input_modality") == "text", str(anon.get("input_modality")))
+check("modality: a tool_call event has no input_modality key",
+      "input_modality" not in tc and "input_modality" not in tc_allow)
+
 # 10. Never raises on garbage -------------------------------------------------
 check("robust: empty dict -> dict", isinstance(derive_executive_fields({}), dict))
 check("robust: junk types -> dict",

@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import asyncio
 import logging
 import uuid
@@ -13,6 +13,7 @@ from backend.config import settings
 from backend.models.schemas import ChatRequest, ChatResponse, MessageRole, MessageType
 from backend.models.db_models import Conversation
 from backend.database.db import get_db
+from backend.services import attachments
 from backend.services.recommendation_engine import RecommendationEngine
 from backend.services.auto_prompter import auto_prompter
 from backend.services.enduser_pool import pick_enduser_id
@@ -100,11 +101,54 @@ async def _apply_incident_mode() -> None:
             raise HTTPException(status_code=500, detail="Simulated demo incident on pseudoco-assistant")
 
 
-def _prepare_session(chat_request: ChatRequest, client_host, db: Session) -> Dict[str, Any]:
+async def _validated_attachment(chat_request: ChatRequest) -> Optional[Dict[str, Any]]:
+    """Validate the turn's attachment before anything is recorded
+    (docs/attachments.md). None when the request carries none.
+
+    Called by both message endpoints BEFORE ``_prepare_session``, so a rejected
+    file never becomes a message or a session. Raises HTTPException with the
+    validator's status (413 / 415 / 422, 503 when this host has no PDF support)
+    and a plain-string detail the chat UI shows as is -- and, on the stream
+    endpoint, as JSON before any SSE frame. On the threadpool: the parse waits
+    on a worker process.
+
+    The returned dict carries the file's bytes for THIS turn only; what gets
+    persisted is ``attachments.message_metadata`` of it.
+    """
+    attachment = chat_request.attachment
+    if attachment is None:
+        return None
+    try:
+        return await run_in_threadpool(
+            attachments.validate_upload, attachment.name, attachment.mime, attachment.data
+        )
+    except attachments.AttachmentRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
+
+
+def _typed_message(chat_request: ChatRequest, attachment: Optional[Dict[str, Any]]) -> str:
+    """The turn's typed text. A turn that only carries a document gets a fixed
+    prompt, so the stored history never holds an empty user turn (Anthropic
+    rejects one when the history is replayed)."""
+    if attachment is not None and not (chat_request.message or "").strip():
+        return attachments.ATTACHMENT_ONLY_PROMPT
+    return chat_request.message
+
+
+def _prepare_session(
+    chat_request: ChatRequest,
+    client_host,
+    db: Session,
+    *,
+    typed: Optional[str] = None,
+    attachment: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Load or create the chat session and record the incoming user message.
 
     Shared by the JSON and SSE message endpoints; raises 400 when a new session
-    hasn't accepted the disclaimer.
+    hasn't accepted the disclaimer. ``typed`` overrides the stored text (see
+    ``_typed_message``); a validated ``attachment`` is recorded on the message
+    as metadata only -- never its bytes.
     """
     session_id = chat_request.session_id
 
@@ -179,10 +223,14 @@ def _prepare_session(chat_request: ChatRequest, client_host, db: Session) -> Dic
     # Add user message to session
     user_message = {
         "role": MessageRole.USER,
-        "content": chat_request.message,
+        "content": chat_request.message if typed is None else typed,
         "timestamp": datetime.utcnow().isoformat(),
         "type": MessageType.USER_MESSAGE
     }
+    if attachment is not None:
+        # Metadata only (kind, name, mime, bytes, sha256, pages): Show Recent
+        # and the Governance Logs conversation pane render the 📎 chip from it.
+        user_message["attachments"] = [attachments.message_metadata(attachment)]
     session["messages"].append(user_message)
     session["last_activity"] = datetime.utcnow()
     # Sweep idle sessions on the way through; the durable copy is in the DB, so
@@ -192,11 +240,18 @@ def _prepare_session(chat_request: ChatRequest, client_host, db: Session) -> Dic
     return session
 
 
-def _turn_kwargs(chat_request: ChatRequest, session: Dict[str, Any], client_host) -> Dict[str, Any]:
+def _turn_kwargs(
+    chat_request: ChatRequest,
+    session: Dict[str, Any],
+    client_host,
+    *,
+    typed: Optional[str] = None,
+    attachment: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Keyword arguments for one chat turn (run_turn / run_turn_stream / legacy)."""
     return dict(
         session_id=chat_request.session_id,
-        user_message=chat_request.message,
+        user_message=chat_request.message if typed is None else typed,
         conversation_history=session["messages"],
         client_address=client_host,
         theme=chat_request.theme,
@@ -217,6 +272,9 @@ def _turn_kwargs(chat_request: ChatRequest, session: Dict[str, Any], client_host
         client_tz=chat_request.client_tz,
         scheduling_action=(chat_request.scheduling_action.model_dump()
                            if chat_request.scheduling_action else None),
+        # The validated attachment, bytes included, for this turn only: the
+        # shared-chain attachment_intake node reads it and keeps metadata.
+        attachment=attachment,
     )
 
 
@@ -268,7 +326,9 @@ async def send_message(
 
     await _apply_incident_mode()
 
-    session = _prepare_session(chat_request, client_host, db)
+    attachment = await _validated_attachment(chat_request)
+    typed = _typed_message(chat_request, attachment)
+    session = _prepare_session(chat_request, client_host, db, typed=typed, attachment=attachment)
     session_id = chat_request.session_id
 
     # Process message (agentic LangGraph workflow, with legacy fallback).
@@ -278,7 +338,8 @@ async def send_message(
     # (all attendees freeze until it completes). Output and telemetry are unchanged;
     # only the execution thread differs.
     response_data = await run_in_threadpool(
-        _dispatch_chat_turn, **_turn_kwargs(chat_request, session, client_host)
+        _dispatch_chat_turn,
+        **_turn_kwargs(chat_request, session, client_host, typed=typed, attachment=attachment),
     )
 
     _record_assistant_turn(session_id, session, response_data, db)
@@ -339,9 +400,13 @@ async def send_message_stream(
 
     await _apply_incident_mode()
 
-    session = _prepare_session(chat_request, client_host, db)
+    # Before the StreamingResponse exists: a rejected attachment is a plain
+    # JSON 4xx/503, never an SSE stream.
+    attachment = await _validated_attachment(chat_request)
+    typed = _typed_message(chat_request, attachment)
+    session = _prepare_session(chat_request, client_host, db, typed=typed, attachment=attachment)
     session_id = chat_request.session_id
-    turn_kwargs = _turn_kwargs(chat_request, session, client_host)
+    turn_kwargs = _turn_kwargs(chat_request, session, client_host, typed=typed, attachment=attachment)
 
     async def _sse():
         # The turn is fully synchronous (see send_message); pump the sync

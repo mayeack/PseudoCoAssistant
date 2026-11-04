@@ -79,6 +79,7 @@ drains the whole span queue synchronously. Three guards, in order:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -796,6 +797,9 @@ def _build_turn(lg, log_data: Dict[str, Any]) -> None:
     meta = {k: _coerce(log_data.get(k)) for k in _GOVERNANCE_KEYS if log_data.get(k) is not None}
     if log_data.get("trace_id"):
         meta["pseudoco_assistant_trace_id"] = str(log_data["trace_id"])
+    # A document turn's attachment facts ride flat on every span, like the
+    # governance keys, so a stream can be filtered on them.
+    meta.update(_attachment_meta(log_data.get("attachment")))
     agent_trace = log_data.get("agent_trace") or []
     request_id = log_data.get("request_id")
     turn_ns = _seconds_to_ns(log_data.get("client_operation_duration"))
@@ -812,6 +816,8 @@ def _build_turn(lg, log_data: Dict[str, Any]) -> None:
 
     lg.add_workflow_span(input=inp, output=out, name=_ROOT_SPAN_NAME, metadata=meta,
                          created_at=turn_start, duration_ns=turn_ns)
+    # The attached document was read first in the PRE chain, before every screen.
+    _add_attachment_span(lg, log_data.get("attachment"), meta, turn_start)
     # The internal-document search ran in the PRE chain, before generation.
     _add_retriever_span(lg, log_data.get("internal_docs"), meta, turn_start)
     if agent_trace:
@@ -846,6 +852,55 @@ def _add_agent_spans(lg, agent_trace, inp: str, model: str, meta: Dict[str, Any]
         lg.conclude(output=agent_out, duration_ns=dur_ns)      # pop the agent span
         if cursor is not None and dur_ns:
             cursor = cursor + timedelta(microseconds=dur_ns / 1000)
+
+
+_ATTACHMENT_SPAN_NAME = "attachment-intake.extract_text"   # attachments.TOOL_NAME
+_ATTACHMENT_META_KEYS = ("kind", "name", "sha256", "pages", "chars", "truncated", "status")
+
+
+def _attachment_meta(record: Any) -> Dict[str, Any]:
+    """The turn's attachment record (``attachment`` on the governance event,
+    docs/attachments.md) as flat span metadata -- ``attachment_kind``,
+    ``attachment_name``, ``attachment_sha256``, ``attachment_pages``,
+    ``attachment_chars``, ``attachment_truncated``, ``attachment_status``.
+    Empty for a turn without a document. The record never holds the text."""
+    if not isinstance(record, dict) or not record:
+        return {}
+    return {f"attachment_{k}": _coerce(record.get(k)) for k in _ATTACHMENT_META_KEYS
+            if record.get(k) is not None}
+
+
+def _add_attachment_span(lg, record: Any, meta: Dict[str, Any], turn_start) -> None:
+    """Rebuild the shared chain's document read (``attachment_intake``,
+    backend/agents/nodes/attachment.py) as one tool span under the workflow: the
+    document's metadata in, what was extracted out (counts and status, never the
+    text -- the composed turn is the workflow's input already), status 500 when
+    the read failed. A leaf (no ``conclude``). A logger / SDK without
+    ``add_tool_span``, or a turn without a document, adds nothing."""
+    if not isinstance(record, dict) or not record.get("call_id") or not hasattr(lg, "add_tool_span"):
+        return
+    arguments = {k: record.get(k) for k in ("kind", "name", "mime", "bytes", "sha256", "pages")
+                 if record.get(k) is not None}
+    status = str(record.get("status") or "ok")
+    if status == "error":
+        result = f"Text extraction failed: {record.get('error') or 'unknown error'}"
+    else:
+        pages = record.get("pages")
+        result = (f"Extracted {int(record.get('chars') or 0)} characters from "
+                  f"{int(record.get('pages_read') or 0)} of {pages} page{'' if pages == 1 else 's'} "
+                  f"({status}{', truncated' if record.get('truncated') else ''})")
+    span_meta = {k: _coerce(v) for k, v in {
+        **meta,
+        "attachment_tool": record.get("tool_name"),
+        "attachment_call_id": record.get("call_id"),
+        "attachment_pages_read": record.get("pages_read"),
+    }.items() if v is not None}
+    lg.add_tool_span(input=json.dumps(arguments, sort_keys=True), output=result,
+                     name=str(record.get("tool_name") or _ATTACHMENT_SPAN_NAME),
+                     tool_call_id=record.get("call_id"),
+                     status_code=500 if status == "error" else 200,
+                     created_at=turn_start, metadata=span_meta,
+                     duration_ns=_ms_to_ns(record.get("duration_ms")) or _DEFAULT_STEP_NS)
 
 
 _RETRIEVER_SPAN_NAME = "internal_docs_search"

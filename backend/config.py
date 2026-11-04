@@ -128,7 +128,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "PseudoCo Assistant v4"
-    app_version: str = "4.19.3"
+    app_version: str = "4.20.0"
     environment: str = "development"  # "development" or "production"
     debug: bool = True
 
@@ -257,6 +257,18 @@ class Settings(BaseSettings):
 
     # Session
     session_timeout_minutes: int = 30
+
+    # Chat attachments (docs/attachments.md). A PDF's text layer is extracted in
+    # a one-shot worker process (backend/services/pdf_worker.py) killed at the
+    # timeout, and screened with the typed message by every enabled prompt
+    # guardrail. attachment_max_chars bounds what the screens AND the model see:
+    # 12k chars is ~3k tokens, which fits OLLAMA_NUM_CTX=8192 next to the theme
+    # prompt (<=3k chars), the directives, the history and the 1024-token answer.
+    attachment_max_bytes: int = 5 * 1024 * 1024
+    attachment_max_pages: int = 50
+    attachment_max_chars: int = 12000
+    attachment_parse_timeout_s: float = 5.0     # upload check (page count / encryption)
+    attachment_extract_timeout_s: float = 10.0  # text extraction in the attachment_intake node
 
     # -------------------------------------------------------------------------
     # Agentic tool guard (OpenClaw surface -> /api/toolguard/inspect)

@@ -14,8 +14,18 @@
 #
 # The content-safety tasks are NeMo's NemoGuard prompts, used only when a local
 # NemoGuard NIM is configured.
+#
+# self_check_input's max_length: on a document turn the input rails check the
+# typed message plus up to ATTACHMENT_MAX_CHARS (12,000) of extracted text
+# (docs/attachments.md). NeMo's 16,000-character default would make a long
+# message + document raise "Prompt exceeds max length" in the task manager,
+# which fail-open turns into a silent pass -- a missed injection that is an
+# artefact, not the judge's verdict. A document at the cap plus this template is
+# ~14,000 characters (~3.5k tokens), well inside the judge's 8,192-token context;
+# the headroom is for a long typed message on top.
 prompts:
   - task: self_check_input
+    max_length: 32000
     content: |
       Your task is to decide whether the user message below should be BLOCKED by
       the input policy of a governed advice assistant.

@@ -180,6 +180,20 @@
                 .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         }
 
+        // One line per document attached to a stored user message. The message
+        // carries metadata only (name, pages, mime, size, sha256); the bytes are
+        // never persisted (docs/attachments.md).
+        function attachmentLines(msg) {
+            const list = Array.isArray(msg.attachments) ? msg.attachments : [];
+            return list.filter(a => a && typeof a === 'object').map(a => {
+                const parts = [a.name || 'document.pdf'];
+                const pages = Number(a.pages);
+                if (Number.isFinite(pages) && pages > 0) parts.push(`${pages} page${pages === 1 ? '' : 's'}`);
+                if (a.mime) parts.push(a.mime);
+                return `<p class="text-xs text-gray-600 mt-1">📎 ${escHtml(parts.join(' · '))}</p>`;
+            }).join('');
+        }
+
         function displayConversation(messages) {
             const container = document.getElementById('conversationHistory');
             if (!messages || messages.length === 0) {
@@ -193,6 +207,7 @@
                     <div class="${roleClass} p-3 rounded">
                         <p class="text-xs text-gray-500 mb-1">${escHtml(String(msg.role).toUpperCase())} - ${new Date(msg.timestamp).toLocaleString()}</p>
                         <p class="text-sm">${escHtml(msg.content)}</p>
+                        ${attachmentLines(msg)}
                         ${msg.type ? `<span class="inline-block mt-2 px-2 py-1 text-xs bg-violet-100 text-violet-800 rounded">${escHtml(msg.type)}</span>` : ''}
                     </div>
                 `;

@@ -12,8 +12,9 @@ from backend.database.db import init_db
 from backend.logging.log_handlers import setup_logging
 from backend.middleware.request_logging import RequestLoggingMiddleware
 from backend.middleware.access_key import AccessKeyMiddleware
+from backend.middleware.body_limit import ChatBodyLimitMiddleware
 from backend.middleware.settings_gate import has_settings_access
-from backend.routers import chat, admin, auth, settings as settings_routes, incident, spray, toolguard, analytics, appointments
+from backend.routers import chat, admin, auth, settings as settings_routes, incident, spray, toolguard, analytics, appointments, attachments
 from backend.telemetry import otel, tracestate_guard
 
 # Cap inbound W3C tracestate before OpenTelemetry parses it (CVE-2026-114603).
@@ -53,6 +54,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Chat body cap (backend/middleware/body_limit.py): 413 for a POST to
+# /api/chat/message[/stream] larger than the biggest allowed attachment plus
+# headroom. Added BEFORE the access-key gate so it runs INSIDE it -- an
+# unauthenticated caller still gets its 401 first, and nobody can make the app
+# count an anonymous upload. Resulting order:
+# RequestLogging -> AccessKey -> ChatBodyLimit -> CORS -> app.
+app.add_middleware(ChatBodyLimitMiddleware)
+
 # Access-key gate (Basic Auth) — added before request logging so logging stays
 # outermost and still records rejected (401) requests. No-op unless ACCESS_KEY is set.
 #
@@ -77,6 +86,7 @@ app.include_router(spray.router)
 app.include_router(toolguard.router)
 app.include_router(analytics.router)
 app.include_router(appointments.router)
+app.include_router(attachments.router)
 
 def _prewarm_llm_stack() -> None:
     """Absorb the first-turn cold start off the request path.

@@ -1,7 +1,8 @@
 """The shared guardrail chain every blueprint is wired into — parity by construction.
 
-    START -> policy -> prompt_defense -> agent_control_prompt -> nemo_input_rails
-          -> scheduling_intake -> <core entry>
+    START -> attachment_intake -> policy -> prompt_defense -> agent_control_prompt
+          -> nemo_input_rails -> scheduling_intake -> ehr_lookup -> internal_docs
+          -> mcp_thrash_launch -> <core entry>
              ... core ...
     <core exit> -> safety -> injection -> scheduling -> compliance -> agent_control
                 -> nemo_output_rails -> response_defense -> governance -> END
@@ -22,6 +23,7 @@ from langgraph.graph import END, START, StateGraph
 
 from backend.agents.blueprints.base import Blueprint
 from backend.agents.nodes.agent_control import agent_control_node, agent_control_prompt_node
+from backend.agents.nodes.attachment import attachment_intake_node
 from backend.agents.nodes.compliance import compliance_node
 from backend.agents.nodes.defense import prompt_defense_node, response_defense_node
 from backend.agents.nodes.ehr import ehr_lookup_node
@@ -35,6 +37,10 @@ from backend.agents.nodes.safety import safety_node
 from backend.agents.nodes.scheduling import scheduling_intake_node, scheduling_node
 from backend.agents.state import PseudoCoAssistantState
 
+# attachment_intake (backend/agents/nodes/attachment.py, docs/attachments.md) is
+# FIRST: when the turn carries a document it reads the text layer as a governed
+# tool call (no model, never terminal), so every screen below inspects the typed
+# message plus the document -- the same text the answering agent gets.
 # Screen the PROMPT before any model call. Order matters: the internal policy
 # engine is free and deterministic, Cisco AI Defense inspects next, the Agent
 # Control prompt-stage controls after it (mirroring its place on output: AI
@@ -52,8 +58,8 @@ from backend.agents.state import PseudoCoAssistantState
 # on a turn that cleared every prompt screen; it spawns a daemon thread that runs
 # the synthetic MCP tool-thrash concurrently with generation and returns at once.
 PRE_NODES: List[str] = [
-    "policy", "prompt_defense", "agent_control_prompt", "nemo_input_rails", "scheduling_intake",
-    "ehr_lookup", "internal_docs", "mcp_thrash_launch",
+    "attachment_intake", "policy", "prompt_defense", "agent_control_prompt", "nemo_input_rails",
+    "scheduling_intake", "ehr_lookup", "internal_docs", "mcp_thrash_launch",
 ]
 # Screen / shape the ANSWER. Cisco AI Defense (response_defense) stays the last
 # word on output; governance logs the outcome. scheduling sits before
@@ -66,6 +72,7 @@ POST_NODES: List[str] = [
 GUARDRAIL_NODES: List[str] = PRE_NODES + POST_NODES
 
 _NODE_FNS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
+    "attachment_intake": attachment_intake_node,
     "policy": policy_block_node,
     "prompt_defense": prompt_defense_node,
     "agent_control_prompt": agent_control_prompt_node,

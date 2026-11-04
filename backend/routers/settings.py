@@ -382,6 +382,7 @@ async def hec_stats_for(dest_id: str):
 # ---------------------------------------------------------------------------
 def _server_info() -> dict:
     from backend import host_capabilities
+    from backend.services import attachments
 
     caps = host_capabilities.current()
     return {
@@ -394,7 +395,13 @@ def _server_info() -> dict:
         # provider=nvidia / NIM images / the NemoClaw runtime with a reason).
         # Read from the cache — never probed on the request path.
         "capabilities": caps.get("capabilities", {}),
-        "gated": caps.get("gated", {}),
+        # pdf_attachments is a package lookup, not a probe: seed it so the
+        # paperclip is not greyed out while the first detect() is still running.
+        "gated": {"pdf_attachments": host_capabilities.pdf_attachments_gate(),
+                  **caps.get("gated", {})},
+        # Chat attachment limits and copy for the composer (docs/attachments.md).
+        # Whether attachments work here at all is gated.pdf_attachments above.
+        "attachments": attachments.client_config(),
     }
 
 

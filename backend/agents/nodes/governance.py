@@ -17,7 +17,7 @@ from backend.agents.token_usage import governance_usage_data
 from backend.config import settings
 from backend.logging.governance_logger import governance_logger
 from backend.models.schemas import MessageType
-from backend.services import internal_docs
+from backend.services import attachments, internal_docs
 from backend.telemetry import otel
 
 
@@ -146,6 +146,12 @@ def governance_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # shared chain ran on an explicit ask; the Agent Observability path
             # rebuilds it as a retriever span. None (dropped) on an ordinary turn.
             internal_docs=internal_docs.governance_record(state.get("internal_docs")),
+            # The document attached to the turn (docs/attachments.md): what the
+            # shared attachment_intake node read -- metadata only, never the text
+            # or the bytes; input_messages already carries the composed text. The
+            # Agent Observability path rebuilds it as a tool span. None (dropped)
+            # on an ordinary turn.
+            attachment=attachments.governance_record(state.get("attachment_extraction")),
             trace_id=trace_id,
             client_address=client_address,
             enduser_id=enduser_id,

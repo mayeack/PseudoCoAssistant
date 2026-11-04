@@ -22,7 +22,9 @@ The emitted field names match the executive dashboard contract exactly:
 ``app_name, user_type, risk_score, policy_action, policy_name, model_name,
 agent_name, tool_name, prompt_category, contains_phi, contains_pii,
 hallucination_score, groundedness_score, latency_ms, token_count,
-estimated_cost, business_outcome, human_escalation, audit_status``.
+estimated_cost, business_outcome, human_escalation, audit_status``, plus the
+additive ``input_modality`` (``text`` | ``text+pdf`` on chat events; see
+:func:`_input_modality`).
 """
 
 from __future__ import annotations
@@ -214,6 +216,17 @@ def _audit_status(log: Dict[str, Any]) -> str:
     return "complete" if (have_ids and have_usage and have_eval) else "partial"
 
 
+def _input_modality(log: Dict[str, Any]) -> Optional[str]:
+    """What the user sent on a chat turn: ``"text"``, or ``"text+<kind>"`` when
+    the turn carried a document (the ``attachment`` record, docs/attachments.md
+    -- the rule ``attachments.input_modality`` states). ``None`` on non-chat
+    events (tool calls, errors, decisions): they carry no user input."""
+    record = log.get("attachment")
+    if isinstance(record, dict) and record:
+        return f"text+{record.get('kind') or 'pdf'}"
+    return "text" if log.get("operation_name", "chat") == "chat" else None
+
+
 def _risk_score(
     *, severity: Optional[str], policy_blocked: bool, safety_violated: bool,
     guardrail_triggered: bool, contains_phi: bool, contains_pii: bool,
@@ -324,6 +337,7 @@ def derive_executive_fields(log: Dict[str, Any]) -> Dict[str, Any]:
                 human_escalation=human_escalation, finish_reasons=finish_reasons,
             ),
             "audit_status": _audit_status(log),
+            "input_modality": _input_modality(log),
         }
         fields["risk_score"] = _risk_score(
             severity=severity, policy_blocked=policy_blocked,

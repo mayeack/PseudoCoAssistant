@@ -33,6 +33,7 @@ from backend.agents.nodes.agent_common import (
     request_model,
     trace_entry,
 )
+from backend.agents.nodes.attachment import with_attachment
 from backend.agents.nodes.injection import (
     build_input_directives,
     embed_hallucination_contract,
@@ -69,7 +70,11 @@ def make_synthesizer_agent(theme_config) -> Callable[[Dict[str, Any]], Dict[str,
     agent_name = theme_config.agent_name  # {key}_domain_agent
 
     def synthesizer_node(state: Dict[str, Any]) -> Dict[str, Any]:
-        messages = build_llm_messages(state.get("conversation_history", []))
+        # A document turn (docs/attachments.md): the current user turn becomes
+        # the typed message plus the attached document's text -- the same text
+        # every prompt screen inspected. Still text-only and capped, so it is
+        # also what governance logs as input_messages.
+        messages = with_attachment(build_llm_messages(state.get("conversation_history", [])), state)
 
         # Fold specialist findings into the system prompt, then append the
         # governance directive (one roll per turn — must live on the user-facing
