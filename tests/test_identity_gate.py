@@ -68,6 +68,9 @@ def _configure(on: bool = True) -> None:
 
 
 _configure(False)
+import identity_isolation  # noqa: E402  (no real Duo / CII, whatever .env holds)
+
+identity_isolation.isolate(settings)
 
 import backend.agents.llm as llm  # noqa: E402
 from backend.agents.llm import NormalizedLLMResponse  # noqa: E402
@@ -1026,6 +1029,8 @@ def main() -> int:
             test_override_and_pull(c)
         test_store_override()
         test_rules()
+        refused = identity_isolation.requests_refused()
+        check("no identity request reached a real Duo or CII (each was refused and recorded)", not refused, str(refused))
     finally:
         lookup.set_transport(None)
         _configure(False)

@@ -51,6 +51,9 @@ settings.access_key = KEY
 settings.prewarm_llm = False
 settings.duo_enabled = False
 settings.hec_host = ""
+import identity_isolation  # noqa: E402  (no real Duo / CII, whatever .env holds)
+
+identity_isolation.isolate(settings)
 for _rate in ("pii_injection_rate", "toxic_injection_rate", "hallucination_injection_rate",
               "authority_injection_rate"):
     setattr(settings, _rate, 0.0)
@@ -978,6 +981,49 @@ def test_escalation_schema() -> None:
           and signed.get("user") == "nina.osei", str(signed))
 
 
+def test_isolation_from_dotenv() -> None:
+    print("a checkout whose .env holds the Lab 5 keys: the suites still never reach Duo or CII")
+    import subprocess
+
+    lab5_env = {"DUO_ENABLED": "true", "PUBLIC_BASE_URL": "https://l5-dev.pseudocoassistant.com",
+                "DUO_CLIENT_ID": "DIDEVCLIENTID0000001", "DUO_CLIENT_SECRET": "d" * 40,
+                "DUO_API_HOST": "api-test0000.duosecurity.com", "DUO_ADMIN_IKEY": "DIDEVADMINIKEY000001",
+                "DUO_ADMIN_SKEY": "s" * 40, "CII_CLIENT_ID": "cii-dev", "CII_CLIENT_SECRET": "c" * 32,
+                "CII_TOKEN_URL": "https://auth.cii.invalid/oauth/token", "CII_API_URL": "https://api.cii.invalid/graphql",
+                "IDENTITY_ALLOWED_USERS": "nina.osei,avery.kim"}
+    probe = (
+        "import json, sys\n"
+        f"sys.path[:0] = [{str(ROOT)!r}, {str(ROOT / 'tests')!r}]\n"
+        "from backend.config import settings\n"
+        "before = settings.duo_admin_ikey\n"
+        "import identity_isolation\n"
+        "identity_isolation.isolate(settings)\n"
+        "from backend.services import identity_lookup, identity_signin\n"
+        "settings.duo_enabled = True\n"          # what the suites do for a signed-in test
+        "st = identity_lookup.lookup('nina.osei')\n"
+        "print(json.dumps({'before': before, 'keys': [getattr(settings, k) for k in identity_isolation.IDENTITY_SETTINGS],"
+        " 'sources': st['sources'], 'signin': identity_signin.configured(),"
+        " 'refused': identity_isolation.requests_refused()}))\n")
+    run = subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True, text=True, timeout=120,
+                         env={**{k: v for k, v in os.environ.items() if not k.startswith(("DUO_", "CII_"))},
+                              **lab5_env, "OTEL_ENABLED": "false"})
+    try:
+        got = json.loads(run.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        got = {}
+    check("the Lab 5 keys were there to blank (they reached the settings)",
+          got.get("before") == lab5_env["DUO_ADMIN_IKEY"], (run.stderr or run.stdout)[-300:])
+    check("isolate() blanks every Duo / CII setting: nothing is configured, so nothing is sent",
+          got.get("keys") == [""] * len(identity_isolation.IDENTITY_SETTINGS)
+          and got.get("sources") == {"duo": "not_configured", "cii": "not_configured"}
+          and got.get("signin") is False and got.get("refused") == [], str(got))
+    run_all = (ROOT / "tests" / "run_all.sh").read_text()
+    exported = run_all[run_all.index("export DUO_ENABLED=false"):run_all.index("pass=0")]
+    keys = [k.upper() for k in identity_isolation.IDENTITY_SETTINGS]
+    check("tests/run_all.sh exports every Duo / CII key blank (and DUO_ENABLED=false) for every suite",
+          all(f"{k}=" in exported for k in keys) and "DUO_ENABLED=false" in exported, exported)
+
+
 def main() -> int:
     check("temp DB in use (never the app's medadvice.db)", _TMP in str(dbmod.engine.url), str(dbmod.engine.url))
     dbmod.init_db()                        # the temp database's tables
@@ -995,6 +1041,9 @@ def main() -> int:
     test_hec_and_ao()
     test_legacy_engine()
     test_escalation_schema()
+    test_isolation_from_dotenv()
+    refused = identity_isolation.requests_refused()
+    check("no identity request reached a real Duo or CII (each was refused and recorded)", not refused, str(refused))
     dbmod.engine.dispose()
     shutil.rmtree(_TMP, ignore_errors=True)
     print(f"RESULT: {'ok' if not _fails else str(_fails) + ' failed'}")

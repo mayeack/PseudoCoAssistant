@@ -56,6 +56,9 @@ settings.toxic_injection_rate = 0.0
 settings.hallucination_injection_rate = 0.0
 settings.authority_injection_rate = 0.0
 settings.ai_provider = "anthropic"          # censored-provider directive path (permission preamble)
+import identity_isolation  # noqa: E402  (no real Duo / CII, whatever .env holds)
+
+identity_isolation.isolate(settings)
 if hasattr(settings, "blueprint_routing"):
     settings.blueprint_routing = "json"     # tool-less routing so the stubbed LLM serves every core
 
@@ -1130,6 +1133,8 @@ def main() -> int:
             global _fails
             _fails += 1
             print(f"  ERROR {fn.__name__}: {type(e).__name__}: {e}")
+    refused = identity_isolation.requests_refused()
+    check("no identity request reached a real Duo or CII (each was refused and recorded)", not refused, str(refused))
     print(f"RESULT: {'ok' if not _fails else str(_fails) + ' failed'}")
     return 1 if _fails else 0
 

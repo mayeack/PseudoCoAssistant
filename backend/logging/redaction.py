@@ -86,8 +86,10 @@ logs it. So:
   (``_alt``), so a position costs a few steps however many names there are.
 
 ``tests/test_duo_signin.py`` ``test_redaction_linear_time`` runs every rule
-and the secrets pattern over 1 MB adversarial inputs and fails any that takes
-more than 50 ms per MB.
+and the secrets pattern over adversarial inputs and fails any that takes more
+than 50 times as long as a known-linear scan of the same 64 KB (a ratio, so a
+slower or busier machine changes nothing; a quadratic rule scores in the
+thousands), or more than 1 s on 1 MB.
 """
 from __future__ import annotations
 

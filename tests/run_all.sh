@@ -62,6 +62,15 @@ SUITES=(
 )
 [ "${1:-}" = "--quick" ] || SUITES+=(tests/test_api.py)
 
+# No suite may reach a real Duo tenant or Identity Intelligence: a checkout's
+# .env can hold the Lab 5 keys (the dev copy's does, plan 12.5). An exported
+# variable beats .env in both loaders (backend/config.py, pydantic-settings),
+# so these blank them; each identity suite sets what it needs, with fakes
+# (tests/identity_isolation.py also refuses any lookup a suite forgets to fake).
+export DUO_ENABLED=false PUBLIC_BASE_URL= IDENTITY_ALLOWED_USERS= \
+       DUO_CLIENT_ID= DUO_CLIENT_SECRET= DUO_API_HOST= DUO_ADMIN_IKEY= DUO_ADMIN_SKEY= \
+       CII_CLIENT_ID= CII_CLIENT_SECRET= CII_TOKEN_URL= CII_API_URL=
+
 pass=0; fail=0; failed=()
 for s in "${SUITES[@]}"; do
   [ -f "$s" ] || { echo "SKIP  $s (missing)"; continue; }

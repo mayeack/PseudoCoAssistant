@@ -26,6 +26,9 @@ from backend.config import settings  # noqa: E402
 
 KEY = settings.access_key or "test-access-key"
 settings.access_key = KEY
+import identity_isolation  # noqa: E402  (no real Duo / CII, whatever .env holds)
+
+identity_isolation.isolate(settings)
 settings.pii_injection_rate = 0.0
 settings.toxic_injection_rate = 0.0
 settings.hallucination_injection_rate = 0.0
@@ -293,6 +296,8 @@ def main() -> int:
         validation_checks(c)
         flag_checks(c)
         identity_checks(c)
+    refused = identity_isolation.requests_refused()
+    check("no identity request reached a real Duo or CII (each was refused and recorded)", not refused, str(refused))
     print(f"\n{'OK' if not _fails else f'{_fails} FAILED'}")
     return 1 if _fails else 0
 

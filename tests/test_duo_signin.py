@@ -54,6 +54,9 @@ settings.hec_host = ""
 for _rate in ("pii_injection_rate", "toxic_injection_rate", "hallucination_injection_rate",
               "authority_injection_rate"):
     setattr(settings, _rate, 0.0)
+import identity_isolation  # noqa: E402  (no real Duo / CII, whatever .env holds)
+
+identity_isolation.isolate(settings)
 
 BASE = "https://testserver"
 CLIENT_ID = "DIABCDEFGHIJKLMNOPQR"                       # 20 characters, as Duo issues them
@@ -639,7 +642,7 @@ def test_disabled_persona_refused() -> None:
         check("an active persona still goes to Duo's prompt", location(r).startswith(f"https://{API_HOST}/"))
     finally:
         settings.duo_admin_ikey, settings.duo_admin_skey = saved
-        identity_lookup.set_transport(None)
+        identity_isolation.restore()
         signin.reset()
 
 
@@ -1538,8 +1541,8 @@ def test_hung_call_releases_slot() -> None:
             second = "ran"
         except signin._DuoBusy:
             second = "busy"
-        check("an exclusive call still running: the next one is refused at once, not stacked",
-              second == "busy" and time.monotonic() - t0 < 0.1, second)
+        check("an exclusive call still running: the next one is refused at once (well before its 1 s wait), "
+              "not stacked", second == "busy" and time.monotonic() - t0 < 0.5, second)
         release.set()
         deadline = time.monotonic() + 3
         while busy.locked() and time.monotonic() < deadline:
@@ -2047,7 +2050,16 @@ def test_redaction_bounded_and_safe() -> None:
 
 
 _MB = 1 << 20
-_BUDGET_PER_MB = 0.050          # seconds per MB of input, for any one rule
+# Linear time is checked as a ratio, never an absolute budget: on the same 64 KB
+# text, a rule may take at most _RATIO_MAX times a known-linear reference that
+# is tried at every position. Measured on an Apple M4 Pro: about 7 at most on
+# a performance core and 16 under background QoS (taskpolicy -b, the launchd
+# jobs' ProcessType), while a quadratic rule (the unanchored JWT rule) scores
+# in the hundreds on 16 KB and the thousands on 64 KB. A slower or busier
+# machine slows both sides alike. The 1 MB run only guards against a stall.
+_RATIO_MAX = 50.0
+_REFERENCE = re.compile(r"(?i:zq)")       # never matches: one attempt per position
+_STALL_PER_MB = 1.0             # seconds for 1 MB through any one rule, on any machine
 
 
 def _timed_sub(pattern, text: str) -> float:
@@ -2056,8 +2068,19 @@ def _timed_sub(pattern, text: str) -> float:
     return time.perf_counter() - started
 
 
+def _ratio(pattern, text: str) -> float:
+    """``pattern``'s time over the reference's on ``text``: the best of three
+    each, measured alternately so both see the same machine load."""
+    rule = ref = float("inf")
+    for _ in range(3):
+        rule = min(rule, _timed_sub(pattern, text))
+        ref = min(ref, _timed_sub(_REFERENCE, text))
+    return rule / max(ref, 1e-7)
+
+
 def test_redaction_linear_time() -> None:
-    print("redaction: every rule and the secrets pattern stay linear on 1 MB adversarial inputs (<= 50 ms per MB)")
+    print("redaction: every rule and the secrets pattern stay linear on adversarial inputs (a ratio to a linear "
+          "scan, not a time budget)")
     from urllib.parse import quote
 
     from backend.logging import redaction
@@ -2074,24 +2097,32 @@ def test_redaction_linear_time() -> None:
              '"access_token":"', "\nAuthorization", "\nSet-Cookie:", " md_access", " md_access=", " client_secret",
              " code=", "(b'Set-Cookie', b", "Bearer abc ", CLIENT_SECRET[:-1], KEY[:-1], quote(KEY + "/")[:-1]]
     slow = []
+    worst = 0.0
     for pattern in patterns:
         for unit in units:
             text = (unit * (_MB // len(unit) + 1))[:_MB]
-            # 64 KB first: a super-linear rule fails here in seconds instead
-            # of running for minutes on the full megabyte.
-            if _timed_sub(pattern, text[:64 * 1024]) > _BUDGET_PER_MB:
-                slow.append((pattern.pattern[:60], unit, "64 KB over the 1 MB budget"))
+            # 64 KB, against the reference: a super-linear rule fails here in
+            # seconds, on any machine, instead of running for minutes on 1 MB.
+            ratio = _ratio(pattern, text[:64 * 1024])
+            worst = max(worst, ratio)
+            if ratio > _RATIO_MAX:
+                slow.append((pattern.pattern[:60], unit, f"{ratio:.0f}x a linear scan on 64 KB"))
                 continue
             # The best of three: only a slow run is measured again (noise).
             took = _timed_sub(pattern, text)
             for _ in range(2):
-                if took <= _BUDGET_PER_MB:
+                if took <= _STALL_PER_MB:
                     break
                 took = min(took, _timed_sub(pattern, text))
-            if took > _BUDGET_PER_MB:
-                slow.append((pattern.pattern[:60], unit, f"{took * 1000:.0f} ms"))
-    check(f"{len(patterns)} patterns x {len(units)} inputs of 1 MB: each within {_BUDGET_PER_MB * 1000:.0f} ms",
+            if took > _STALL_PER_MB:
+                slow.append((pattern.pattern[:60], unit, f"{took:.2f} s on 1 MB"))
+    check(f"{len(patterns)} patterns x {len(units)} inputs: each within {_RATIO_MAX:.0f}x a linear scan on 64 KB "
+          f"(worst {worst:.1f}x), and under {_STALL_PER_MB:.0f} s on 1 MB",
           not slow and len(patterns) >= 14, str(slow[:5]))
+    unanchored = re.compile(r"eyJ[A-Za-z0-9_-]{4,}+\.[A-Za-z0-9_-]{4,}+\.[A-Za-z0-9_-]*+")
+    quadratic = _ratio(unanchored, ("-eyJ" * (64 * 1024 // 4))[:16 * 1024])
+    check("...and the ratio catches a super-linear rule: the unanchored JWT rule on 16 KB of '-eyJ'",
+          quadratic > _RATIO_MAX, f"{quadratic:.0f}x")
 
     jwt = r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,}+\.[A-Za-z0-9_-]{4,}+\.[A-Za-z0-9_-]*+"
     check("the JWT rule starts only where a run of base64url characters starts, each segment one possessive class",
@@ -2113,8 +2144,8 @@ def test_redaction_cap() -> None:
     started = time.perf_counter()
     out = redaction.redact("-eyJ" * (_MB // 4))
     took = time.perf_counter() - started
-    check("1 MB of '-eyJ' (one token) through the full treatment: fast, and only the marker is kept",
-          took < 0.5 and out == redaction.TRUNCATED_MARKER.format(_MB), f"{took:.3f} s, {out[:80]!r}")
+    check("1 MB of '-eyJ' (one token) through the full treatment: no stall, and only the marker is kept",
+          took < 2.0 and out == redaction.TRUNCATED_MARKER.format(_MB), f"{took:.3f} s, {out[:80]!r}")
     head = "x" * (cap - 25) + " "
     jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJuaW5hLm9zZWkifQ.c2lnbmF0dXJlLXNpZ25hdHVyZQ"
     for name, text, gone in (
@@ -2153,8 +2184,8 @@ def test_redaction_cap() -> None:
           len(kept) == 1 and kept[0]["note"] == note)
     line = lines.lines[-1][1] if lines.lines else ""
     m = marker.search(line)
-    check("a 1 MB chat message logged by any module: logged at once, cut to 64 KB and marked",
-          took < 1.0 and "chat message: -eyJ -eyJ" in line and m is not None and len(line) < cap + 200,
+    check("a 1 MB chat message logged by any module: no stall, cut to 64 KB and marked",
+          took < 3.0 and "chat message: -eyJ -eyJ" in line and m is not None and len(line) < cap + 200,
           f"{took:.3f} s, {len(line)} chars")
 
 
@@ -2304,6 +2335,8 @@ def main() -> int:
         test_health_gate_three_failures()
         test_callback_not_gated()
         test_no_leaks()
+        refused = identity_isolation.requests_refused()
+        check("no identity request reached a real Duo or CII (each was refused and recorded)", not refused, str(refused))
     finally:
         signin.stop_health_check()
         signin.set_client_factory(None)
