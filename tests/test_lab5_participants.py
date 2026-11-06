@@ -2152,6 +2152,84 @@ def test_victim_clash_advice_clears_it() -> None:
         check("...as it says: handouts with that file refuses before any card",
               rc == 2 and "bypass_codes.enabled is false" in out, out)
 
+    # A box dropped from acme's file (Show destroyed it, say): `down` and
+    # `handouts` reach only the instances the file lists, so the refusal puts
+    # the instance back in the file first, and following it clears the clash.
+    box2 = "  - instance: 2\n    host: 198.51.100.2\n"
+    one_box = swap.replace(box2, "")
+    assert one_box != swap
+    dropped = "put instance(s) 02 back in acme's workshop file and run `lab5-setup "
+    with tempfile.TemporaryDirectory() as tmp:
+        h, globex = rooms(tmp)
+        h.run("up")
+        first02 = card_codes(h.handout()["l5-acme-02"])           # card 02's first batch: avery.kim's codes
+        (h.tmp / "workshop.yaml").write_text(swap)
+        h.run("up")
+        (h.tmp / "workshop.yaml").write_text(one_box)
+        rc, out = h.run("check")
+        saved = json.loads((h.root / "workshops" / "acme" / "workshop.json").read_text())
+        check("acme's check records the instances its file lists (instance 2 dropped from it)",
+              rc == 0 and saved.get("instances") == ["01"], str(saved))
+        rc, out = globex("check")
+        check("...globex is refused avery.kim: card 02 still holds its codes, and handouts reaches only the cards "
+              "acme's file lists, so the refusal puts instance 02 back in the file, then offers handouts --revoke "
+              "(acme still runs on instance 01)",
+              rc == 2 and dropped + "handouts --revoke` with acme's workshop file first" in out
+              and "no longer lists instance(s) 02" in out
+              and "Workshop acme is still running (instance(s) 01), and `down` would end it" in out, out)
+        rc, out = h.run("handouts", "--revoke")
+        rc, out = globex("check")
+        check("...handouts --revoke with the file as it is reaches card 01 only, so globex is still refused: that "
+              "step alone never clears it", rc == 2 and dropped + "handouts --revoke`" in out, out)
+        (h.tmp / "workshop.yaml").write_text(swap)
+        rc, out = h.run("handouts", "--revoke")
+        check("...acme follows the refusal: instance 2 back in its file, then handouts --revoke", rc == 0, out)
+        rc, out = globex("check")
+        check("...and globex may take avery.kim; card 02's first avery.kim code is dead",
+              "is still in use by workshop" not in out
+              and try_code(h, "avery.kim", first02["avery.kim"][0]) == "deny", out)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        h, globex = rooms(tmp)
+        h.run("up")
+        first02 = card_codes(h.handout()["l5-acme-02"])
+        (h.tmp / "workshop.yaml").write_text(swap)
+        h.run("up")
+        (h.tmp / "workshop.yaml").write_text(one_box)
+        h.run("check")
+        rc, out = h.run("down")
+        check("acme runs down with the file that dropped instance 2: box 01 ends, box 02 is not reached",
+              rc == 0 and "1 ok" in out, out)
+        card01 = h.handout()["l5-acme-01"]
+        rc, out = globex("check")
+        check("...globex is refused avery.kim (card 02 still holds its codes): put instance 02 back, then down, "
+              "which reaches it then, never handouts --revoke for a room whose listed boxes have all run down",
+              rc == 2 and dropped + "down` with acme's workshop file first" in out
+              and "handouts --revoke" not in out and "still running" not in out, out)
+        (h.tmp / "workshop.yaml").write_text(swap)
+        rc, out = h.run("down")
+        check("...acme follows the refusal: instance 2 back in its file, then down", rc == 0, out)
+        rc, out = globex("check")
+        check("...and globex may take avery.kim; card 02's first avery.kim code is dead, and card 01 of the ended "
+              "box got no fresh codes", "is still in use by workshop" not in out
+              and try_code(h, "avery.kim", first02["avery.kim"][0]) == "deny"
+              and h.handout()["l5-acme-01"] == card01, out)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        h, globex = rooms(tmp)
+        h.run("up")
+        (h.tmp / "workshop.yaml").write_text(YAML.replace(box2, ""))
+        h.run("check")
+        rc, out = globex("check")
+        check("a box dropped from acme's file that still admits avery.kim: put it back, then down (down with the "
+              "file as it is never reaches it)",
+              rc == 2 and "still admit avery.kim" in out and dropped + "down` with acme's workshop file first" in out,
+              out)
+        (h.tmp / "workshop.yaml").write_text(YAML)
+        rc, out = h.run("down")
+        rc, out = globex("check")
+        check("...followed, it clears", "is still in use by workshop" not in out, out)
+
 
 def test_bypass_valid_until_after_creates() -> None:
     print("== a card's time is taken after its last create: never earlier than a code's own expiry ==")

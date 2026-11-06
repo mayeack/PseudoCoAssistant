@@ -1229,10 +1229,11 @@ def test_victim_clash_after_down() -> None:
         .replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
     ws = SimpleNamespace(name="globex", victim="avery.kim")
 
-    def world(boxes, batches, saved_victim="avery.kim", saved=None, handout=("01",)):
-        """acme's state: its box records, card 01's participant record, its
-        workshop.json (``saved``, else just ``saved_victim``) and a handout
-        with a card for each instance in ``handout`` (None: no handout)."""
+    def world(boxes, batches, saved_victim="avery.kim", saved=None, handout=("01",), cards=None):
+        """acme's state: its box records, card 01's participant record (and
+        those of ``cards``, instance: batches), its workshop.json (``saved``,
+        else just ``saved_victim``) and a handout with a card for each
+        instance in ``handout`` (None: no handout)."""
         tmp = Path(tempfile.mkdtemp())
         other = tmp / "workshops" / "acme"
         (other / "boxes").mkdir(parents=True)
@@ -1242,6 +1243,8 @@ def test_victim_clash_after_down() -> None:
             (other / "boxes" / f"{nn}.json").write_text(rec if isinstance(rec, str) else json.dumps(rec))
         (other / "participants" / "01.json").write_text(batches if isinstance(batches, str)
                                                          else json.dumps({"bypass_batches": batches}))
+        for nn, card in (cards or {}).items():
+            (other / "participants" / f"{nn}.json").write_text(json.dumps({"bypass_batches": card}))
         if handout is not None:
             (other / "handout.csv").write_text("username,instance\n"
                                                + "".join(f"l5-acme-{nn},{nn}\n" for nn in handout))
@@ -1366,6 +1369,67 @@ def test_victim_clash_after_down() -> None:
     check("...and where it clears them (another victim, accounts and codes on, a card for the instance): "
           "handouts --revoke", len(out) == 1 and "run `lab5-setup handouts --revoke` with acme's workshop file first"
           in out[0], str(out))
+
+    # `down` and `handouts` reach only the instances acme's file lists. A box
+    # or card that holds the victim under an instance the file no longer lists
+    # (dropped from it, say, once Show destroyed the box) is cleared by neither
+    # until it is back in the file, so the steps put it back first; and only a
+    # box the file lists counts as running the room.
+    on = {"victim": "jordan.reyes", "participants_enabled": True, "bypass_codes_enabled": True}
+    lists = lambda *nn: dict(on, instances=list(nn))
+    ended = dict(gone, env=dict(swapped["env"], reverted=True, serves=[]))
+    wait = lp_minute(now + 7200)
+    dropped_note = ("Its workshop file no longer lists instance(s) 02 (as of its last check, up, status or down), and "
+                    "`down` and `handouts` reach only the instances it lists")
+    for name, root in (
+            ("both cards hold the old victim's codes",
+             world({"01": swapped, "02": swapped}, [failed], saved=lists("01"), handout=("01", "02"),
+                   cards={"02": [failed]})),
+            ("only the dropped instance's card holds them",
+             world({"01": swapped, "02": swapped}, [], saved=lists("01"), handout=("01", "02"),
+                   cards={"02": [failed]}))):
+        out = ls.victim_clashes(root, ws, now)
+        check(f"a room still running on instance 01 whose file dropped instance 02, {name}: put 02 back in the file, "
+              "then handouts --revoke (it reaches only the cards the file lists), and the refusal says why; only "
+              "instance 01 counts as running the room",
+              len(out) == 1 and f"put instance(s) 02 back in acme's workshop file and run `lab5-setup handouts "
+                                f"--revoke` with acme's workshop file first, or wait until {wait}. {dropped_note}. "
+                                "Workshop acme is still running (instance(s) 01), and `down` would end it" in out[0]
+              and "run `lab5-setup down`" not in out[0], str(out))
+    root = world({"01": ended, "02": swapped}, [], saved=lists("01"), handout=("01", "02"), cards={"02": [failed]})
+    out = ls.victim_clashes(root, ws, now)
+    check("acme ran down with that file, so no box it lists runs any more, while the dropped instance's card holds "
+          "the codes: put it back, then down (which reaches it then), never handouts --revoke, which would put "
+          "fresh codes on the cards of the boxes down ended",
+          len(out) == 1 and f"put instance(s) 02 back in acme's workshop file and run `lab5-setup down` with acme's "
+                            f"workshop file first, or wait until {wait}. {dropped_note}" in out[0]
+          and out[0].endswith(dropped_note) and "handouts --revoke" not in out[0] and "still running" not in out[0],
+          str(out))
+    root = world({"01": swapped, "02": live}, [], saved=lists("01"))
+    out = ls.victim_clashes(root, ws, now)
+    check("a box the file dropped that still admits the victim: put it back, then down (down with the file as it "
+          "is never reaches it)",
+          len(out) == 1 and "still admit avery.kim" in out[0] and "instance(s) 02 is not deleted" in out[0]
+          and "put instance(s) 02 back in acme's workshop file and run `lab5-setup down` with acme's workshop file "
+              "first" in out[0] and dropped_note in out[0], str(out))
+    root = world({"01": swapped, "02": "[1, 2]"}, [], saved=lists("01"))
+    out = ls.victim_clashes(root, ws, now)
+    check("a box record that cannot be read, of an instance the file dropped: restore it, put the instance back, "
+          "then down",
+          len(out) == 1 and "restore the box record(s) of instance(s) 02 under " in out[0]
+          and " and put instance(s) 02 back in acme's workshop file and run `lab5-setup down` with acme's workshop "
+              "file first" in out[0], str(out))
+    for name, saved in (("a file that lists both instances", lists("01", "02")),
+                        ("a workshop.json from before it kept the instances", on),
+                        ("instances that are not a list of instance numbers", dict(on, instances="01")),
+                        ("instances that hold a number", dict(on, instances=[1, 2]))):
+        root = world({"01": swapped, "02": swapped}, [failed], saved=saved, handout=("01", "02"),
+                     cards={"02": [failed]})
+        out = ls.victim_clashes(root, ws, now)
+        check(f"{name}: nothing to put back, and both boxes run the room",
+              len(out) == 1 and f"run `lab5-setup handouts --revoke` with acme's workshop file first, or wait until "
+                                f"{wait}. Workshop acme is still running (instance(s) 01, 02)" in out[0]
+              and "put instance" not in out[0] and "no longer lists" not in out[0], str(out))
 
     other_persona = batch(codes=[{"persona": "nina.osei", "user_id": "U2", "ids": ["DU2"]}])
     root = world({"01": gone}, [other_persona])

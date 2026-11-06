@@ -1444,10 +1444,12 @@ def connect_cloudflare(ctx: Ctx, transport: Callable[..., Tuple[int, bytes]]) ->
         raise Lab5Error("could not tell the Cloudflare account from the zone; set cloudflare.account_id")
     saved = ctx.state.load_workshop()
     # What the file says now (victim_clashes reads it for another workshop's
-    # refusal); a box's own record says what it serves.
+    # refusal): its victim, its settings, and the instances it lists, which
+    # are all that `down` and `handouts` reach. A box's own record says what
+    # it serves.
     saved.update(workshop=ws.name, zone=ws.zone, zone_id=ctx.zone_id, account_id=ctx.account_id,
                  victim=ws.victim, participants_enabled=ws.participants_enabled,
-                 bypass_codes_enabled=ws.bypass_codes.enabled)
+                 bypass_codes_enabled=ws.bypass_codes.enabled, instances=[b.nn for b in ws.boxes])
     ctx.state.save_workshop(saved)
     ctx.out.line(f"Cloudflare: zone {ws.zone} ({ctx.zone_id}), token {last4(token)}")
 
@@ -1507,16 +1509,31 @@ def _box_running(rec: Optional[Dict[str, Any]]) -> bool:
     return not (rec.get("env") or {}).get("reverted") and not rec.get("revert_pending")
 
 
+def _listed_instances(saved: Optional[Dict[str, Any]]) -> Optional[List[str]]:
+    """The instances another workshop's file listed at its last check, up,
+    status or down (workshop.json), the only ones its `down` and `handouts`
+    reach; None when nothing on this Mac says (a workshop.json from before
+    it kept them, or a field of the wrong type)."""
+    listed = (saved or {}).get("instances")
+    if not isinstance(listed, list) or not all(isinstance(nn, str) for nn in listed):
+        return None
+    return listed
+
+
 def _handouts_blocker(other: Path, saved: Optional[Dict[str, Any]], victim: str,
                       cards: Sequence[str]) -> Optional[str]:
     """Why `handouts --revoke` with that workshop's file would not delete its
-    cards' codes for ``victim`` (the cards of instances ``cards``), or None
-    when it would. It puts a fresh batch for the room personas that file
-    names on each card of its handout, and only then deletes the card's
-    earlier batches. So it clears those codes only when that file names
-    another victim and turns participant accounts and bypass codes on (what
-    workshop.json kept at that workshop's last check, up, status or down),
-    and when its handout has a card for each of those instances."""
+    cards' codes for ``victim`` (the cards of instances ``cards``), even once
+    that file lists each of those instances, or None when it would. It
+    reaches only the cards of the instances its file lists, so where a card
+    belongs to an instance the file no longer lists, the refusal first says
+    to put that instance back in it (``_clash_advice``). It puts a fresh batch
+    for the room personas that file names on each of those cards, and only
+    then deletes the card's earlier batches. So it clears those codes only
+    when that file names another victim and turns participant accounts and
+    bypass codes on (what workshop.json kept at that workshop's last check,
+    up, status or down), and when its handout has a card for each of those
+    instances."""
     saved = saved or {}
     names = str(saved.get("victim") or "").strip().lower()
     if not names:
@@ -1565,7 +1582,15 @@ def victim_clashes(root: Path, ws: Workshop, now: float) -> List[str]:
 
     A revert still pending on a box Show destroyed does not count, and nor do
     codes `down` deleted: neither can reach a room any more. The refusal
-    names each of these and the steps that clear all of them together."""
+    names each of these and the steps that clear all of them together.
+
+    `down` and `handouts` reach only the instances that workshop's file
+    lists (``_listed_instances``, as its last check, up, status or down
+    recorded). A box or card that holds the victim but belongs to an
+    instance the file no longer lists (a box dropped from it, say, because
+    Show destroyed it) is cleared by neither until that instance is back in
+    the file, so the steps start there; and only a box the file lists counts
+    as running the room."""
     out: List[str] = []
     folder = Path(root) / "workshops"
     if not folder.is_dir():
@@ -1632,37 +1657,48 @@ def victim_clashes(root: Path, ws: Workshop, now: float) -> List[str]:
                           if len(known) == len(unread_until) else ""))
         if not why:
             continue
+        listed = _listed_instances(saved)
+        unlisted: List[str] = []
+        if listed is not None:
+            running = [nn for nn in running if nn in listed]
+            unlisted = sorted(set(admits + unknown_boxes + code_cards + unread_cards) - set(listed))
         no_handouts = (_handouts_blocker(other, saved, victim, sorted(set(code_cards) | set(unread_cards)))
                        if running and (deletable or unread_cards) and not (admits or unknown_boxes) else None)
         out.append(f"room.victim {victim} is still in use by workshop {other.name}: {'; and '.join(why)}. Every "
                    f"room needs its own victim (plan 4.3): one room's containment would end the other's victim "
                    f"sessions and codes. Use another victim (room.fallback, say), or "
                    + _clash_advice(other, admits, unknown_boxes, deletable, undeletable, unread_cards, unread_until,
-                                   running, no_handouts))
+                                   running, no_handouts, unlisted))
     return out
 
 
 def _clash_advice(other: Path, admits: Sequence[str], unknown_boxes: Sequence[str], deletable: Sequence[float],
                   undeletable: Sequence[float], unread_cards: Sequence[str],
                   unread_until: Sequence[Optional[float]], running: Sequence[str] = (),
-                  no_handouts: Optional[str] = None) -> str:
+                  no_handouts: Optional[str] = None, unlisted: Sequence[str] = ()) -> str:
     """The steps that clear every reason of a clash, together. A box that
     admits the victim is cleared only by `down`, and a record that cannot be
     read only once it is restored; codes whose ids were recorded by `down` or
     by their own expiry; codes whose ids this tool never learned only by
     their expiry. Waiting alone is offered only when it clears everything.
 
+    `down` and `handouts` reach only the instances the other workshop's file
+    lists, so a box or card that holds the victim under an instance its file
+    no longer lists (``unlisted``) is cleared by neither: the steps first put
+    that instance back in the file, and a sentence after them says why.
+
     When only codes hold the victim and the other room is still running
-    (``running``: a box attendees can reach that `down` has not started on;
-    a swap to its fallback leaves the old victim's codes on its cards),
-    `down` would end that room. `handouts --revoke` deletes its cards'
-    earlier codes and touches no box, so it is the step offered wherever it
-    would clear them (``no_handouts`` is None: ``_handouts_blocker``). Its
-    cost follows the steps, in a sentence of its own: it deletes the codes on
-    the cards that room's teams hold now too, so their persona sign-ins fail
-    until the new cards are printed and handed out. Where it would not clear
-    them, `down` is offered, and that sentence says why. A room `down` has
-    started on is offered `down` again: a re-run retries the delete that
+    (``running``: a box its file lists that attendees can reach and `down`
+    has not started on; a swap to its fallback leaves the old victim's codes
+    on its cards), `down` would end that room. `handouts --revoke` deletes
+    its cards' earlier codes and touches no box, so it is the step offered
+    wherever it would clear them (``no_handouts`` is None:
+    ``_handouts_blocker``). Its cost follows the steps, in a sentence of its
+    own: it deletes the codes on the cards that room's teams hold now too, so
+    their persona sign-ins fail until the new cards are printed and handed
+    out. Where it would not clear them, `down` is offered, and that sentence
+    says why. A room with no box running (`down` has started on every box its
+    file lists) is offered `down` again: a re-run retries the delete that
     failed, and ends nothing that still runs."""
     acts: List[str] = []
     note = ""
@@ -1670,6 +1706,8 @@ def _clash_advice(other: Path, admits: Sequence[str], unknown_boxes: Sequence[st
               ([f"the participant record(s) of instance(s) {', '.join(unread_cards)}"] if unread_cards else [])
     if restore:
         acts.append(f"restore {' and '.join(restore)} under {other}")
+    if unlisted:
+        acts.append(f"put instance(s) {', '.join(unlisted)} back in {other.name}'s workshop file")
     if admits or unknown_boxes:
         acts.append(f"run `lab5-setup down` with {other.name}'s workshop file")
     elif (deletable or unread_cards) and running and no_handouts is None:
@@ -1693,6 +1731,9 @@ def _clash_advice(other: Path, admits: Sequence[str], unknown_boxes: Sequence[st
         advice += f"{', then ' if acts else ''}wait until {participants.minute(last_wait)}"
     if wait_alone is not None and acts:
         advice += f", or wait until {participants.minute(wait_alone)}"
+    if unlisted:
+        note = (f". Its workshop file no longer lists instance(s) {', '.join(unlisted)} (as of its last check, up, "
+                f"status or down), and `down` and `handouts` reach only the instances it lists") + note
     return advice + note
 
 
