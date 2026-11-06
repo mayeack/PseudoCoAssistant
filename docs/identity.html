@@ -112,9 +112,11 @@ until five minutes before it expires. Then the one GraphQL query
 CII's login is the email, so the email Duo returned is the login.</li>
 <li><strong>CII is asked even while Duo can't answer.</strong> The last email Duo gave
 for each username is kept beyond the 10 s cache (an email doesn't change
-with the account's status), so a Duo outage or throttle never hides a
-CII block. If no email is known yet, CII is not asked, and the lookup
-says so (<code>unavailable</code>, error <code>no_login</code>), never <code>not_found</code>.</li>
+with the account's status), so once Duo has answered for a user, a Duo
+outage or throttle never hides that user's CII block. The email lives
+in memory only: after a restart, or while Duo refuses the Status keys,
+no email is known yet, CII is not asked, and the lookup says so
+(<code>unavailable</code>, error <code>no_login</code>), never <code>not_found</code>.</li>
 <li><strong>Limits.</strong> Each call allows 3 s to connect and 5 s per read, and runs
 off the event loop. Each source's answer is cached per user for
 <code>IDENTITY_STATUS_TTL_SECONDS</code> (10 s), failures included.</li>
@@ -138,7 +140,8 @@ with <code>identity_check=&quot;unavailable&quot;</code> on the event, and the b
 neutral &quot;status unavailable&quot;.
 <ul>
 <li>With <code>IDENTITY_FAIL_OPEN=false</code>, the turn is refused with a neutral
-&quot;could not be verified&quot; banner instead.</li>
+&quot;could not be verified&quot; banner instead, and the chat page's banner says
+IDENTITY NOT VERIFIED, never that a risk was reported.</li>
 <li>A block based on what <em>was</em> learned always applies. A disabled Duo
 account is blocked even while CII is down, and a CII block holds while
 Duo is down.</li>
@@ -146,6 +149,13 @@ Duo is down.</li>
 of yet, such as a new participant account, gets <code>identity_check=&quot;ok&quot;</code>
 and, with nothing against it, is allowed. The badge shows no trust
 level for it.</li>
+<li>CII's &quot;no such user&quot; is read from the answer's shape, never from the
+wording of just any error: <code>getEndUser</code> is null (or <code>data</code> is null
+because that field failed), and any error is about <code>getEndUser</code> itself
+(<code>path: [&quot;getEndUser&quot;]</code>), says the user was not found, and carries no
+other code. A request-level error (no <code>data</code>), an error elsewhere or
+without a path, or a nested failure is <code>unavailable</code>, so it can never
+pass for a clean check.</li>
 </ul>
 </li>
 </ol>
@@ -190,7 +200,7 @@ block:</p>
 </tr>
 <tr>
 <td><code>response_text</code></td>
-<td><code>⚠️ POLICY BLOCKED (Cisco Identity Intelligence)</code></td>
+<td><code>⚠️ POLICY BLOCKED (Cisco Identity Intelligence)</code>, or <code>⚠️ IDENTITY NOT VERIFIED (Cisco Identity Intelligence)</code> for a fail-closed block</td>
 </tr>
 </tbody>
 </table>
@@ -202,6 +212,9 @@ Lab 4's correlation keys on.</p>
 <li><code>business_outcome</code>: <code>blocked_compromised_identity</code></li>
 <li><code>prompt_category</code>: <code>compromised_identity</code></li>
 </ul>
+<p>A fail-closed block knows nothing against the identity, so it is never
+counted as a compromised one: &quot;Cisco Identity Intelligence identity
+verification&quot;, <code>blocked_identity_unverified</code> and <code>identity_unverified</code>.</p>
 <h3>Identity fields on the events of a signed-in turn</h3>
 <table>
 <thead>

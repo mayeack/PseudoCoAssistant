@@ -264,9 +264,20 @@ check("identity gate: its own prompt category (never self-harm, emergency or pro
 unverified = derive_executive_fields(_base(
     policy_blocked=True, guardrail_triggered=True, severity="MEDIUM",
     guardrail_ids=["cisco_identity_intelligence"], safety_categories=["identity_unverified"]))
-check("identity gate: a fail-closed 'could not be verified' block is the same category",
-      unverified["prompt_category"] == "compromised_identity"
-      and unverified["business_outcome"] == "blocked_compromised_identity")
+# A fail-closed block (IDENTITY_FAIL_OPEN off, Duo or CII unreachable) knows
+# nothing against the identity: during an outage it would otherwise count every
+# signed-in user as a compromised identity.
+check("identity gate: a fail-closed 'could not be verified' block is neutral, never a compromised identity",
+      unverified["prompt_category"] == "identity_unverified"
+      and unverified["business_outcome"] == "blocked_identity_unverified"
+      and unverified["policy_name"] == "Cisco Identity Intelligence identity verification"
+      and unverified["policy_action"] == "block",
+      str({k: unverified.get(k) for k in ("prompt_category", "business_outcome", "policy_name")}))
+both = derive_executive_fields(_base(
+    policy_blocked=True, guardrail_triggered=True, severity="HIGH",
+    guardrail_ids=["cisco_identity_intelligence"], safety_categories=["compromised_identity", "identity_unverified"]))
+check("identity gate: a block with a real reason stays a compromised identity",
+      both["prompt_category"] == "compromised_identity" and both["business_outcome"] == "blocked_compromised_identity")
 built = create_governance_log(
     operation_name="chat", request_model="m", conversation_id="S16", session_id="S16", input_messages=[],
     token_type="output", request_id="R16", trace_id="T16", enduser_id="nina.osei", identity_verified=True,

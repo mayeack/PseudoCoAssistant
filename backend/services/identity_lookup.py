@@ -18,7 +18,10 @@ no identity broker: the app calls both services itself, read-only.
   is the CII login (a username that is already an email is used as is).
   The last email Duo gave for each username is kept beyond the cache
   (``remembered_email``; it does not change), so CII is still asked while
-  Duo cannot answer: a Duo outage or throttle never hides a CII block.
+  Duo cannot answer: once Duo has answered for a user since the app
+  started, a Duo outage or throttle never hides that user's CII block.
+  Before that (a fresh start, or Status keys Duo refuses) no email is known
+  and CII is not asked (``no_login``).
 
 Rules:
 
@@ -40,7 +43,10 @@ answered about this user, where "no such user" (``not_found``) is an answer:
 a user CII has no record of yet (a new participant account) is not an
 outage. ``sources`` says what each one actually answered; a source that could
 not be asked (no CII login known) is ``unavailable`` (error ``no_login``),
-never ``not_found``.
+never ``not_found``. CII's "no such user" is read from the answer's shape,
+never from the wording of just any error (``_cii_not_found``): a failure
+taken for one would make the check "ok" and let the turn through even with
+``IDENTITY_FAIL_OPEN`` off.
 """
 from __future__ import annotations
 
@@ -94,6 +100,18 @@ CII_END_USER_QUERY = (
 TOKEN_REFRESH_MARGIN_S = 300.0
 #: The token's life when the token endpoint does not say (CII documents 10 h).
 TOKEN_DEFAULT_LIFETIME_S = 10 * 3600.0
+
+#: GraphQL error codes (``extensions.code``, or AppSync's ``errorType``) that
+#: may sit on CII's "no such user" error, compared upper-cased with everything
+#: but letters and digits removed (``NOT_FOUND``, ``NotFound``, ``not-found``
+#: all read NOTFOUND). Any other code is not that answer.
+CII_NOT_FOUND_CODES = frozenset({"NOTFOUND", "USERNOTFOUND", "ENDUSERNOTFOUND"})
+#: The wording of a "no such user" error: a user (or end user) that is not
+#: found or does not exist, or "no such user". Only checked on an error that
+#: is about ``getEndUser`` itself (see ``_cii_not_found``).
+_CII_USER_NOT_FOUND_RE = re.compile(
+    r"\b(?:end[ _-]?)?user\b[^\n]{0,200}?\b(?:not (?:been )?found|(?:does not|doesn't|not) exist)"
+    r"|\bno (?:such )?(?:end[ _-]?)?user\b", re.IGNORECASE)
 
 _CACHE_MAX = 2048
 _FAILING_CHECKS_MAX = 32
@@ -448,6 +466,46 @@ def _cii_query(login: str, token: str) -> Tuple[Optional[httpx.Response], Option
     return response, None
 
 
+def _error_code_of(error: Mapping[str, Any]) -> str:
+    extensions = error.get("extensions") if isinstance(error.get("extensions"), Mapping) else {}
+    code = extensions.get("code") or extensions.get("errorType") or error.get("errorType") or ""
+    return re.sub(r"[^A-Z0-9]+", "", str(code).upper())
+
+
+def _cii_not_found(body: Any) -> bool:
+    """Whether a GraphQL answer is CII's own "no such user".
+
+    Only ``getEndUser`` itself may be missing: ``data`` is there, and either
+    an object whose ``getEndUser`` is null, or null itself because that
+    non-null field failed (GraphQL nulls the parent of a failed non-null
+    field). With no error, a null ``getEndUser`` is the answer. With errors,
+    every one must be about that field (``path`` exactly ``["getEndUser"]``)
+    and say that the user was not found (``_CII_USER_NOT_FOUND_RE``), and a
+    code it carries must be one of ``CII_NOT_FOUND_CODES``. Anything else is
+    not an answer: a request-level error (no ``data``: a query the schema
+    rejects), an error at another path or none (a nested or partial failure,
+    a tenant or permission problem), or other wording."""
+    if not isinstance(body, Mapping) or "data" not in body:
+        return False
+    data, errors = body.get("data"), body.get("errors")
+    if data is not None and not (isinstance(data, Mapping) and "getEndUser" in data
+                                 and data.get("getEndUser") is None):
+        return False
+    if not errors:
+        return data is not None
+    if not isinstance(errors, list):
+        return False
+    for error in errors:
+        if not isinstance(error, Mapping) or error.get("path") != ["getEndUser"]:
+            return False
+        if not _CII_USER_NOT_FOUND_RE.search(str(error.get("message") or "")[:1000]):
+            return False
+        code = _error_code_of(error)
+        if code and code not in CII_NOT_FOUND_CODES:
+            return False
+    return True
+
+
 def _cii_fetch(login: str) -> Dict[str, Any]:
     token, error = _cii_access_token()
     if token is None:
@@ -471,11 +529,9 @@ def _cii_fetch(login: str) -> Dict[str, Any]:
     end_user = data.get("getEndUser") if isinstance(data, dict) else None
     details = end_user.get("endUserDetails") if isinstance(end_user, dict) else None
     if not isinstance(details, dict):
-        errors = body.get("errors") if isinstance(body, dict) else None
-        text = " ".join(str(e.get("message", "")) for e in errors if isinstance(e, dict)).lower() \
-            if isinstance(errors, list) else ""
-        if "not found" in text or "not exist" in text or (isinstance(data, dict) and end_user is None and not errors):
+        if _cii_not_found(body):
             return {"state": NOT_FOUND, "trust_level": None, "failing_checks": [], "fetched_at": _now_iso()}
+        errors = body.get("errors") if isinstance(body, dict) else None
         return _unavailable("graphql_error" if errors else "bad_response")
     score = details.get("endUserTrustScore") if isinstance(details.get("endUserTrustScore"), dict) else {}
     level = str(score.get("levelOfTrust") or "").strip().upper() or None

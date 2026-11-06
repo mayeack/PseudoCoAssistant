@@ -1187,7 +1187,7 @@ def test_frontend() -> None:
     check("#identityBanner sits beside #emergencyBanner, hidden by default",
           re.search(r'<div id="identityBanner" class="hidden ', page) is not None
           and 0 < page.index('id="emergencyBanner"') - page.index('id="identityBanner"') < 4000)
-    check("chat.js cache-buster bumped to v=38", "/static/js/chat.js?v=38" in page)
+    check("chat.js cache-buster bumped to v=39", "/static/js/chat.js?v=39" in page)
     check("chat.js: exactly ONE fetch wrapper, around window.fetch",
           js.count("window.fetch =") == 1 and "const _pageFetch = window.fetch.bind(window);" in js
           and js.count("_pageFetch(") == 1)

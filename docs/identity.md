@@ -64,9 +64,11 @@ before any screen or model.
      CII's login is the email, so the email Duo returned is the login.
    - **CII is asked even while Duo can't answer.** The last email Duo gave
      for each username is kept beyond the 10 s cache (an email doesn't change
-     with the account's status), so a Duo outage or throttle never hides a
-     CII block. If no email is known yet, CII is not asked, and the lookup
-     says so (`unavailable`, error `no_login`), never `not_found`.
+     with the account's status), so once Duo has answered for a user, a Duo
+     outage or throttle never hides that user's CII block. The email lives
+     in memory only: after a restart, or while Duo refuses the Status keys,
+     no email is known yet, CII is not asked, and the lookup says so
+     (`unavailable`, error `no_login`), never `not_found`.
    - **Limits.** Each call allows 3 s to connect and 5 s per read, and runs
      off the event loop. Each source's answer is cached per user for
      `IDENTITY_STATUS_TTL_SECONDS` (10 s), failures included.
@@ -84,7 +86,8 @@ before any screen or model.
    with `identity_check="unavailable"` on the event, and the badge shows a
    neutral "status unavailable".
    - With `IDENTITY_FAIL_OPEN=false`, the turn is refused with a neutral
-     "could not be verified" banner instead.
+     "could not be verified" banner instead, and the chat page's banner says
+     IDENTITY NOT VERIFIED, never that a risk was reported.
    - A block based on what *was* learned always applies. A disabled Duo
      account is blocked even while CII is down, and a CII block holds while
      Duo is down.
@@ -92,6 +95,13 @@ before any screen or model.
      of yet, such as a new participant account, gets `identity_check="ok"`
      and, with nothing against it, is allowed. The badge shows no trust
      level for it.
+   - CII's "no such user" is read from the answer's shape, never from the
+     wording of just any error: `getEndUser` is null (or `data` is null
+     because that field failed), and any error is about `getEndUser` itself
+     (`path: ["getEndUser"]`), says the user was not found, and carries no
+     other code. A request-level error (no `data`), an error elsewhere or
+     without a path, or a nested failure is `unavailable`, so it can never
+     pass for a clean check.
 
 ### The block event
 
@@ -107,7 +117,7 @@ block:
 | tokens | zero: no model ran |
 | `input_messages` | the typed message only. The gate screens no text, so no document text is on the event, and the banner never says the document was screened |
 | `theme`, `workflow_name`, `blueprint`, `attachment` | as on every other event of the turn |
-| `response_text` | `⚠️ POLICY BLOCKED (Cisco Identity Intelligence)` |
+| `response_text` | `⚠️ POLICY BLOCKED (Cisco Identity Intelligence)`, or `⚠️ IDENTITY NOT VERIFIED (Cisco Identity Intelligence)` for a fail-closed block |
 
 A block writes no escalation event and is never tagged "injection", which
 Lab 4's correlation keys on.
@@ -116,6 +126,10 @@ The executive overlay maps the block to:
 - `policy_name`: "Cisco Identity Intelligence identity risk"
 - `business_outcome`: `blocked_compromised_identity`
 - `prompt_category`: `compromised_identity`
+
+A fail-closed block knows nothing against the identity, so it is never
+counted as a compromised one: "Cisco Identity Intelligence identity
+verification", `blocked_identity_unverified` and `identity_unverified`.
 
 ### Identity fields on the events of a signed-in turn
 

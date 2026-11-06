@@ -1011,8 +1011,16 @@ function renderIdentity(identity) {
     // The banner follows the server's answer: Unblock me on, the gate refusing
     // this identity, or nothing (a stale revoked / expired banner goes).
     if (identity.override) showIdentityBanner('override', identity);
-    else if (identity.verdict === 'block') showIdentityBanner('blocked', identity);
+    else if (identity.verdict === 'block') showIdentityBanner(unverifiedOnly(identity) ? 'unverified' : 'blocked', identity);
     else hideIdentityBanner();
+}
+
+// A fail-closed block (IDENTITY_FAIL_OPEN off): Duo or Cisco Identity
+// Intelligence could not answer, and nothing is known against the identity
+// (identity_gate.unverified_only). Its banner is neutral, never "at risk".
+function unverifiedOnly(identity) {
+    const reasons = Array.isArray(identity && identity.reasons) ? identity.reasons : [];
+    return reasons.length === 1 && reasons[0] === 'identity_unavailable';
 }
 
 // Trust pill: colour is state. Duo status (locked out / disabled) wins over the
@@ -1072,6 +1080,14 @@ const IDENTITY_BANNERS = {
         text: (info) => 'Cisco Identity Intelligence reports a risk on your signed-in identity'
             + (info && info.reasons_text ? ' (' + info.reasons_text + ')' : '')
             + ', so your messages are refused before they reach the assistant. Turn on Unblock me to '
+            + 'continue anyway: every event will record the override.',
+        signin: false, signout: true, dismiss: false, unblock: true,
+    },
+    unverified: {
+        title: 'IDENTITY NOT VERIFIED',
+        text: () => 'Your signed-in identity could not be verified right now: Duo or Cisco Identity '
+            + 'Intelligence did not answer, so your messages are refused before they reach the assistant. '
+            + 'Nothing is known against your identity; try again in a moment, or turn on Unblock me to '
             + 'continue anyway: every event will record the override.',
         signin: false, signout: true, dismiss: false, unblock: true,
     },

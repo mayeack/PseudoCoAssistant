@@ -156,6 +156,7 @@ class FakeServices:
         self.valid_tokens = set()
         self.fail = None       # None | "duo_500" | "duo_connect" | "duo_timeout" | "cii_500" | "cii_401_once"
         self.bad_signatures = 0
+        self.cii_body = None   # a GraphQL answer to send (HTTP 200) instead of the user's record
 
     def set_user(self, username, status="active", trust="TRUSTED", failing=()):
         email = f"{username}@pseudocoassistant.com"
@@ -212,11 +213,15 @@ class FakeServices:
         body = json.loads(request.content)
         if body.get("query") != lookup.CII_END_USER_QUERY:
             return httpx.Response(400, json={"errors": [{"message": "unexpected query"}]})
+        if self.cii_body is not None:
+            return httpx.Response(200, json=self.cii_body)
         login = body.get("variables", {}).get("login")
         user = self.cii.get(login)
         if user is None:
+            # A resolver error is about its field: GraphQL puts the field's path on it.
             return httpx.Response(200, json={"data": {"getEndUser": None},
-                                             "errors": [{"message": f"End user {login} not found"}]})
+                                             "errors": [{"message": f"End user {login} not found",
+                                                         "path": ["getEndUser"]}]})
         return httpx.Response(200, json={"data": {"getEndUser": {"endUserDetails": {
             "login": login, "status": "ACTIVE", "failingChecks": user["failingChecks"],
             "endUserTrustScore": {"levelOfTrust": user["levelOfTrust"], "lastUpdated": "2026-11-05T09:00:00Z"}}}}})
@@ -394,6 +399,63 @@ def _status(**over):
             "available": True, "sources": {"duo": "ok", "cii": "ok"}}
     base.update(over)
     return base
+
+
+def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
+    print("CII 'no such user': read from the answer's shape, never from the wording of just any error")
+    _configure(True)
+    fake = _fresh_fake()
+    fake.set_user("avery.kim", trust="UNTRUSTED", failing=["MFA Flood", "Impossible Travel"])
+    login = "avery.kim@pseudocoassistant.com"
+    misread = {
+        "a request-level error (no data: a query the schema rejects)":
+            {"errors": [{"message": "Field 'endUserDetails' not found in type: 'EndUser'"}]},
+        "data null, an error with no path (a tenant problem)":
+            {"data": None, "errors": [{"message": "Tenant configuration not found"}]},
+        "a permission error on getEndUser itself":
+            {"data": {"getEndUser": None}, "errors": [{"message": "Permission does not exist for this API client",
+                                                       "path": ["getEndUser"]}]},
+        "a nested partial failure (the details are null)":
+            {"data": {"getEndUser": {"endUserDetails": None}},
+             "errors": [{"message": "Trust score record not found",
+                         "path": ["getEndUser", "endUserDetails", "endUserTrustScore"]}]},
+        "a generic not-found with no path":
+            {"data": None, "errors": [{"message": "Requested resource not found"}]},
+        "the right words with a code that says otherwise":
+            {"data": {"getEndUser": None}, "errors": [{"message": f"End user {login} not found",
+                                                       "path": ["getEndUser"], "extensions": {"code": "FORBIDDEN"}}]},
+        "an empty data object":
+            {"data": {}},
+    }
+    for name, body in misread.items():
+        fake.cii_body = body
+        lookup.clear_cache()
+        st = lookup.lookup("avery.kim")
+        closed = gate.decide(st, fail_open=False)
+        opened = gate.decide(st, fail_open=True)
+        check(f"{name}: CII unavailable, never not_found; fail-closed blocks, fail-open says unavailable",
+              st["sources"] == {"duo": "ok", "cii": "unavailable"} and st["available"] is False
+              and closed["verdict"] == "block" and closed["reasons"] == ["identity_unavailable"]
+              and opened["verdict"] == "allow" and opened["check"] == "unavailable", f"{st} {closed}")
+    answers = {
+        "getEndUser null, no error": {"data": {"getEndUser": None}},
+        "getEndUser null, a not-found error on it": {
+            "data": {"getEndUser": None},
+            "errors": [{"message": f"End user {login} not found", "path": ["getEndUser"]}]},
+        "data null (the non-null field failed), a NOT_FOUND error on getEndUser": {
+            "data": None,
+            "errors": [{"message": "User does not exist", "path": ["getEndUser"], "extensions": {"code": "NOT_FOUND"}}]},
+    }
+    for name, body in answers.items():
+        fake.cii_body = body
+        lookup.clear_cache()
+        st = lookup.lookup("avery.kim")
+        v = gate.decide(st, fail_open=False)
+        check(f"{name}: CII's 'no such user', an answer (check ok)",
+              st["sources"] == {"duo": "ok", "cii": "not_found"} and st["available"] is True
+              and v["check"] == "ok" and v["verdict"] == "allow", f"{st} {v}")
+    fake.cii_body = None
+    lookup.clear_cache()
 
 
 def test_decide() -> None:
@@ -858,8 +920,23 @@ def test_rules() -> None:
     check("UI: the Unblock me toggle sits in #identityBanner (never the Demo Controls drawer), green accent",
           'id="identityUnblockToggle"' in banner and "peer-checked:bg-green-600" in banner
           and "identityUnblockToggle" not in drawer and "unblock" not in drawer.lower())
-    check("UI: the toggle calls /api/identity/unblock and /reblock; chat.js?v=38",
-          "'/api/identity/unblock' : '/api/identity/reblock'" in js and "/static/js/chat.js?v=38" in page)
+    check("UI: the toggle calls /api/identity/unblock and /reblock; chat.js?v=39",
+          "'/api/identity/unblock' : '/api/identity/reblock'" in js and "/static/js/chat.js?v=39" in page)
+    banners = _banner_for({
+        "fail_closed": {"signed_in": True, "username": "nina.osei", "verdict": "block", "identity_check": "unavailable",
+                        "reasons": ["identity_unavailable"], "reasons_text": "your identity could not be verified"},
+        "at_risk": {"signed_in": True, "username": "avery.kim", "verdict": "block", "identity_check": "ok",
+                    "reasons": ["mfa_flood"], "reasons_text": "your account is failing the MFA Flood check"},
+    })
+    if banners is not None:
+        closed, risk = banners.get("fail_closed") or {}, banners.get("at_risk") or {}
+        check("UI: a fail-closed block's banner is neutral (IDENTITY NOT VERIFIED), never 'reports a risk'",
+              closed.get("kind") == "unverified" and closed.get("title") == "IDENTITY NOT VERIFIED"
+              and "reports a risk" not in closed.get("text", "") and "could not be verified" in closed.get("text", "")
+              and closed.get("unblock") is True, str(closed))
+        check("UI: a block with a real reason keeps the at-risk banner",
+              risk.get("kind") == "blocked" and risk.get("title") == "IDENTITY AT RISK"
+              and "MFA Flood" in risk.get("text", ""), str(risk))
     check("UI: the sign-in page offers Unblock me for a revoked session",
           'action="/api/identity/unblock"' in login and 'form.unblock' in login)
     claude = (ROOT / "CLAUDE.md").read_text()
@@ -870,12 +947,76 @@ def test_rules() -> None:
     check("tests/run_all.sh runs this suite", "tests/test_identity_gate.py" in (ROOT / "tests" / "run_all.sh").read_text())
 
 
+# Loads the real chat.js with a stub DOM and runs renderIdentity() on each
+# /api/identity/me answer; prints the banner each one raised.
+_BANNER_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const answers = JSON.parse(process.argv[3]);
+const out = {};
+for (const [name, me] of Object.entries(answers)) {
+  const els = {};
+  const el = (id) => els[id] || (els[id] = {
+    id, textContent: '', title: '', checked: false, disabled: false, dataset: {},
+    _cls: new Set(['hidden']),
+    classList: { add(...c) { c.forEach((x) => this._o._cls.add(x)); }, remove(...c) { c.forEach((x) => this._o._cls.delete(x)); },
+                 toggle(c, on) { if (on === undefined ? !this._o._cls.has(c) : on) this._o._cls.add(c); else this._o._cls.delete(c); },
+                 contains(c) { return this._o._cls.has(c); } },
+  });
+  const ctx = {
+    console: { log() {}, warn() {}, error() {}, debug() {} },
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({}), headers: { get: () => null } }),
+    document: { addEventListener() {}, getElementById: (id) => { const e = el(id); e.classList._o = e; return e; },
+                querySelectorAll: () => [], querySelector: () => null, hidden: false,
+                documentElement: { classList: { toggle() {}, add() {}, remove() {} } } },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    history: { replaceState() {} },
+    location: { search: '', pathname: '/app', hash: '', href: '' },
+    setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {},
+    URLSearchParams,
+  };
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(src, ctx, { filename: 'chat.js' });
+  ctx.__me = me;
+  vm.runInContext('renderIdentity(__me)', ctx);
+  const banner = els.identityBanner || { dataset: {}, _cls: new Set(['hidden']) };
+  out[name] = { kind: banner.dataset.kind || null, shown: !banner._cls.has('hidden'),
+                title: (els.identityBannerTitle || {}).textContent, text: (els.identityBannerText || {}).textContent,
+                unblock: els.identityBannerUnblock ? !els.identityBannerUnblock._cls.has('hidden') : null };
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def _banner_for(answers):
+    """The banner chat.js raises for each /api/identity/me answer, or None (and
+    a SKIP line) without node."""
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        print("  SKIP  node is not installed: the behavioural banner check did not run")
+        return None
+    harness = Path(_TMP, "banner_harness.js")
+    harness.write_text(_BANNER_HARNESS)
+    run = subprocess.run([node, str(harness), str(ROOT / "frontend" / "js" / "chat.js"), json.dumps(answers)],
+                         capture_output=True, text=True, timeout=60)
+    try:
+        return json.loads(run.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        check("UI: the banner harness ran", False, (run.stderr or run.stdout)[-400:])
+        return {}
+
+
 def main() -> int:
     check("temp DB in use (never the app's medadvice.db)", _TMP in str(dbmod.engine.url), str(dbmod.engine.url))
     dbmod.init_db()
     try:
         test_signer()
         test_lookup()
+        test_cii_not_found_is_an_answer_only_by_its_shape()
         test_decide()
         test_engines()
         test_store_generation()
