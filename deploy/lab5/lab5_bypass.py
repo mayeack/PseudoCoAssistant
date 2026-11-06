@@ -64,7 +64,20 @@ for them. Its row says "Duo's answer was lost; any codes it made expire at
 under the persona they were recorded for; for an unknown entry they say when
 its codes expire, and ``down`` never says every batch was deleted.
 ``valid_hours`` is capped at 72, so an unknown entry is dead long before
-``expire`` disables a participant at day 7.
+``expire`` disables a participant at day 7. A batch whose codes ``down``
+deleted gets ``revoked_at`` in the record, and a card whose batch has it is
+treated as having no working codes: ``up`` issues a fresh batch for it, and
+``check`` and ``status`` say why (the card itself still shows the codes that
+were printed). A participant record that cannot be read (not JSON, not a JSON
+object, unreadable) fails that card's revocation and keeps ``down`` from
+saying every batch was deleted; it never stops the run.
+
+**When a batch stops.** Duo counts ``valid_secs`` from when it makes each
+code, so a card's (and the record's) ``valid_until`` is taken after the last
+create of the card returned, rounded up to the minute the reports print: never
+earlier than any of its codes' own expiry. A create whose answer was lost gets
+``LOST_MARGIN_S`` more, for a create Duo finishes after the tool stopped
+waiting for it.
 
 ``up`` issues a batch for each card that has none, whose batch has expired,
 whose batch names other personas (the victim was swapped), or whose batch was
@@ -91,6 +104,11 @@ from lab5_personas import Cast, is_persona_notes
 
 HOUR = 3600
 WARN_HOURS = 2.0                       # `status` warns when a batch has less left than this
+# A create whose answer was lost (a timeout, a gateway 5xx) may still be
+# finished by Duo after the tool stopped waiting: its codes' time gets this
+# margin on top (they are on no card, so a later time only delays down's
+# "every batch is deleted or has expired").
+LOST_MARGIN_S = 300
 VICTIM_ROLES = ("victim", "spike")     # spike: the dry-run victim, on a test stack only (plan 8)
 CAST_FILE = "scripts/identity/personas.yaml"
 # workshop.yaml `bypass_codes:` (lab5_setup refuses anything else before it connects)
@@ -190,6 +208,8 @@ class Batch:
     valid_until: Optional[float]
     issued_at: Optional[float] = None
     reuse: Optional[int] = None
+    revoked_at: Optional[float] = None   # `down` deleted its codes (the participant record says so)
+    batch_id: str = ""                   # its id in the participant record (the card's bypass_batch)
 
     @property
     def personas(self) -> List[Persona]:
@@ -211,7 +231,54 @@ def card_batch(card: Optional[Dict[str, str]]) -> Optional[Batch]:
     reuse = str(card.get("bypass_reuse") or "").strip()
     return Batch(entries, participants.parse_time(card.get("bypass_valid_until") or ""),
                  participants.parse_time(card.get("bypass_issued_at") or ""),
-                 int(reuse) if reuse.isdigit() else None)
+                 int(reuse) if reuse.isdigit() else None, batch_id=str(card.get("bypass_batch") or ""))
+
+
+def _read_record(path: Path) -> Dict[str, Any]:
+    """A participant record. ValueError when it is not JSON or not a JSON
+    object, OSError when it cannot be read: the caller reports that card."""
+    rec = read_json(path)
+    if not isinstance(rec, dict):
+        raise ValueError(f"{Path(path).name} is not a participant record (a JSON object)")
+    return rec
+
+
+def _batches(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """A record's batches (the record's own dicts: changes to them are kept)."""
+    batches = rec.get("bypass_batches")
+    return [b for b in batches if isinstance(b, dict)] if isinstance(batches, list) else []
+
+
+def _entries(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
+    codes = batch.get("codes")
+    return [e for e in codes if isinstance(e, dict)] if isinstance(codes, list) else []
+
+
+def revoked_at(env: participants.Env, nn: str, batch: Batch) -> Optional[float]:
+    """When `down` deleted the codes of the recorded batch a card carries (its
+    ``bypass_batch`` id; a card written without one, by its issue time and
+    the latest batch issued then). None: not revoked, or not known (an
+    unreadable record)."""
+    try:
+        rec = _read_record(env.record_path(nn))
+    except (ValueError, OSError):
+        return None
+    batches = _batches(rec)
+    if batch.batch_id:
+        mine = [b for b in batches if str(b.get("id") or "") == batch.batch_id]
+    else:
+        mine = [b for b in batches if batch.issued_at is not None
+                and participants.parse_time(str(b.get("issued_at") or "")) == batch.issued_at][-1:]
+    return participants.parse_time(str(mine[-1].get("revoked_at") or "")) if mine else None
+
+
+def card_batch_of(env: participants.Env, nn: str, card: Optional[Dict[str, str]]) -> Optional[Batch]:
+    """A card's batch, marked revoked when `down` deleted its codes: the card
+    still shows them, but none works."""
+    batch = card_batch(card)
+    if batch is not None:
+        batch.revoked_at = revoked_at(env, nn, batch)
+    return batch
 
 
 def setting_changes(batch: Batch, settings: Settings) -> List[str]:
@@ -241,6 +308,8 @@ def _state(batch: Optional[Batch], personas: Sequence[Persona], settings: Settin
         return "other"
     if batch.valid_until is None or batch.valid_until <= now:
         return "expired"
+    if batch.revoked_at is not None:
+        return "revoked"
     if setting_changes(batch, settings):
         return "settings"
     return "valid"
@@ -259,7 +328,8 @@ def _partial_note(nn: str, names: Sequence[str]) -> str:
 
 
 WHY = {"none": "no persona codes on its card yet", "other": "its codes are for other personas",
-       "expired": "its codes have expired", "fresh": "a fresh batch"}
+       "expired": "its codes have expired", "fresh": "a fresh batch",
+       "revoked": "`lab5-setup down` revoked its codes, so none on the card works"}
 
 
 def why(state: str, batch: Optional[Batch], settings: Settings) -> str:
@@ -395,18 +465,20 @@ def headroom_rows(admin: AdminAPI, users: Dict[str, Dict[str, Any]], needed: int
     return rows
 
 
-def _record(env: participants.Env, nn: str, now: float, settings: Settings, entries: Sequence[Entry],
-            tracked: Dict[str, Tuple[str, List[str]]], unknown: Sequence[Dict[str, str]], complete: bool) -> str:
+def _record(env: participants.Env, nn: str, now: float, until: float, settings: Settings, entries: Sequence[Entry],
+            tracked: Dict[str, Tuple[str, List[str]]], unknown: Sequence[Dict[str, str]], complete: bool,
+            batch_id: str) -> str:
     """The participant record keeps every batch's times and the ids of its
     codes (never a code), so `down` and `handouts --revoke` can delete them.
     ``unknown``: one entry (persona, user_id, until) per create whose code
     ids this tool does not know, so `down` can say when they expire after the
     handout is gone. Returns the batch's id in the record."""
     path = env.record_path(nn)
-    rec = read_json(path)
-    batch_id = secrets.token_hex(4)
-    rec.setdefault("bypass_batches", []).append({
-        "id": batch_id, "issued_at": _iso(now), "valid_until": _iso(now + settings.valid_secs),
+    rec = _read_record(path)
+    if not isinstance(rec.get("bypass_batches"), list):
+        rec["bypass_batches"] = []
+    rec["bypass_batches"].append({
+        "id": batch_id, "issued_at": _iso(now), "valid_until": _iso(until),
         "personas": [name for _, name, _ in entries], "codes_each": settings.count,
         "reuse_count": settings.reuse_count, "valid_hours": settings.valid_hours, "complete": complete,
         "codes": [{"persona": name, "user_id": uid, "ids": ids} for name, (uid, ids) in tracked.items()],
@@ -415,12 +487,14 @@ def _record(env: participants.Env, nn: str, now: float, settings: Settings, entr
     return batch_id
 
 
-def _expiry(env: participants.Env, settings: Settings) -> float:
-    """When the codes of a create that has just ended stop working: Duo
-    counts valid_secs from when it made them, which is by the time its answer
-    came back or was lost. Rounded up to the minute the reports print, so
-    the time is never earlier than the codes' own."""
-    return math.ceil((env.now() + settings.valid_secs) / 60.0) * 60.0
+def _expiry(env: participants.Env, settings: Settings, lost: bool = False) -> float:
+    """When the codes of the creates that have ended by now stop working: Duo
+    counts valid_secs from when it made each code, which is by the time its
+    answer came back. Rounded up to the minute the reports print, so the time
+    is never earlier than the codes' own. A create whose answer was lost
+    (``lost``) may be finished by Duo after the tool stopped waiting, so it
+    gets ``LOST_MARGIN_S`` more."""
+    return math.ceil((env.now() + settings.valid_secs + (LOST_MARGIN_S if lost else 0)) / 60.0) * 60.0
 
 
 def _unknown(persona: str, uid: str, expires: float) -> Dict[str, str]:
@@ -498,7 +572,7 @@ def issue(env: participants.Env, numbers: Sequence[str], personas: Sequence[Pers
             else:
                 rows.append(("SKIP", label, f"no handout card for {name} (see its participant row)"))
             continue
-        present.append((nn, name, card_batch(card)))
+        present.append((nn, name, card_batch_of(env, nn, card)))
 
     checks: List[Row] = []
     issued: Dict[str, str] = {}
@@ -588,7 +662,6 @@ def _issue_card(env: participants.Env, nn: str, name: str, personas: Sequence[Pe
     unknown: List[Dict[str, str]] = []
     notes: List[str] = []              # why codes Duo made for this card cannot be revoked by this tool
     error = ""
-    until = now + settings.valid_secs
     for role, persona in personas:
         uid = str(users[persona]["user_id"])
         try:
@@ -602,7 +675,7 @@ def _issue_card(env: participants.Env, nn: str, name: str, personas: Sequence[Pe
             if not _answer_lost(exc):
                 error = f"bypass codes not issued for {persona}: {_why_failed(exc)}"
                 break
-            expires = _expiry(env, settings)
+            expires = _expiry(env, settings, lost=True)
             unknown.append(_unknown(persona, uid, expires))
             error = f"no bypass code for {persona} reached the card: {LOST.format(until=participants.minute(expires))}"
             break
@@ -621,12 +694,15 @@ def _issue_card(env: participants.Env, nn: str, name: str, personas: Sequence[Pe
             unknown.append(_unknown(persona, uid, expires))
             notes.append(f"the ids of {persona}'s codes {why}, so this tool cannot revoke them: they expire at "
                          f"{participants.minute(expires)}")
+    # Taken once every create of the card has returned: no code on it outlives the card's time.
+    until = _expiry(env, settings)
+    new_id = secrets.token_hex(4)        # the batch's id in the record, and on the card
     written = False
     if not error:
         try:
             written = handout.update(name, {"bypass": participants.encode_bypass(entries),
                                             "bypass_issued_at": _iso(now), "bypass_valid_until": _iso(until),
-                                            "bypass_reuse": str(settings.reuse_count)})
+                                            "bypass_reuse": str(settings.reuse_count), "bypass_batch": new_id})
             if not written:
                 error = "its card left the handout while the codes were issued"
         except (Lab5Error, OSError, ValueError) as exc:
@@ -635,7 +711,8 @@ def _issue_card(env: participants.Env, nn: str, name: str, personas: Sequence[Pe
     unrecorded = ""
     if entries or unknown:     # a create without a usable answer may have made codes that are on no card
         try:
-            batch_id = _record(env, nn, now, settings, entries, tracked, unknown, complete=written)
+            batch_id = _record(env, nn, now, until, settings, entries, tracked, unknown, complete=written,
+                               batch_id=new_id)
         except (Lab5Error, OSError, ValueError) as exc:     # ValueError: an unreadable record
             unrecorded = (f"; its participant record was not written ({exc}), so down cannot delete these codes: "
                           f"they stop working at {participants.minute(until)}")
@@ -688,8 +765,8 @@ def _revoke_card(env: participants.Env, nn: str, now: float, keep: Optional[str]
     ``listed`` caches those listings across cards. Returns (rows, all done)."""
     label = f"instance {nn}"
     path = env.record_path(nn)
-    rec = read_json(path)
-    batches = [b for b in rec.get("bypass_batches") or [] if not (keep and b.get("id") == keep)]
+    rec = _read_record(path)
+    batches = [b for b in _batches(rec) if not (keep and b.get("id") == keep)]
     deleted = gone = 0
     errors: List[str] = []
     loose: List[str] = []
@@ -704,7 +781,8 @@ def _revoke_card(env: participants.Env, nn: str, now: float, keep: Optional[str]
         for persona, expires in _unknown_entries(batch):      # never deleted: say when they stop working
             if expires is None or expires > now:
                 loose.append(UNKNOWN_IDS.format(persona=persona, when=when, until=_when(expires)))
-        for entry in batch.get("codes") or []:
+        deleted_before = deleted
+        for entry in _entries(batch):
             ids = [str(i) for i in entry.get("ids") or []]
             if not ids:
                 continue
@@ -732,13 +810,17 @@ def _revoke_card(env: participants.Env, nn: str, now: float, keep: Optional[str]
                     left.append(code_id)
                     errors.append(f"{entry.get('persona')}: {exc}")
             entry["ids"] = left
-        if batch.get("codes") and not any(e.get("ids") for e in batch["codes"]) and not batch.get("revoked_at"):
+        # Any of its codes deleted now, or none of its recorded ids left: the card
+        # that carries this batch has no working codes any more (card_batch_of).
+        if (_entries(batch) and not batch.get("revoked_at")
+                and (deleted > deleted_before or not any(e.get("ids") for e in _entries(batch)))):
             batch["revoked_at"] = _iso(now)
+            touched = True
     if touched:
         write_json_private(path, rec)
     rows: List[Row] = []
     if errors:
-        left_n = sum(len(e.get("ids") or []) for b in batches for e in b.get("codes") or [])
+        left_n = sum(len(e.get("ids") or []) for b in batches for e in _entries(b))
         rows.append(("FAIL", label, f"deleted {deleted} bypass code(s) of {scope}; {left_n} not deleted "
                                     f"({errors[0]}): re-run to delete them"))
     elif deleted:
@@ -762,15 +844,17 @@ def _revoke_guarded(env: participants.Env, nn: str, now: float, keep: Optional[s
 
 
 def pending(root: Path, workshop: str, numbers: Sequence[str]) -> List[str]:
-    """The instances whose participant record still lists code ids to delete."""
+    """The instances whose participant record still lists code ids to delete,
+    or cannot be read (not JSON, not an object, unreadable): revoke() reports
+    each of those as not deleted."""
     out: List[str] = []
     for nn in numbers:
         try:
-            rec = read_json(_record_path(root, workshop, nn))
-        except ValueError:
-            out.append(nn)                       # unreadable: revoke() reports it
+            rec = _read_record(_record_path(root, workshop, nn))
+        except (ValueError, OSError):
+            out.append(nn)
             continue
-        if any(e.get("ids") for b in rec.get("bypass_batches") or [] for e in b.get("codes") or []):
+        if any(e.get("ids") for b in _batches(rec) for e in _entries(b)):
             out.append(nn)
     return out
 
@@ -799,10 +883,14 @@ def down_note(root: Path, workshop: str, now: float, numbers: Sequence[str]) -> 
     latest: Optional[float] = None
     seen = unknown_seen = False
     unknown: List[str] = []              # "<persona> on instance <nn>, until <time>": unknown ids, still valid
+    unreadable: List[str] = []           # instances whose record cannot be read: nothing known about their codes
     for nn in numbers:
+        path = _record_path(root, workshop, nn)
         try:
-            batches = read_json(_record_path(root, workshop, nn)).get("bypass_batches") or []
-        except ValueError:
+            batches = _batches(_read_record(path))
+        except (ValueError, OSError):
+            if path.exists():
+                unreadable.append(nn)
             continue
         for batch in batches:
             seen = True
@@ -817,6 +905,12 @@ def down_note(root: Path, workshop: str, now: float, numbers: Sequence[str]) -> 
                 unknown.append(f"{persona} on instance {nn}, until {_when(expires)}")
                 if expires is not None:
                     latest = expires if latest is None or expires > latest else latest
+    if unreadable:
+        # Never "every batch is deleted": nothing is known about these cards' codes.
+        return (f"Persona bypass codes: the participant record of instance {', '.join(unreadable)} cannot be read, "
+                "so lab5-setup cannot say whether its codes were deleted. Any it issued stop working at most "
+                f"{RANGES['valid_hours'][1]} hours (bypass_codes.valid_hours) after they were issued; restore the "
+                f"record under {Path(root) / 'workshops' / workshop / 'participants'} and re-run down to delete them")
     if not seen:
         return None
     if latest is None and not unknown:
@@ -844,7 +938,7 @@ def plan_rows(env: participants.Env, numbers: Sequence[str], personas: Sequence[
     rows: List[Row] = []
     todo = 0
     for nn in numbers:
-        batch = card_batch(cards.get(participants.username(env.workshop, nn)))
+        batch = card_batch_of(env, nn, cards.get(participants.username(env.workshop, nn)))
         state = _state(batch, wanted, settings, now, absent)
         label = f"instance {nn}"
         if state == "valid":
@@ -891,10 +985,13 @@ def status_rows(env: participants.Env, numbers: Sequence[str], personas: Sequenc
         if card is None:
             rows.append(("SKIP", label, f"no handout card for {name}"))
             continue
-        batch = card_batch(card)
+        batch = card_batch_of(env, nn, card)
         state = _state(batch, wanted, settings, now, absent)
         if state == "none":
             rows.append(("FAIL", label, f"no persona bypass codes on its card: {fix}"))
+        elif state == "revoked":
+            rows.append(("FAIL", label, f"`lab5-setup down` revoked its codes at {participants.minute(batch.revoked_at)}, "
+                                        f"so none on the card works: up or {fix}"))
         elif state == "other":
             have = ", ".join(n for _, n in batch.personas)
             want = (", ".join(n for _, n in wanted) + (f" ({', '.join(contained)} is contained)" if contained else "")

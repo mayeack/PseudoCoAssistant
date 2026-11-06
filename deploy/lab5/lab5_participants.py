@@ -151,9 +151,11 @@ def persona_group_note(markers: Dict[str, str]) -> str:
 # =========================================================================== handout
 # The persona bypass codes of a card (lab5_bypass, plan 4.3): ``bypass`` holds
 # "role:username=code[,code]" words, e.g. "victim:avery.kim=407176182
-# trusted:marcus.bell=016931781"; the other three say when they were issued,
-# when they expire and how many sign-ins each code allows.
-BYPASS_FIELDS = ["bypass", "bypass_issued_at", "bypass_valid_until", "bypass_reuse"]
+# trusted:marcus.bell=016931781"; the next three say when they were issued,
+# when they expire and how many sign-ins each code allows; ``bypass_batch``
+# is the batch's id in the participant record (not a secret), so `down`'s
+# revocation of that batch is seen on the card.
+BYPASS_FIELDS = ["bypass", "bypass_issued_at", "bypass_valid_until", "bypass_reuse", "bypass_batch"]
 FIELDS = ["instance", "url", "access_key", "username", "email", "passcodes", "issued_at", "disable_on", "delete_on",
           "cii_url"] + BYPASS_FIELDS
 _BYPASS_WORD_RE = re.compile(r"^(?P<role>victim|trusted):(?P<user>[a-z][a-z0-9._-]{0,63})="

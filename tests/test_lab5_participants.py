@@ -560,9 +560,12 @@ def test_bypass_codes_on_the_handout() -> None:
         check("trusted personas keep every box's batch (preserve_existing): 2 live codes each",
               all(len(h.duo.live_codes(n)) == 2 for n in CARD_PERSONAS))
         row1 = rows["l5-acme-01"]
-        check("the card says when they expire (12 h from now) and how many sign-ins each allows",
-              row1["bypass_reuse"] == "5"
-              and abs(lp.parse_time(row1["bypass_valid_until"]) - (h.clock() + 43200)) < 2, str(row1))
+        until1 = lp.parse_time(row1["bypass_valid_until"])
+        check("the card says when they expire (12 h after its last create, rounded up to the minute: never earlier "
+              "than a code's own expiry) and how many sign-ins each allows",
+              row1["bypass_reuse"] == "5" and until1 % 60 == 0 and 0 <= until1 - (h.clock() + 43200) < 60
+              and all(until1 >= c["expiration"] for cs in h.duo.bypass.values() for c in cs if c["expiration"]),
+              str(row1))
         html_text = (h.root / "workshops" / "acme" / "handout.html").read_text()
         check("handout.html: the persona table, the codes, how to use them and until when",
               "Room victim" in html_text and "Trusted" in html_text and cards["01"]["marcus.bell"][0] in html_text
@@ -619,6 +622,7 @@ def test_bypass_codes_on_the_handout() -> None:
         check("12 h later Duo refuses the codes: valid_secs is their cutoff",
               auth.auth_passcode("avery.kim", cards["02"]["avery.kim"][0], "198.51.100.201",
                                  "ATTENDEE-LAPTOP2")["result"] == "deny")
+        h.clock.t += 60          # the cards' time is rounded up to the minute
         rc, out4 = h.run("status")
         check("status: expired batches fail the run and say how to issue new ones",
               rc == 1 and out4.count("expired at") == 2 and "lab5-setup handouts <workshop.yaml> --only 1" in out4, out4)
@@ -1027,7 +1031,7 @@ def test_bypass_settings_change_reissues() -> None:
              lambda h, r: all(len(v) == 2 for v in card_codes(r).values())),
             ("bypass_codes:\n  reuse_count: 3\n", "reuse_count 5 -> 3", lambda h, r: r["bypass_reuse"] == "3"),
             ("bypass_codes:\n  valid_hours: 30\n", "valid_hours 12 -> 30",
-             lambda h, r: abs(lp.parse_time(r["bypass_valid_until"]) - (h.clock() + 30 * 3600)) < 2)):
+             lambda h, r: 0 <= lp.parse_time(r["bypass_valid_until"]) - (h.clock() + 30 * 3600) < 60)):
         with tempfile.TemporaryDirectory() as tmp:
             h = Harness(Path(tmp))
             rc, out = h.run("up")
@@ -1684,7 +1688,7 @@ def test_bypass_lost_create_answer() -> None:
                   "when its codes expire; the codes issued before it keep their ids",
                   not relisted_after_post(h, path)
                   and [(u.get("persona"), u.get("user_id")) for u in unknown] == [("elena.sousa", elena)]
-                  and until == math.ceil((h.clock() + 12 * 3600) / 60.0) * 60.0
+                  and until == math.ceil((h.clock() + 12 * 3600 + lb.LOST_MARGIN_S) / 60.0) * 60.0
                   and [e["persona"] for e in batch["codes"]] == ["avery.kim", "marcus.bell"]
                   and "elena.sousa" not in batch["personas"] and batch["complete"] is False, str(batch))
             code = (h.duo.bypass.get(elena) or [{}])[-1] if made else {}
@@ -1779,7 +1783,7 @@ def test_bypass_lost_create_answer() -> None:
               rc == 1 and len(late) == 1 and mine2 and lost_row(h, "elena.sousa") in out
               and "CHANGED  instance 02" in out
               and "the ids of elena.sousa's codes could not be told apart from another room's, so this tool cannot "
-                  f"revoke them: they expire at {lost_until(h)}" in out
+                  f"revoke them: they expire at {listed_until(h)}" in out
               and [u.get("persona") for u in b1.get("unknown") or [] if isinstance(u, dict)] == ["elena.sousa"]
               and [u.get("persona") for u in b2.get("unknown") or [] if isinstance(u, dict)] == ["elena.sousa"]
               and not {late[0], mine2} & set(recorded_ids(h)), str((b1, b2)) + out)
@@ -1791,7 +1795,7 @@ def test_bypass_lost_create_answer() -> None:
               rc == 0 and len(deleted) == 5 and not {late[0], mine2} & deleted
               and {late[0], mine2} <= set(live_ids(h, "elena.sousa"))
               and f"elena.sousa on instance 01, until {lost_until(h)}" in out
-              and f"elena.sousa on instance 02, until {lost_until(h)}" in out
+              and f"elena.sousa on instance 02, until {listed_until(h)}" in out
               and "every batch these cards had is deleted" not in out, out)
 
     print("== down once the unknown codes have expired: it still does not say every batch was deleted ==")
@@ -1800,9 +1804,10 @@ def test_bypass_lost_create_answer() -> None:
         h.duo.fail[("POST", f"/admin/v1/users/{uid_of(h, 'elena.sousa')}/bypass_codes")] = socket_timeout()
         rc, out = h.run("up", "--only", "1")
         h.duo.fail.clear()
-        h.clock.t += 12 * 3600 + 120
+        h.clock.t += 12 * 3600 + lb.LOST_MARGIN_S + 120
         rc, out = h.run("down", "--only", "1")
-        check("after valid_secs, down says nothing is still valid, including the codes whose ids it did not know",
+        check("after valid_secs (and the lost answer's margin), down says nothing is still valid, including the "
+              "codes whose ids it did not know",
               rc == 0 and "every batch these cards had is deleted" not in out
               and "none of these cards' codes is still valid" in out and "whose ids lab5-setup did not know" in out, out)
 
@@ -1822,7 +1827,14 @@ def gateway_error(status: int) -> RuntimeError:
 
 def lost_until(h: Harness) -> str:
     """When the codes of a create without a usable answer expire, as the rows print it: valid_hours (12) from
-    the fake clock, rounded up to the minute so it is never before the codes' own expiry."""
+    the fake clock plus LOST_MARGIN_S (Duo may finish the create after the tool stopped waiting), rounded up to
+    the minute so it is never before the codes' own expiry."""
+    return lp.minute(math.ceil((h.clock() + 12 * 3600 + lb.LOST_MARGIN_S) / 60.0) * 60.0)
+
+
+def listed_until(h: Harness) -> str:
+    """When codes expire whose create returned but whose ids a listing could not tell apart: valid_hours (12)
+    from the fake clock, rounded up to the minute (no lost-answer margin: the answer came back)."""
     return lp.minute(math.ceil((h.clock() + 12 * 3600) / 60.0) * 60.0)
 
 
@@ -1867,6 +1879,110 @@ def test_signin_policy_docs() -> None:
           and "lab5-setup handouts" in runbook)
 
 
+def _row(out: str, status: str, label: str) -> str:
+    """The report line ``<status> <label> ...`` (empty when there is none)."""
+    return next((line for line in out.splitlines() if line.split()[:3] == [status, *label.split()]), "")
+
+
+def test_bypass_down_then_up() -> None:
+    print("== down deletes a card's codes: status and check say so, and up issues a fresh batch ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        auth = duo.AuthAPI(h.duo.transport("auth", *tls_vpn()), API_HOST)
+        rc, out = h.run("up")
+        dead = card_codes(h.handout()["l5-acme-01"])
+        kept02 = card_codes(h.handout()["l5-acme-02"])
+        rc, out = h.run("down", "--only", "1")
+        check("down --only 1 deletes card 01's codes (the tool's own hint when a box's app is stuck)",
+              rc == 0 and "deleted 4 bypass code(s)" in out
+              and all(auth.auth_passcode(n, c[0], "198.51.100.200", "ATTENDEE-LAPTOP")["result"] == "deny"
+                      for n, c in dead.items()), out)
+        check("... and records when, on the batch the card carries",
+              all(b.get("revoked_at") for b in record(h, "01")["bypass_batches"]), str(record(h, "01")))
+        rc, out = h.run("status")
+        row = _row(out, "FAIL", "instance 01")
+        check("status after down: card 01 fails, its codes revoked (never 'valid until'), card 02 still OK",
+              rc == 1 and "`lab5-setup down` revoked its codes at" in row and "print the card again" in row
+              and _row(out, "OK", "instance 02"), out)
+        rc, out = h.run("check")
+        check("check: up would issue card 01 a fresh batch, and says why",
+              "`lab5-setup down` revoked its codes, so none on the card works: issue" in _row(out, "PLAN", "instance 01"),
+              out)
+        posts = len(bypass_posts(h))
+        rc, out = h.run("up", "--only", "1")
+        fresh = card_codes(h.handout()["l5-acme-01"])
+        check("up --only 1 issues card 01 a fresh batch (CHANGED: print it again), never keeps the dead one",
+              rc == 0 and "`lab5-setup down` revoked its codes" in _row(out, "CHANGED", "instance 01")
+              and len(bypass_posts(h)) == posts + 4 and fresh != dead and "kept: valid until" not in out, out)
+        check("... whose codes work, while card 02's batch is untouched",
+              all(auth.auth_passcode(n, c[0], "198.51.100.200", "ATTENDEE-LAPTOP")["result"] == "allow"
+                  for n, c in fresh.items() if n != "avery.kim")
+              and card_codes(h.handout()["l5-acme-02"]) == kept02)
+        rc, out = h.run("status")
+        check("status: card 01 is OK again", _row(out, "OK", "instance 01") and rc == 0, out)
+        rc, out = h.run("down")
+        rc, out = h.run("up")
+        check("a full down then up: every card gets a fresh batch",
+              rc == 0 and sum(1 for line in out.splitlines() if "`lab5-setup down` revoked its codes" in line) == 2,
+              out)
+
+
+def test_bypass_unreadable_record() -> None:
+    print("== a participant record that cannot be read fails that card in down, never the run, never 'all deleted' ==")
+    for name, damage in (("truncated", lambda path: path.write_text(path.read_text()[:40])),
+                         ("a JSON array", lambda path: path.write_text("[]")),
+                         ("unreadable (mode 000)", lambda path: os.chmod(path, 0))):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(Path(tmp))
+            rc, out = h.run("up")
+            codes02 = card_codes(h.handout()["l5-acme-02"])
+            path = h.root / "workshops" / "acme" / "participants" / "01.json"
+            damage(path)
+            try:
+                rc, out = h.run("down")
+            except Exception as exc:  # noqa: BLE001
+                rc, out = -1, f"raised {type(exc).__name__}: {exc}"
+            finally:
+                os.chmod(path, 0o600)
+            auth = duo.AuthAPI(h.duo.transport("auth", *tls_vpn()), API_HOST)
+            check(f"[{name}] down finishes: card 01 FAILs, card 02's codes are deleted, RESULT printed (exit 1)",
+                  rc == 1 and _row(out, "FAIL", "instance 01") and "RESULT: down:" in out
+                  and "persona bypass codes not deleted on 1 card(s) (instance 01)" in out
+                  and all(auth.auth_passcode(n, c[0], "198.51.100.200", "ATTENDEE-LAPTOP")["result"] == "deny"
+                          for n, c in codes02.items()), out)
+            check(f"[{name}] ... and down never says every batch was deleted: it names the record it cannot read",
+                  "every batch these cards had is deleted" not in out
+                  and "the participant record of instance 01 cannot be read" in out, out)
+
+
+def test_bypass_valid_until_after_creates() -> None:
+    print("== a card's time is taken after its last create: never earlier than a code's own expiry ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        start = h.clock()
+        h.duo.bypass_hooks.append(lambda uid: h.clock.sleep(20.0))      # every create takes 20 s
+        rc, out = h.run("up")
+        made = [c for cs in h.duo.bypass.values() for c in cs]
+        rows = h.handout()
+        untils = {r["instance"]: lp.parse_time(r["bypass_valid_until"]) for r in rows.values()}
+        recorded = {nn: lp.parse_time(record(h, nn)["bypass_batches"][-1]["valid_until"]) for nn in ("01", "02")}
+        own = {r["instance"]: max(c["expiration"] for c in made
+                                  if c["code"] in {x for codes in card_codes(r).values() for x in codes})
+               for r in rows.values()}
+        last = max(c["expiration"] for c in made)
+        check("with slow creates, each card's time (and its record's) is at or after its own codes' expiry",
+              rc == 0 and len(made) == 8 and all(untils[nn] >= own[nn] for nn in own) and recorded == untils
+              and untils["02"] > start + 12 * 3600 + 60, f"{untils} {own} {start}")
+        h.duo.bypass_hooks.clear()
+        h.duo.fail[("DELETE", "/admin/v1/bypass_codes/")] = DuoFailure(500, 50000, "Internal error")
+        h.clock.t = last - 30               # past a start-of-run stamp, before the codes' own expiry
+        rc, out = h.run("down")
+        check("down while DELETEs fail and the codes are still live: it never says they have all expired",
+              rc == 1 and any(h.duo.live_codes(n) for n in CARD_PERSONAS)
+              and "every batch these cards had is deleted or has expired" not in out
+              and "stay valid until" in out, out)
+
+
 def main() -> int:
     for test in (test_units, test_up_creates_participants, test_check_and_refusals, test_expire,
                  test_expire_after_up_cleans_the_handout, test_signin_user_access_docs,
@@ -1874,7 +1990,8 @@ def main() -> int:
                  test_old_handout_gets_codes, test_bypass_persona_status, test_bypass_errors_are_per_card,
                  test_bypass_settings_change_reissues, test_bypass_revocation, test_bypass_persona_groups,
                  test_handouts_revoke_waits_for_the_new_batch, test_duo_transport_errors, test_contained_victim,
-                 test_bypass_locked_out_is_temporary, test_bypass_lost_create_answer, test_signin_policy_docs):
+                 test_bypass_locked_out_is_temporary, test_bypass_lost_create_answer, test_signin_policy_docs,
+                 test_bypass_down_then_up, test_bypass_unreadable_record, test_bypass_valid_until_after_creates):
         try:
             test()
         except Exception as exc:  # noqa: BLE001
