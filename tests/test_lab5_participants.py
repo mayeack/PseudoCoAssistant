@@ -1962,6 +1962,35 @@ def test_bypass_unreadable_record() -> None:
                   and "the participant record of instance 01 cannot be read" in out, out)
 
 
+def test_bypass_odd_record() -> None:
+    print("== a participant record holding a batch this tool did not write: down reports it, never a traceback ==")
+    import json
+    for name, bad in (("ids that is a number", {"persona": "avery.kim", "user_id": "U1", "ids": 5}),
+                      ("an entry that is a string", "DU1")):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(Path(tmp))
+            rc, out = h.run("up")
+            codes = card_codes(h.handout()["l5-acme-01"])
+            path = h.root / "workshops" / "acme" / "participants" / "01.json"
+            rec = json.loads(path.read_text())
+            rec["bypass_batches"].insert(0, dict(rec["bypass_batches"][0], id="hand-edited", codes=[bad]))
+            path.write_text(json.dumps(rec))
+            try:
+                rc, out = h.run("down")
+            except Exception as exc:  # noqa: BLE001
+                rc, out = -1, f"raised {type(exc).__name__}: {exc}"
+            auth = duo.AuthAPI(h.duo.transport("auth", *tls_vpn()), API_HOST)
+            check(f"[{name}] down finishes (exit 1): the odd batch is named for fixing, the card's real batch is "
+                  "still deleted",
+                  rc == 1 and "RESULT: down:" in out and "which this tool did not write" in out
+                  and f"fix {path}" in out
+                  and all(auth.auth_passcode(n, c[0], "198.51.100.200", "ATTENDEE-LAPTOP")["result"] == "deny"
+                          for n, c in codes.items()), out)
+            check(f"[{name}] ... and down never says every batch was deleted",
+                  "every batch these cards had is deleted" not in out
+                  and "the participant record of instance 01 cannot be read" in out, out)
+
+
 def test_victim_clash_codes_and_handouts() -> None:
     print("== another workshop still holding the victim: handouts refuses it too, and codes a swap left count ==")
     with tempfile.TemporaryDirectory() as tmp:
@@ -2125,7 +2154,7 @@ def main() -> int:
                  test_bypass_settings_change_reissues, test_bypass_revocation, test_bypass_persona_groups,
                  test_handouts_revoke_waits_for_the_new_batch, test_duo_transport_errors, test_contained_victim,
                  test_bypass_locked_out_is_temporary, test_bypass_lost_create_answer, test_signin_policy_docs,
-                 test_bypass_down_then_up, test_bypass_unreadable_record,
+                 test_bypass_down_then_up, test_bypass_unreadable_record, test_bypass_odd_record,
                  test_victim_clash_codes_and_handouts, test_bypass_valid_until_after_creates,
                  test_half_made_participant, test_expire_crash_notifies, test_docs_define_their_terms):
         try:

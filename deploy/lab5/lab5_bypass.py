@@ -70,7 +70,10 @@ treated as having no working codes: ``up`` issues a fresh batch for it, and
 ``check`` and ``status`` say why (the card itself still shows the codes that
 were printed). A participant record that cannot be read (not JSON, not a JSON
 object, unreadable) fails that card's revocation and keeps ``down`` from
-saying every batch was deleted; it never stops the run.
+saying every batch was deleted; it never stops the run. So does a batch this
+tool did not write (a field of the wrong type, from a hand edit:
+``batch_problem``), whose codes are never read as gone; the card's other
+batches are still deleted.
 
 **When a batch stops.** Duo counts ``valid_secs`` from when it makes each
 code, so a card's (and the record's) ``valid_until`` is taken after the last
@@ -477,7 +480,8 @@ def victim_had_codes(env: participants.Env, personas: Sequence[Persona]) -> bool
         except (ValueError, OSError):
             continue
         batches = rec.get("bypass_batches") if isinstance(rec, dict) else None
-        if any(isinstance(b, dict) and victim in (b.get("personas") or []) for b in batches or []):
+        if any(isinstance(b, dict) and isinstance(b.get("personas"), list) and victim in b["personas"]
+               for b in (batches if isinstance(batches, list) else [])):
             return True
     return False
 
@@ -843,7 +847,12 @@ def _revoke_card(env: participants.Env, nn: str, now: float, keep: Optional[str]
     label = f"instance {nn}"
     path = env.record_path(nn)
     rec = _read_record(path)
-    batches = [b for b in _batches(rec) if not (keep and b.get("id") == keep)]
+    raw = rec.get("bypass_batches")
+    if raw is not None and not isinstance(raw, list):
+        raise ValueError(f"{Path(path).name}: bypass_batches is not a list")
+    batches = [b for b in raw or [] if not (keep and isinstance(b, dict) and b.get("id") == keep)]
+    odd = [problem for problem in map(batch_problem, batches) if problem]     # never read as holding nothing
+    batches = [b for b in batches if not batch_problem(b)]
     deleted = gone = 0
     errors: List[str] = []
     loose: List[str] = []
@@ -906,10 +915,15 @@ def _revoke_card(env: participants.Env, nn: str, now: float, keep: Optional[str]
     elif gone:
         rows.append(("OK", label, f"the {gone} recorded bypass code(s) of {scope} were used up, expired or deleted "
                                   "already"))
-    elif not loose:
+    elif not loose and not odd:
         rows.append(("OK", label, f"no recorded bypass code of {scope} to delete"))
     rows += [("WARN", label, text) for text in loose]
-    return rows, not errors
+    if odd:
+        rows.append(("FAIL", label, f"its participant record holds {odd[0]}" + (f" (and {len(odd) - 1} more)"
+                                                                                 if len(odd) > 1 else "")
+                     + f", which this tool did not write, so none of that batch's codes was deleted: fix {path}, "
+                       "then re-run"))
+    return rows, not errors and not odd
 
 
 def _revoke_guarded(env: participants.Env, nn: str, now: float, keep: Optional[str],
@@ -922,8 +936,9 @@ def _revoke_guarded(env: participants.Env, nn: str, now: float, keep: Optional[s
 
 def pending(root: Path, workshop: str, numbers: Sequence[str]) -> List[str]:
     """The instances whose participant record still lists code ids to delete,
-    or cannot be read (not JSON, not an object, unreadable): revoke() reports
-    each of those as not deleted."""
+    or cannot be read (not JSON, not an object, unreadable, or a batch this
+    tool did not write: ``record_problem``): revoke() reports each of those as
+    not deleted."""
     out: List[str] = []
     for nn in numbers:
         try:
@@ -931,7 +946,7 @@ def pending(root: Path, workshop: str, numbers: Sequence[str]) -> List[str]:
         except (ValueError, OSError):
             out.append(nn)
             continue
-        if any(e.get("ids") for b in _batches(rec) for e in _entries(b)):
+        if record_problem(rec) or any(e.get("ids") for b in _batches(rec) for e in _entries(b)):
             out.append(nn)
     return out
 
@@ -964,11 +979,15 @@ def down_note(root: Path, workshop: str, now: float, numbers: Sequence[str]) -> 
     for nn in numbers:
         path = _record_path(root, workshop, nn)
         try:
-            batches = _batches(_read_record(path))
+            rec = _read_record(path)
         except (ValueError, OSError):
             if path.exists():
                 unreadable.append(nn)
             continue
+        if record_problem(rec):              # a batch this tool did not write: nothing known about its codes
+            unreadable.append(nn)
+            continue
+        batches = _batches(rec)
         for batch in batches:
             seen = True
             until = participants.parse_time(str(batch.get("valid_until") or ""))
@@ -984,8 +1003,9 @@ def down_note(root: Path, workshop: str, now: float, numbers: Sequence[str]) -> 
                     latest = expires if latest is None or expires > latest else latest
     if unreadable:
         # Never "every batch is deleted": nothing is known about these cards' codes.
-        return (f"Persona bypass codes: the participant record of instance {', '.join(unreadable)} cannot be read, "
-                "so lab5-setup cannot say whether its codes were deleted. Any it issued stop working at most "
+        return (f"Persona bypass codes: the participant record of instance {', '.join(unreadable)} cannot be read "
+                "(or holds a batch lab5-setup did not write), so lab5-setup cannot say whether its codes were "
+                "deleted. Any it issued stop working at most "
                 f"{RANGES['valid_hours'][1]} hours (bypass_codes.valid_hours) after they were issued; restore the "
                 f"record under {Path(root) / 'workshops' / workshop / 'participants'} and re-run down to delete them")
     if not seen:
