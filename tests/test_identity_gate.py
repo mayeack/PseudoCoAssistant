@@ -408,7 +408,7 @@ def _status(**over):
 
 
 def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
-    print("CII 'no such user': read from the answer's shape, never from the wording of just any error")
+    print("CII 'no such user': read from the answer's shape alone; no error is ever one, whatever it says")
     _configure(True)
     fake = _fresh_fake()
     fake.set_user("avery.kim", trust="UNTRUSTED", failing=["MFA Flood", "Impossible Travel"])

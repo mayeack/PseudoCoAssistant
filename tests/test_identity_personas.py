@@ -555,10 +555,6 @@ def test_cii_client() -> None:
     # reach it. The rule reads no constant: it is the answer's shape alone.
     app_tree, mac_tree = ast.parse(app_src), ast.parse((ROOT / "deploy" / "lab5" / "lab5_cii.py").read_text())
 
-    def assigned(tree, name):
-        return next(node.value for node in ast.walk(tree)
-                    if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == name for t in node.targets))
-
     def function(tree, name):
         return next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == name)
 

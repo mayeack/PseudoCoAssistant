@@ -362,7 +362,7 @@
       }
     },
     {
-      "name": "the right words with a code that says otherwise",
+      "name": "a not-found message with a FORBIDDEN code (an error, so never 'no such user')",
       "expect": "unavailable",
       "body": {
         "data": {
@@ -480,7 +480,7 @@
       }
     },
     {
-      "name": "AppSync's errorType Unauthorized, with the right words",
+      "name": "AppSync's errorType Unauthorized on a not-found message (an error, so never 'no such user')",
       "expect": "unavailable",
       "body": {
         "data": {
@@ -498,7 +498,7 @@
       }
     },
     {
-      "name": "errorType Unauthorized in extensions, with the right words",
+      "name": "errorType Unauthorized in extensions on a not-found message (an error, so never 'no such user')",
       "expect": "unavailable",
       "body": {
         "data": {
@@ -518,7 +518,7 @@
       }
     },
     {
-      "name": "a not-found code next to an Unauthorized errorType (every code must say not found)",
+      "name": "a NOT_FOUND code next to an Unauthorized errorType (an error, so never 'no such user')",
       "expect": "unavailable",
       "body": {
         "data": {
@@ -539,7 +539,7 @@
       }
     },
     {
-      "name": "the right words within the first 1000 characters of a long message (an error, so never 'no such user')",
+      "name": "a long message that opens with a not-found sentence (an error, so never 'no such user')",
       "expect": "unavailable",
       "body": {
         "data": {
@@ -556,7 +556,7 @@
       }
     },
     {
-      "name": "the right words only after the first 1000 characters",
+      "name": "a long message whose not-found sentence comes last (an error, so never 'no such user')",
       "expect": "unavailable",
       "body": {
         "data": {
