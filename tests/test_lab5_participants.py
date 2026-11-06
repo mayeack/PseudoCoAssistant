@@ -35,11 +35,16 @@ What it pins:
     handout lock that times out fails only its card, and up still prints its
     RESULT, the handout, the password links and the reminders (exit 1, not
     2), recording a partial batch as incomplete; each batch records the ids
-    that Duo lists as new around each create (none when that is ambiguous),
-    `down` and `handouts --revoke` delete exactly those, and `expire` none;
-    a create whose answer is lost is checked by listing again: exactly count
-    new ids are recorded (down deletes them), and a listing that fails too
-    records unknown ids, which down names instead of claiming all deleted;
+    that Duo lists as new around a create that returned its codes (unknown
+    when that is ambiguous), `down` and `handouts --revoke` delete exactly
+    those, and `expire` none;
+  * a create without a usable answer (a timeout before or after Duo made the
+    codes, an answer cut off, a 502/503/504, a malformed 200) is never listed
+    again: its persona's ids are unknown for that card, its row says, in one
+    wording, when any codes it made expire and that the tool cannot revoke
+    them, and `down` and `handouts --revoke` delete none of them (another
+    room's codes for the same persona included, and a late commit's), say
+    when they expire, and never claim every batch was deleted;
   * a room persona in a Duo group whose status is Bypass or Disabled (read
     with GET /admin/v1/users/{id}/groups, in either case) stops every card's
     batch like one that is not active, and `status` names the group;
@@ -47,7 +52,8 @@ What it pins:
     batch is on the card and recorded: a card whose new batch failed keeps
     them, and only the cards that changed are named for printing;
   * a Duo call without a usable answer (IncompleteRead, TLS, timeout,
-    unreadable JSON) is a DuoError that never repeats the answer, and `up`,
+    unreadable JSON, a 5xx) is a lost DuoError that never repeats the answer
+    or says Duo could not be reached, a 4xx refusal is not lost, and `up`,
     `handouts` and `down` still print their RESULT and closing lines;
   * the room's victim, disabled after this workshop gave it codes (the lab's
     containment), is skipped: the trusted personas' codes go on and nothing
@@ -66,9 +72,10 @@ import re
 import stat
 import sys
 import tempfile
+import math
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
@@ -967,14 +974,17 @@ def test_bypass_errors_are_per_card() -> None:
         h.duo.bypass_hooks.append(second_marcus)
         rc, out = h.run("up")
         cards = {r["instance"]: card_codes(r) for r in h.handout().values()}
-        check("a Duo error halfway through one card: that card fails, the other gets its batch, up finishes (exit 1)",
+        check("a Duo error (a 500) halfway through one card: that card fails, the other gets its batch, up finishes "
+              "(exit 1)",
               rc == 1 and _up_finished(out) and list(cards["01"]) == CARD_PERSONAS and cards["02"] == {}
               and "persona bypass codes failed on 1 card(s) (instance 02)" in out
-              and "bypass codes not issued for elena.sousa" in out, out)
+              and lost_row(h, "elena.sousa") in out, out)
         partial = record(h, "02")["bypass_batches"][-1]
         ids = [i for e in partial["codes"] for i in e["ids"]]
-        check("... its partial batch is recorded as incomplete, with the ids of the 2 codes Duo did issue",
+        check("... its partial batch is recorded as incomplete, with the ids of the 2 codes Duo did issue, and the "
+              "500's persona as unknown (a 5xx may come after Duo acted)",
               partial["complete"] is False and partial["personas"] == ["avery.kim", "marcus.bell"] and len(ids) == 2
+              and [u["persona"] for u in partial["unknown"]] == ["elena.sousa"]
               and "recorded as an incomplete batch" in out, str(partial))
         check("... and no code is printed or logged", not any(c in out or c in text_of_logs(h.root)
                                                                 for c in h.duo.issued_codes))
@@ -1062,7 +1072,7 @@ def test_bypass_revocation() -> None:
             held = {e["persona"]: sorted(code_value(h, i) for i in e["ids"]) for e in batch["codes"]}
             check(f"[{nn}] the record holds exactly the ids of the codes on its card, per persona",
                   held == {p: sorted(c) for p, c in card_codes(rows[f"l5-acme-{nn}"]).items()}
-                  and batch["untracked"] == [] and batch["complete"] is True, str(batch))
+                  and batch["unknown"] == [] and batch["complete"] is True, str(batch))
         calls = h.duo.calls
         bracketed = all(i > 0 and calls[i - 1][1:3] == ("GET", p) and calls[i + 1][1:3] == ("GET", p)
                         for i, (_, m, p, _) in enumerate(calls) if m == "POST" and p.endswith("/bypass_codes"))
@@ -1099,10 +1109,12 @@ def test_bypass_revocation() -> None:
                                   else None)     # another room's create lands between the two listings
         rc, out = h.run("up", "--only", "1")
         batch = record(h, "01")["bypass_batches"][-1]
-        check("another room's create between the listings: no id recorded for that persona, the others' are",
-              rc == 0 and batch["untracked"] == ["marcus.bell"] and theirs
+        until = lp.minute(lp.parse_time(batch["unknown"][0]["until"])) if batch["unknown"] else "?"
+        check("another room's create between the listings: that persona's ids are unknown, the others' are recorded",
+              rc == 0 and [u["persona"] for u in batch["unknown"]] == ["marcus.bell"] and theirs
               and sorted(e["persona"] for e in batch["codes"]) == ["avery.kim", "elena.sousa", "grace.lin"]
-              and "could not be told apart from another room's" in out, str(batch) + out)
+              and "the ids of marcus.bell's codes could not be told apart from another room's, so this tool cannot "
+                  f"revoke them: they expire at {until}" in out, str(batch) + out)
         mine = card_codes(h.handout()["l5-acme-01"])["marcus.bell"][0]
         rc, out = h.run("down", "--only", "1")
         auth = duo.AuthAPI(h.duo.transport("auth", *tls_vpn()), API_HOST)
@@ -1110,7 +1122,9 @@ def test_bypass_revocation() -> None:
               rc == 0 and "deleted 3 bypass code(s)" in out and theirs[0] in [c["bypass_code_id"] for c in
                                                                          h.duo.live_codes("marcus.bell")]
               and auth.auth_passcode("marcus.bell", mine, "198.51.100.200", "ATTENDEE-LAPTOP")["result"] == "allow"
-              and "marcus.bell: the codes of the batch issued" in out
+              and "marcus.bell (batch issued " in out and f"any such code expires at {until}" in out
+              and f"marcus.bell on instance 01, until {until}" in out
+              and "every batch these cards had is deleted" not in out
               and "Persona bypass codes that lab5-setup could not delete stay valid until" in out, out)
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -1347,6 +1361,42 @@ def test_duo_transport_errors() -> None:
     check("a refusal keeps Duo's status and code, also when duo_client leaves its body parsed",
           got == (400, 40003), str(got))
 
+    def create_error(exc: BaseException) -> duo.DuoError:
+        try:
+            duo.AdminAPI(_Broken(exc), API_HOST).create_bypass_codes("DU0000000001", 1, 5, 3600)
+        except duo.DuoError as err:
+            return err
+        raise AssertionError("create_bypass_codes returned")
+    lost = [socket.timeout("timed out"), ConnectionResetError(54, "reset"), http.client.IncompleteRead(b"", 2),
+            gateway_error(502), gateway_error(503), gateway_error(504), DuoFailure(500, 50000, "Internal error"),
+            bad, json.JSONDecodeError("Expecting value", "", 0)]
+    check("a create without a usable answer is a lost DuoError: a transport error, an answer cut off, a 5xx "
+          "(a gateway's 502/503/504 included), an unreadable 200",
+          all(create_error(exc).lost for exc in lost), str([(type(e).__name__, create_error(e).lost) for e in lost]))
+    try:
+        duo.AdminAPI(_Broken(AssertionError("never called")), API_HOST).create_bypass_codes("DU0000000001", 0, 5, 60)
+        early = None
+    except duo.DuoError as err:
+        early = err
+    check("a refusal (4xx) and a check made before the call are not lost: nothing was made",
+          not create_error(DuoFailure(400, 40002, "Invalid request parameters")).lost
+          and not create_error(DuoFailure(429, 42901, "Too Many Requests")).lost and early is not None
+          and not early.lost)
+    said = {}
+    for method, call in (("GET", lambda api: api.page("/admin/v1/users")),
+                         ("POST", lambda api: api.create_bypass_codes("DU0000000001", 1, 5, 3600)),
+                         ("DELETE", lambda api: api.delete_bypass_code("DB0000000001"))):
+        for exc in (socket.timeout("timed out"), ConnectionRefusedError(61, "refused"), ssl.SSLError(1, "x")):
+            try:
+                call(duo.AdminAPI(_Broken(exc), API_HOST))
+            except duo.DuoError as err:
+                said[(method, type(exc).__name__)] = str(err)
+    check("no transport error says Duo could not be reached; one on a POST or DELETE says whether it took effect is "
+          "unknown",
+          len(said) == 9 and not any("cannot reach" in text for text in said.values())
+          and all("whether the call took effect is unknown" in text for (m, _), text in said.items() if m != "GET")
+          and all("no answer from Duo (" in text for (m, _), text in said.items() if m == "GET"), str(said))
+
     with tempfile.TemporaryDirectory() as tmp:
         h = Harness(Path(tmp))
         marcus, elena = (h.duo.by_name(n)["user_id"] for n in ("marcus.bell", "elena.sousa"))
@@ -1361,17 +1411,18 @@ def test_duo_transport_errors() -> None:
         batch = record(h, "02")["bypass_batches"][-1]
         check("up: an IncompleteRead halfway through card 02 fails that card only, and up prints its RESULT, the "
               "handout, the password links and the reminders (exit 1, no traceback)",
-              rc == 1 and _up_finished(out) and "(IncompleteRead)" in out
+              rc == 1 and _up_finished(out) and lost_row(h, "elena.sousa") in out
               and "persona bypass codes failed on 1 card(s) (instance 02)" in out
               and list(card_codes(h.handout()["l5-acme-01"])) == CARD_PERSONAS, out)
-        check("... and records what was issued: card 02's 2 codes, as an incomplete batch",
-              batch["complete"] is False and sum(len(e["ids"]) for e in batch["codes"]) == 2, str(batch))
+        check("... and records what was issued: card 02's 2 codes, as an incomplete batch, and elena.sousa as unknown",
+              batch["complete"] is False and sum(len(e["ids"]) for e in batch["codes"]) == 2
+              and [u["persona"] for u in batch["unknown"]] == ["elena.sousa"], str(batch))
 
         h.duo.fail.clear()
         h.duo.fail[("GET", "/admin/v1/users")] = ssl.SSLError(1, "[SSL] record layer failure")
         rc, out = h.run("handouts")
         check("handouts: a TLS error reading the personas fails each card; the handout line and RESULT still print",
-              rc == 1 and "cannot reach Duo (SSLError)" in out and out.count("no bypass codes issued") == 2
+              rc == 1 and "no answer from Duo (SSLError)" in out and out.count("no bypass codes issued") == 2
               and "no card changed, so there is nothing to print again" in out
               and "RESULT: handouts: 0 card(s) ok, 2 failed (instance 01, 02)" in out, out)
 
@@ -1400,8 +1451,11 @@ def test_duo_transport_errors() -> None:
               rc == 1 and "(JSONDecodeError)" in out and "persona bypass codes not deleted on 2 card(s)" in out, out)
         h.duo.fail.clear()
         rc, out = h.run("down")
-        check("... and a re-run deletes every recorded code", rc == 0 and lb.pending(h.root, "acme", ["01", "02"]) == []
-              and "every batch these cards had is deleted or has expired" in out, out)
+        check("... and a re-run deletes every recorded code, and names the cut-off create's codes instead of saying "
+              "every batch is deleted",
+              rc == 0 and lb.pending(h.root, "acme", ["01", "02"]) == []
+              and "every batch these cards had is deleted" not in out
+              and f"elena.sousa on instance 02, until {lost_until(h)}" in out, out)
 
     with tempfile.TemporaryDirectory() as tmp:
         h = Harness(Path(tmp))
@@ -1538,68 +1592,244 @@ def test_bypass_locked_out_is_temporary() -> None:
               and out.count("no bypass codes issued") == 2, out)
 
 
+def uid_of(h: Harness, name: str) -> str:
+    return h.duo.by_name(name)["user_id"]
+
+
+def recorded_ids(h: Harness, numbers: Tuple[str, ...] = ("01", "02")) -> List[str]:
+    """Every bypass code id these cards' participant records keep."""
+    return [i for nn in numbers for b in record(h, nn).get("bypass_batches") or [] for e in b.get("codes") or []
+            for i in e.get("ids") or []]
+
+
+def live_ids(h: Harness, name: str) -> List[str]:
+    return [c["bypass_code_id"] for c in h.duo.live_codes(name)]
+
+
+def relisted_after_post(h: Harness, path: str) -> bool:
+    """Did the tool list this persona's codes again after its last create?"""
+    last = max((i for i, (_, m, p, _) in enumerate(h.duo.calls) if m == "POST" and p == path), default=-1)
+    return any(m == "GET" and p == path for _, m, p, _ in h.duo.calls[last + 1:])
+
+
 def test_bypass_lost_create_answer() -> None:
-    print("== a create whose answer is lost: the ids are listed again, recorded, and down deletes them ==")
+    print("== a create without a usable answer: its persona's ids are unknown for the card, never listed again ==")
     import http.client
+    import ssl
+
+    def before_duo(exc: BaseException) -> Callable[[Harness, str], None]:
+        """The create never reaches Duo (or Duo fails it): nothing is made."""
+        return lambda h, path: h.duo.fail.__setitem__(("POST", path), exc)
+
+    def after_duo(make: Callable[[], BaseException]) -> Callable[[Harness, str], None]:
+        """Duo makes the code, then its answer is lost."""
+        def arm(h: Harness, path: str) -> None:
+            elena = uid_of(h, "elena.sousa")
+
+            def hook(uid: str) -> None:
+                if uid == elena:
+                    raise make()
+            h.duo.bypass_hooks.append(hook)
+        return arm
+
+    def not_the_codes(reshape: Callable[[List[str]], Any]) -> Callable[[Harness, str], None]:
+        """Duo makes the code and answers 200, with JSON that is not the codes."""
+        def arm(h: Harness, path: str) -> None:
+            real = h.duo.handle
+
+            def handle(kind: str, method: str, p: str, params: Dict[str, str]) -> Any:
+                result = real(kind, method, p, params)
+                return reshape(result) if (method, p) == ("POST", path) else result
+            h.duo.handle = handle  # type: ignore[method-assign]
+        return arm
+
+    def bad_200() -> RuntimeError:     # duo_client's 200 whose body is not JSON: the body is in its message
+        err = RuntimeError('Received bad response: {"stat": "OK", "response": ["40717')
+        err.status, err.reason, err.data = 200, "OK", '{"stat": "OK", "response": ["40717'
+        return err
+
+    cases = (("a timeout before the request reached Duo", before_duo(socket_timeout()), False),
+             ("a TLS error before the request reached Duo", before_duo(ssl.SSLError(1, "[SSL] handshake")), False),
+             ("a 500 from Duo", before_duo(DuoFailure(500, 50000, "Internal error")), False),
+             ("a timeout after Duo made the code", after_duo(socket_timeout), True),
+             ("an answer cut off after Duo made the code",
+              after_duo(lambda: http.client.IncompleteRead(b'["1', 20)), True),
+             ("a 502 after Duo made the code", after_duo(lambda: gateway_error(502)), True),
+             ("a 503 after Duo made the code", after_duo(lambda: gateway_error(503)), True),
+             ("a 504 after Duo made the code", after_duo(lambda: gateway_error(504)), True),
+             ("a malformed 200 (not JSON) after Duo made the code", after_duo(bad_200), True),
+             ("a 200 whose JSON is not the codes", not_the_codes(lambda codes: {"codes": codes}), True),
+             ("a 200 whose code is not numeric", not_the_codes(lambda codes: ["12ab"]), True))
+    sentences: Dict[str, str] = {}
+    for name, arm, made in cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(Path(tmp))
+            elena = uid_of(h, "elena.sousa")
+            path = f"/admin/v1/users/{elena}/bypass_codes"
+            arm(h, path)
+            rc, out = h.run("up", "--only", "1")
+            h.duo.fail.clear()
+            h.duo.bypass_hooks.clear()
+            h.duo.__dict__.pop("handle", None)
+            batch = record(h, "01")["bypass_batches"][-1]
+            unknown = [u for u in batch.get("unknown") or [] if isinstance(u, dict)]
+            until = lp.parse_time(str(unknown[0].get("until") or "")) if unknown else None
+            row = next((l for l in out.splitlines() if l.split()[:3] == ["FAIL", "instance", "01"]), "")
+            said = re.search(r"reached the card: (.*?)\. The card keeps", row)
+            sentences[name] = re.sub(r"\d{4}-\d\d-\d\d \d\d:\d\d UTC", "<time>", said.group(1) if said else row)
+            check(f"[{name}] card 01 fails with the lost answer's one wording, never 'cannot reach'",
+                  rc == 1 and lost_row(h, "elena.sousa") in out and "cannot reach" not in out
+                  and "persona bypass codes failed on 1 card(s) (instance 01)" in out, out)
+            check(f"[{name}] ... the tool lists nothing after the create, and records elena.sousa as unknown with "
+                  "when its codes expire; the codes issued before it keep their ids",
+                  not relisted_after_post(h, path)
+                  and [(u.get("persona"), u.get("user_id")) for u in unknown] == [("elena.sousa", elena)]
+                  and until == math.ceil((h.clock() + 12 * 3600) / 60.0) * 60.0
+                  and [e["persona"] for e in batch["codes"]] == ["avery.kim", "marcus.bell"]
+                  and "elena.sousa" not in batch["personas"] and batch["complete"] is False, str(batch))
+            code = (h.duo.bypass.get(elena) or [{}])[-1] if made else {}
+            check(f"[{name}] ... " + ("the code Duo made is attributed to no one, printed nowhere, and the time "
+                                      "given is not before its own expiry" if made else "Duo made no code"),
+                  (code.get("bypass_code_id") and code["bypass_code_id"] not in recorded_ids(h, ("01",))
+                   and code["code"] not in out and code["code"] not in text_of_logs(h.root) and "40717" not in out
+                   and until is not None and until >= code["expiration"]) if made
+                  else not h.duo.live_codes("elena.sousa"), str(code))
+            start = len(h.duo.calls)
+            rc, out = h.run("down", "--only", "1")
+            check(f"[{name}] down deletes the 2 recorded codes, none of elena.sousa's, says when those expire and "
+                  "never claims every batch is deleted",
+                  rc == 0 and "deleted 2 bypass code(s) of its batch(es)" in out and len(deletes_since(h, start)) == 2
+                  and (not made or code["bypass_code_id"] in live_ids(h, "elena.sousa"))
+                  and "elena.sousa (batch issued " in out and f"any such code expires at {lost_until(h)}" in out
+                  and f"elena.sousa on instance 01, until {lost_until(h)}" in out
+                  and "every batch these cards had is deleted" not in out, out)
+    check("one wording for every lost answer, whatever the cause",
+          set(sentences.values()) == {"Duo's answer was lost; any codes it made expire at <time> and cannot be revoked "
+                                      "by this tool"}, str(sentences))
+
+    print("== the cross-room race: our create never reaches Duo while another room issues the persona's codes ==")
     with tempfile.TemporaryDirectory() as tmp:
         h = Harness(Path(tmp))
-        elena = h.duo.by_name("elena.sousa")["user_id"]
-        seen: List[str] = []
+        elena = uid_of(h, "elena.sousa")
+        path = f"/admin/v1/users/{elena}/bypass_codes"
+        theirs: List[str] = []
 
-        def lost(uid: str) -> None:      # Duo makes elena.sousa's code for card 02, then the answer is cut off
-            seen.append(uid)
-            if uid == elena and seen.count(elena) == 2:
-                raise http.client.IncompleteRead(b'["1', 20)
-        h.duo.bypass_hooks.append(lost)
-        rc, out = h.run("up")
-        h.duo.bypass_hooks.clear()
-        batch = record(h, "02")["bypass_batches"][-1]
-        ids = {e["persona"]: e["ids"] for e in batch["codes"]}
-        on_cards = {c for r in h.handout().values() for cs in card_codes(r).values() for c in cs}
-        check("the lost answer: card 02 fails with Duo's answer lost and checked, not 'cannot reach Duo'",
-              rc == 1 and "Duo's answer was lost (IncompleteRead); checked which codes were created: 1" in out
-              and "cannot reach Duo" not in out and "(instance 02)" in out, out)
-        check("... the code Duo made is on no card, and its id is recorded under its persona",
-              len(ids.get("elena.sousa", [])) == 1 and code_value(h, ids["elena.sousa"][0])
-              and code_value(h, ids["elena.sousa"][0]) not in on_cards and batch["complete"] is False
-              and batch["unknown"] == [], str(batch))
-        rc, out = h.run("down", "--only", "2")
-        check("down deletes it with the rest of the incomplete batch",
-              rc == 0 and code_value(h, ids["elena.sousa"][0]) == "" and "deleted 3 bypass code(s)" in out
-              and "every batch these cards had is deleted or has expired" in out, out)
-
-    with tempfile.TemporaryDirectory() as tmp:
-        h = Harness(Path(tmp))
-        elena = h.duo.by_name("elena.sousa")["user_id"]
-        seen = []
-
-        def lost_twice(uid: str) -> None:  # the answer is lost, and the listing that checks it fails too
-            seen.append(uid)
-            if uid == elena and seen.count(elena) == 2:
-                h.duo.fail[("GET", f"/admin/v1/users/{elena}/bypass_codes")] = DuoFailure(500, 50000, "Internal error")
-                raise socket_timeout()
-        h.duo.bypass_hooks.append(lost_twice)
-        rc, out = h.run("up")
-        h.duo.bypass_hooks.clear()
+        def other_room(method: str, p: str) -> None:     # another room issues count codes for elena.sousa meanwhile
+            if (method, p) == ("POST", path) and not theirs:
+                theirs.extend(h.duo.add_bypass(elena, count=1, valid=12 * 3600))
+        h.duo.call_hooks.append(other_room)
+        h.duo.fail[("POST", path)] = socket_timeout()        # ours never reaches Duo
+        rc, out = h.run("up", "--only", "1")
+        h.duo.call_hooks.clear()
         h.duo.fail.clear()
-        batch = record(h, "02")["bypass_batches"][-1]
-        check("the check fails too: card 02 says so, and its batch records elena.sousa's ids as unknown",
-              rc == 1 and "Duo's answer was lost" in out and "that listing failed too" in out
-              and "their ids are unknown" in out and "cannot reach Duo" not in out
-              and batch["unknown"] == ["elena.sousa"] and "elena.sousa" not in [e["persona"] for e in batch["codes"]],
-              str(batch) + out)
-        lost_code = len(h.duo.live_codes("elena.sousa"))
+        check("up: card 01 fails with the lost answer; elena.sousa is unknown and the other room's new code is "
+              "attributed to no one (nothing is listed after the create)",
+              rc == 1 and len(theirs) == 1 and lost_row(h, "elena.sousa") in out
+              and [u.get("persona") for u in record(h, "01")["bypass_batches"][-1].get("unknown") or []
+                   if isinstance(u, dict)] == ["elena.sousa"]
+              and theirs[0] not in recorded_ids(h, ("01",)) and not relisted_after_post(h, path), out)
+        theirs_code = code_value(h, theirs[0])
+        start = len(h.duo.calls)
+        rc, out = h.run("handouts", "--only", "1", "--revoke")
+        check("handouts --only 1 --revoke: a new batch on card 01, the failed batch's 2 recorded codes deleted, "
+              "elena.sousa's named with when they expire, and the other room's code untouched",
+              rc == 0 and list(card_codes(h.handout()["l5-acme-01"])) == CARD_PERSONAS
+              and "deleted 2 bypass code(s) of its earlier batch(es)" in out
+              and f"any such code expires at {lost_until(h)}" in out
+              and theirs[0] not in [p.rsplit("/", 1)[1] for p in deletes_since(h, start)]
+              and try_code(h, "elena.sousa", theirs_code) == "allow", out)
+        start = len(h.duo.calls)
+        rc, out = h.run("down", "--only", "1")
+        check("down: the 4 codes on card 01 deleted, none of the other room's; it says when elena.sousa's unknown "
+              "codes expire and never claims every batch is deleted",
+              rc == 0 and len(deletes_since(h, start)) == 4 and theirs[0] in live_ids(h, "elena.sousa")
+              and try_code(h, "elena.sousa", theirs_code) == "allow"
+              and f"elena.sousa on instance 01, until {lost_until(h)}" in out
+              and "every batch these cards had is deleted" not in out, out)
+
+    print("== a late commit: Duo makes a lost create's code later, during the next card's create ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        elena = uid_of(h, "elena.sousa")
+        path = f"/admin/v1/users/{elena}/bypass_codes"
+        posts: List[str] = []
+        late: List[str] = []
+
+        def time_out_first(method: str, p: str) -> None:     # card 01's create for elena.sousa: no answer in time
+            if (method, p) == ("POST", path):
+                posts.append(p)
+                if len(posts) == 1:
+                    h.duo.fail[("POST", path)] = socket_timeout()
+                else:
+                    h.duo.fail.pop(("POST", path), None)
+
+        def commit_late(uid: str) -> None:                  # ... Duo commits it while card 02's create runs
+            if uid == elena and not late:
+                late.extend(h.duo.add_bypass(elena, count=1, valid=12 * 3600))
+        h.duo.call_hooks.append(time_out_first)
+        h.duo.bypass_hooks.append(commit_late)
+        rc, out = h.run("up")
+        h.duo.call_hooks.clear()
+        h.duo.bypass_hooks.clear()
+        b1, b2 = (record(h, nn)["bypass_batches"][-1] for nn in ("01", "02"))
+        card2 = card_codes(h.handout()["l5-acme-02"])
+        mine2 = next((c["bypass_code_id"] for c in h.duo.bypass[elena] if c["code"] == card2["elena.sousa"][0]), "")
+        check("card 01 fails with the lost answer; card 02 gets its batch, but 2 new ids for elena.sousa, not 1, "
+              "leave them unknown there too: neither the late code nor card 02's own is attributed",
+              rc == 1 and len(late) == 1 and mine2 and lost_row(h, "elena.sousa") in out
+              and "CHANGED  instance 02" in out
+              and "the ids of elena.sousa's codes could not be told apart from another room's, so this tool cannot "
+                  f"revoke them: they expire at {lost_until(h)}" in out
+              and [u.get("persona") for u in b1.get("unknown") or [] if isinstance(u, dict)] == ["elena.sousa"]
+              and [u.get("persona") for u in b2.get("unknown") or [] if isinstance(u, dict)] == ["elena.sousa"]
+              and not {late[0], mine2} & set(recorded_ids(h)), str((b1, b2)) + out)
+        start = len(h.duo.calls)
         rc, out = h.run("down")
-        check("down deletes what it recorded, names the unknown ids and never claims every batch is deleted",
-              "every batch these cards had is deleted or has expired" not in out
-              and "elena.sousa: Duo's answer to a create of the batch issued" in out
-              and "on instance 02, Duo's answer to a create was lost" in out
-              and len(h.duo.live_codes("elena.sousa")) == 1 == lost_code - 1, out)
+        deleted = {p.rsplit("/", 1)[1] for p in deletes_since(h, start)}
+        check("down: the 5 recorded codes deleted, neither elena.sousa code; it says when they expire on both cards "
+              "and never claims every batch is deleted",
+              rc == 0 and len(deleted) == 5 and not {late[0], mine2} & deleted
+              and {late[0], mine2} <= set(live_ids(h, "elena.sousa"))
+              and f"elena.sousa on instance 01, until {lost_until(h)}" in out
+              and f"elena.sousa on instance 02, until {lost_until(h)}" in out
+              and "every batch these cards had is deleted" not in out, out)
+
+    print("== down once the unknown codes have expired: it still does not say every batch was deleted ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        h.duo.fail[("POST", f"/admin/v1/users/{uid_of(h, 'elena.sousa')}/bypass_codes")] = socket_timeout()
+        rc, out = h.run("up", "--only", "1")
+        h.duo.fail.clear()
+        h.clock.t += 12 * 3600 + 120
+        rc, out = h.run("down", "--only", "1")
+        check("after valid_secs, down says nothing is still valid, including the codes whose ids it did not know",
+              rc == 0 and "every batch these cards had is deleted" not in out
+              and "none of these cards' codes is still valid" in out and "whose ids lab5-setup did not know" in out, out)
 
 
 def socket_timeout() -> OSError:
     import socket
     return socket.timeout("timed out")
+
+
+def gateway_error(status: int) -> RuntimeError:
+    """duo_client's error for a gateway's 5xx: the body is the gateway's page, not Duo's JSON."""
+    reason = {502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout"}[status]
+    err = RuntimeError(f"Received {status} {reason}")
+    err.status, err.reason, err.data = status, reason, f"<html><body>{status} {reason}</body></html>".encode()
+    return err
+
+
+def lost_until(h: Harness) -> str:
+    """When the codes of a create without a usable answer expire, as the rows print it: valid_hours (12) from
+    the fake clock, rounded up to the minute so it is never before the codes' own expiry."""
+    return lp.minute(math.ceil((h.clock() + 12 * 3600) / 60.0) * 60.0)
+
+
+def lost_row(h: Harness, persona: str) -> str:
+    """A card's row for a create without a usable answer: one wording, whatever the cause."""
+    return (f"no bypass code for {persona} reached the card: Duo's answer was lost; any codes it made expire at "
+            f"{lost_until(h)} and cannot be revoked by this tool")
 
 
 def test_signin_policy_docs() -> None:

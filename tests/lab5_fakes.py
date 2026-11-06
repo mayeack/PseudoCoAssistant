@@ -22,7 +22,10 @@ valid_secs 0 (the defaults) mean unlimited and never expiring; a GET returns
 metadata without the codes, and DELETE /admin/v1/bypass_codes/{id} deletes
 one (404 when there is none). ``add_bypass`` gives a user another room's codes,
 and ``bypass_hooks`` run after every create, so a test can have another room
-issue codes for the same persona between the tool's two listings. The Auth
+issue codes for the same persona between the tool's two listings; a hook that
+raises is an answer lost after Duo made the codes. ``call_hooks`` run with
+(method, path) as each call arrives, before ``fail``: another room acting
+while a call that never reaches Duo is in flight. The Auth
 API accepts a live code as a passcode, uses it up after reuse_count sign-ins,
 and refuses it once valid_secs passed.
 """
@@ -85,6 +88,7 @@ class FakeDuo:
         self.bypass: Dict[str, List[Dict[str, Any]]] = {}             # user_id -> its bypass codes
         self.issued_codes: List[str] = []                              # every bypass code ever returned
         self.bypass_hooks: List[Callable[[str], None]] = []            # run with the user_id after each create
+        self.call_hooks: List[Callable[[str, str], None]] = []         # run with (method, path) as a call arrives
         self._ids = itertools.count(1)
         self._codes = random.Random(4026)
         self.add_group("CII Read-Only", "Identity Intelligence read-only (auto-created)")
@@ -181,6 +185,8 @@ class FakeDuo:
         for value in params.values():
             assert isinstance(value, str), f"duo_client sends str params, got {type(value).__name__} for {path}"
         self.calls.append((kind, method, path, dict(params)))
+        for hook in list(self.call_hooks):
+            hook(method, path)
         for (m, prefix), err in list(self.fail.items()):
             if m == method and path.startswith(prefix):
                 raise err

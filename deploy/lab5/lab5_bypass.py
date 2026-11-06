@@ -49,19 +49,22 @@ module never reads their secrets or computes their passcodes.
   the ids of the codes it did issue.
 
 **Revocation.** Duo's create call returns only the code strings, without
-their ids. So each create is bracketed by two listings of the persona's
-bypass_code ids: exactly ``count`` new ids are this batch's and go in the
-participant record. Any other difference (another room issued codes for the
-same persona in between) records none for that persona: those codes stop only
-at ``valid_secs``. A create whose answer is lost (a timeout, an answer cut off
-or unreadable) may still have made its codes, which are then on no card: the
-ids are listed again and exactly ``count`` new ones are recorded the same way;
-if that listing fails too, the batch records the persona as ``unknown`` and
-``down`` says those codes were not deleted. ``down`` and ``handouts --revoke``
-delete the recorded ids with ``DELETE /admin/v1/bypass_codes/{id}``, and only ids that are still listed
-under the persona they were recorded for. ``valid_hours`` is capped at 72, so
-an untracked batch is dead long before ``expire`` disables a participant at
-day 7.
+their ids. So each create that returns its codes is bracketed by two listings
+of the persona's bypass_code ids: exactly ``count`` new ids are this batch's
+and go in the participant record. Any other difference (another room issued
+codes for the same persona in between), or a second listing that fails,
+records that persona's ids as ``unknown`` for the card. So does a create
+without a usable answer (lost or cut off, a 5xx, a malformed body): Duo may
+have made its codes, which are then on no card, and no listing can tell them
+from another room's codes for the same shared persona, so the tool never looks
+for them. Its row says "Duo's answer was lost; any codes it made expire at
+<time> and cannot be revoked by this tool", whatever the cause. ``down`` and
+``handouts --revoke`` delete the recorded ids with
+``DELETE /admin/v1/bypass_codes/{id}``, and only ids that are still listed
+under the persona they were recorded for; for an unknown entry they say when
+its codes expire, and ``down`` never says every batch was deleted.
+``valid_hours`` is capped at 72, so an unknown entry is dead long before
+``expire`` disables a participant at day 7.
 
 ``up`` issues a batch for each card that has none, whose batch has expired,
 whose batch names other personas (the victim was swapped), or whose batch was
@@ -74,8 +77,8 @@ only the cards that really changed are named for printing.
 """
 from __future__ import annotations
 
+import math
 import secrets
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -122,6 +125,11 @@ LOCKED = ("is locked out in Duo (too many failed sign-ins). Duo unlocks it on it
           "one: a card issued now goes without its codes (partial), and the other personas' codes go on. Retry "
           "`lab5-setup handouts <workshop.yaml> --only N` for those cards once it is unlocked (if it stays locked out, "
           "auto-revert is off: unlock it in the Admin Panel)")
+# A create without a usable answer (lost or cut off, a 5xx, a malformed body), whatever the cause: one wording.
+LOST = "Duo's answer was lost; any codes it made expire at {until} and cannot be revoked by this tool"
+# down and handouts --revoke, for a persona whose codes in a batch have no recorded ids (unknown).
+UNKNOWN_IDS = ("{persona} (batch issued {when}): this tool does not know the ids of its codes from that batch, so it "
+               "deleted none; any such code expires at {until}")
 
 Row = Tuple[str, str, str]
 Persona = Tuple[str, str]              # (role on the card: victim | trusted, username)
@@ -169,6 +177,10 @@ def describe(personas: Sequence[Persona], settings: Settings) -> str:
 
 def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
+
+
+def _when(ts: Optional[float]) -> str:
+    return participants.minute(ts) if ts is not None else "an unknown time"
 
 
 # =========================================================================== cards
@@ -384,14 +396,12 @@ def headroom_rows(admin: AdminAPI, users: Dict[str, Dict[str, Any]], needed: int
 
 
 def _record(env: participants.Env, nn: str, now: float, settings: Settings, entries: Sequence[Entry],
-            tracked: Dict[str, Tuple[str, List[str]]], untracked: Sequence[str], complete: bool,
-            unknown: Sequence[str] = ()) -> str:
+            tracked: Dict[str, Tuple[str, List[str]]], unknown: Sequence[Dict[str, str]], complete: bool) -> str:
     """The participant record keeps every batch's times and the ids of its
-    codes (never a code), so `down` and `handouts --revoke` can delete them
-    and `down` can say when an untracked one stops working after the handout
-    is gone. ``unknown``: personas whose create lost its answer and could not
-    be checked, so Duo may hold codes of theirs whose ids nobody knows.
-    Returns the batch's id in the record."""
+    codes (never a code), so `down` and `handouts --revoke` can delete them.
+    ``unknown``: one entry (persona, user_id, until) per create whose code
+    ids this tool does not know, so `down` can say when they expire after the
+    handout is gone. Returns the batch's id in the record."""
     path = env.record_path(nn)
     rec = read_json(path)
     batch_id = secrets.token_hex(4)
@@ -400,9 +410,38 @@ def _record(env: participants.Env, nn: str, now: float, settings: Settings, entr
         "personas": [name for _, name, _ in entries], "codes_each": settings.count,
         "reuse_count": settings.reuse_count, "valid_hours": settings.valid_hours, "complete": complete,
         "codes": [{"persona": name, "user_id": uid, "ids": ids} for name, (uid, ids) in tracked.items()],
-        "untracked": list(untracked), "unknown": list(unknown)})
+        "unknown": [dict(entry) for entry in unknown]})
     write_json_private(path, rec)
     return batch_id
+
+
+def _expiry(env: participants.Env, settings: Settings) -> float:
+    """When the codes of a create that has just ended stop working: Duo
+    counts valid_secs from when it made them, which is by the time its answer
+    came back or was lost. Rounded up to the minute the reports print, so
+    the time is never earlier than the codes' own."""
+    return math.ceil((env.now() + settings.valid_secs) / 60.0) * 60.0
+
+
+def _unknown(persona: str, uid: str, expires: float) -> Dict[str, str]:
+    """A record entry for a create whose code ids this tool does not know."""
+    return {"persona": persona, "user_id": uid, "until": _iso(expires)}
+
+
+def _unknown_entries(batch: Dict[str, Any]) -> List[Tuple[str, Optional[float]]]:
+    """(persona, when its codes expire) for each create of a recorded batch
+    whose code ids this tool does not know. A record written before each
+    entry carried its own time names only the persona (``unknown``, or
+    ``untracked`` for an ambiguous listing): those expire with the batch."""
+    batch_until = participants.parse_time(str(batch.get("valid_until") or ""))
+    out: List[Tuple[str, Optional[float]]] = []
+    for item in list(batch.get("unknown") or []) + list(batch.get("untracked") or []):
+        if isinstance(item, dict):
+            out.append((str(item.get("persona") or "?"),
+                        participants.parse_time(str(item.get("until") or "")) or batch_until))
+        else:
+            out.append((str(item), batch_until))
+    return out
 
 
 def _why_failed(exc: Lab5Error) -> str:
@@ -535,12 +574,19 @@ def _issue_card(env: participants.Env, nn: str, name: str, personas: Sequence[Pe
                 handout: participants.Handout, now: float, old: Optional[Batch],
                 reason: str, contained: Sequence[str] = (), locked: Sequence[str] = ()) -> _CardResult:
     """One card's batch for ``personas`` (the room's, less a contained victim
-    and any locked-out persona, which makes the card partial)."""
+    and any locked-out persona, which makes the card partial).
+
+    Only a create that returned its codes gets ids: exactly ``count`` new
+    ones between the listings just before and after it. Any other
+    difference, a second listing that fails, or a create without a usable
+    answer records that persona's ids as unknown for this card. After a lost
+    answer nothing is listed again: a listing cannot tell the codes Duo may
+    have made from another room's codes for the same shared persona."""
     label = f"instance {nn}"
     entries: List[Entry] = []
     tracked: Dict[str, Tuple[str, List[str]]] = {}
-    untracked: List[str] = []
-    unknown: List[str] = []
+    unknown: List[Dict[str, str]] = []
+    notes: List[str] = []              # why codes Duo made for this card cannot be revoked by this tool
     error = ""
     until = now + settings.valid_secs
     for role, persona in personas:
@@ -553,21 +599,28 @@ def _issue_card(env: participants.Env, nn: str, name: str, personas: Sequence[Pe
         try:
             codes = env.admin.create_bypass_codes(uid, settings.count, settings.reuse_count, settings.valid_secs)
         except Lab5Error as exc:
-            found = (_lost_answer(env.admin, uid, persona, before, settings, until, exc, tracked, untracked, unknown)
-                     if _answer_lost(exc) else _why_failed(exc))
-            error = f"bypass codes not issued for {persona}: {found}"
+            if not _answer_lost(exc):
+                error = f"bypass codes not issued for {persona}: {_why_failed(exc)}"
+                break
+            expires = _expiry(env, settings)
+            unknown.append(_unknown(persona, uid, expires))
+            error = f"no bypass code for {persona} reached the card: {LOST.format(until=participants.minute(expires))}"
             break
         for code in codes:
             redactor.add(code)
         entries.append((role, persona, codes))
         try:
             new = sorted(_code_ids(env.admin, uid) - before)
-        except Lab5Error:
-            new = []
+            why = "could not be told apart from another room's"
+        except Lab5Error as exc:
+            new, why = [], f"could not be listed after they were made ({exc})"
         if len(new) == settings.count:      # exactly this batch's: anything else is ambiguous
             tracked[persona] = (uid, new)
         else:
-            untracked.append(persona)
+            expires = _expiry(env, settings)
+            unknown.append(_unknown(persona, uid, expires))
+            notes.append(f"the ids of {persona}'s codes {why}, so this tool cannot revoke them: they expire at "
+                         f"{participants.minute(expires)}")
     written = False
     if not error:
         try:
@@ -580,64 +633,36 @@ def _issue_card(env: participants.Env, nn: str, name: str, personas: Sequence[Pe
             error = f"the handout was not written ({exc})"
     batch_id: Optional[str] = None
     unrecorded = ""
-    if entries or tracked or untracked or unknown:     # a lost answer may have made codes that are on no card
+    if entries or unknown:     # a create without a usable answer may have made codes that are on no card
         try:
-            batch_id = _record(env, nn, now, settings, entries, tracked, untracked, complete=written, unknown=unknown)
+            batch_id = _record(env, nn, now, settings, entries, tracked, unknown, complete=written)
         except (Lab5Error, OSError, ValueError) as exc:     # ValueError: an unreadable record
             unrecorded = (f"; its participant record was not written ({exc}), so down cannot delete these codes: "
                           f"they stop working at {participants.minute(until)}")
     keeps = f"The card keeps {'its earlier codes' if old else 'no persona codes'}"
+    loose = "".join(f"; {note}" for note in notes)
     if error:
         incomplete = ""
-        if entries and batch_id:
-            made = sum(len(codes) for _, _, codes in entries)
-            incomplete = (f". The {made} code(s) issued before that ({', '.join(p for _, p, _ in entries)}) are "
-                          "recorded as an incomplete batch, which down and handouts --revoke delete")
-        return _CardResult(("FAIL", label, f"{error}. {keeps}{incomplete}{unrecorded}; re-run"))
+        if tracked and batch_id:
+            made = sum(len(ids) for _, ids in tracked.values())
+            incomplete = (f". The {made} code(s) issued before that ({', '.join(tracked)}) are recorded as an "
+                          "incomplete batch, which down and handouts --revoke delete")
+        return _CardResult(("FAIL", label, f"{error}. {keeps}{incomplete}{loose}{unrecorded}; re-run"))
     done = f"{reason}: {describe(personas, settings)}, valid until {participants.minute(until)}"
     if contained:
         done += f"; none for {', '.join(contained)}, which is contained (see its row above)"
     if locked:
         done += "; " + _partial_note(nn, locked)
     if unrecorded:
-        return _CardResult(("FAIL", label, done + unrecorded), written=True)
-    loose = (f"; the ids of {', '.join(untracked)}'s codes could not be told apart from another room's, so down "
-             "leaves those to valid_secs" if untracked else "")
+        return _CardResult(("FAIL", label, done + loose + unrecorded), written=True)
     return _CardResult(("PARTIAL" if locked else "CHANGED", label, done + loose), batch_id, written=True)
 
 
 def _answer_lost(exc: Lab5Error) -> bool:
-    """A create that got no usable answer (lab5_duo: a timeout, TLS error, an
-    answer cut off or not the JSON Duo documents) may have made its codes. A
-    refusal from Duo carries its HTTP status and made none."""
-    return isinstance(exc, DuoError) and exc.status in (None, 200)
-
-
-def _lost_answer(admin: AdminAPI, uid: str, persona: str, before: Set[str], settings: Settings, until: float,
-                 exc: Lab5Error, tracked: Dict[str, Tuple[str, List[str]]], untracked: List[str],
-                 unknown: List[str]) -> str:
-    """After a lost answer, list the persona's code ids again: exactly
-    ``count`` new ids are the codes Duo made, on no card, and are recorded so
-    down and handouts --revoke delete them. Any other difference is another
-    room's too (untracked); a listing that fails as well leaves their ids
-    unknown, and down says so. Returns what the card's row says."""
-    kind = re.search(r"\(([A-Za-z_][A-Za-z0-9_.]*)\)", str(exc))
-    head = f"Duo's answer was lost{f' ({kind.group(1)})' if kind else ''}; checked which codes were created"
-    try:
-        new = sorted(_code_ids(admin, uid) - before)
-    except Lab5Error as again:
-        unknown.append(persona)
-        return (f"{head}, but that listing failed too ({again}), so their ids are unknown: down cannot delete any "
-                f"Duo made, and they stop working at {participants.minute(until)} (valid_secs)")
-    if not new:
-        return f"{head}: none"
-    if len(new) == settings.count:
-        tracked[persona] = (uid, new)
-        return (f"{head}: {len(new)}, which are on no card and are recorded, so down and handouts --revoke delete "
-                "them")
-    untracked.append(persona)
-    return (f"{head}: they could not be told apart from another room's, so they stop working only at "
-            f"{participants.minute(until)} (valid_secs)")
+    """A create without a usable answer (lab5_duo: lost or cut off, not the
+    JSON Duo documents, a 5xx) may have made its codes. A refusal from Duo
+    (4xx), or a check before the call, made none."""
+    return isinstance(exc, DuoError) and exc.lost
 
 
 # =========================================================================== revocation
@@ -673,19 +698,12 @@ def _revoke_card(env: participants.Env, nn: str, now: float, keep: Optional[str]
         until = participants.parse_time(str(batch.get("valid_until") or ""))
         issued = participants.parse_time(str(batch.get("issued_at") or ""))
         when = participants.minute(issued) if issued else "at an unknown time"
-        if until is not None and until > now:
-            if "codes" not in batch:
-                loose.append(f"the batch issued {when} has no recorded code ids, so it was not deleted: it stops "
-                             f"working at {participants.minute(until)} (valid_secs)")
-            if batch.get("codes") is not None and batch.get("untracked"):
-                loose.append(f"{', '.join(batch['untracked'])}: the codes of the batch issued {when} could not be told "
-                             "apart from another room's, so they were not deleted: they stop working at "
-                             f"{participants.minute(until)} (valid_secs)")
-            if batch.get("unknown"):
-                loose.append(f"{', '.join(batch['unknown'])}: Duo's answer to a create of the batch issued {when} was "
-                             "lost and the check that followed failed, so the ids of any codes Duo made are unknown "
-                             f"and none of them was deleted: they stop working at {participants.minute(until)} "
-                             "(valid_secs)")
+        if until is not None and until > now and "codes" not in batch:
+            loose.append(f"the batch issued {when} has no recorded code ids, so it was not deleted: it stops "
+                         f"working at {participants.minute(until)} (valid_secs)")
+        for persona, expires in _unknown_entries(batch):      # never deleted: say when they stop working
+            if expires is None or expires > now:
+                loose.append(UNKNOWN_IDS.format(persona=persona, when=when, until=_when(expires)))
         for entry in batch.get("codes") or []:
             ids = [str(i) for i in entry.get("ids") or []]
             if not ids:
@@ -774,10 +792,13 @@ def revoke(env: participants.Env, numbers: Sequence[str]) -> Tuple[List[Row], Li
 
 def down_note(root: Path, workshop: str, now: float, numbers: Sequence[str]) -> Optional[str]:
     """`down`'s last word on these cards' persona bypass codes, once it has
-    deleted what it could: when the last one it could not delete stops."""
+    deleted what it could: when the last one it could not delete stops. The
+    codes of an unknown entry (no recorded ids) are never deleted, so with
+    one it never says every batch was deleted: it names each one still valid
+    and when its codes expire."""
     latest: Optional[float] = None
-    seen = False
-    unknown: List[str] = []              # cards with a batch whose ids Duo's lost answer left unknown
+    seen = unknown_seen = False
+    unknown: List[str] = []              # "<persona> on instance <nn>, until <time>": unknown ids, still valid
     for nn in numbers:
         try:
             batches = read_json(_record_path(root, workshop, nn)).get("bypass_batches") or []
@@ -786,21 +807,27 @@ def down_note(root: Path, workshop: str, now: float, numbers: Sequence[str]) -> 
         for batch in batches:
             seen = True
             until = participants.parse_time(str(batch.get("valid_until") or ""))
-            if until is None or until <= now:
-                continue
-            if batch.get("unknown") and nn not in unknown:
-                unknown.append(nn)
-            if ("codes" not in batch or batch.get("untracked") or batch.get("unknown")
-                    or any(e.get("ids") for e in batch.get("codes") or [])):
+            if (until is not None and until > now
+                    and ("codes" not in batch or any(e.get("ids") for e in batch.get("codes") or []))):
                 latest = until if latest is None or until > latest else latest
+            for persona, expires in _unknown_entries(batch):
+                unknown_seen = True
+                if expires is not None and expires <= now:
+                    continue
+                unknown.append(f"{persona} on instance {nn}, until {_when(expires)}")
+                if expires is not None:
+                    latest = expires if latest is None or expires > latest else latest
     if not seen:
         return None
-    if latest is None:
+    if latest is None and not unknown:
+        if unknown_seen:
+            return ("Persona bypass codes: none of these cards' codes is still valid: the recorded ones are deleted or "
+                    "have expired, and so have those whose ids lab5-setup did not know")
         return "Persona bypass codes: every batch these cards had is deleted or has expired"
-    return (f"Persona bypass codes that lab5-setup could not delete stay valid until {participants.minute(latest)}: "
-            "valid_secs is their cutoff (deploy/lab5/README.md, Persona bypass codes)"
-            + (f". Not every code was deleted: on instance {', '.join(unknown)}, Duo's answer to a create was lost and "
-               "the check that followed failed, so the ids of any codes it made are unknown" if unknown else ""))
+    return (f"Persona bypass codes that lab5-setup could not delete stay valid until {_when(latest)}: valid_secs is "
+            "their cutoff (deploy/lab5/README.md, Persona bypass codes)"
+            + (". Not every code was deleted: lab5-setup does not know the ids of these, so it could not delete "
+               f"them: {'; '.join(unknown)}" if unknown else ""))
 
 
 # =========================================================================== check / status

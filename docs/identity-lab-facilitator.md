@@ -106,7 +106,7 @@ That way the AI Defense blocks in the room stack belong to the victim alone, and
 
 ## After the workshop, in this order
 
-1. `deploy/lab5/lab5-setup down <workshop.yaml>`. On each reachable box it reverts the Lab 5 keys and the HEC host. Then it deletes the tunnels and DNS records. A box Show has already destroyed fails the run, which is expected: nothing is left on it. Then it deletes the persona bypass codes it recorded for each card. Codes it could not tell apart from another room's stop at their `valid_secs`, and its last line says until when.
+1. `deploy/lab5/lab5-setup down <workshop.yaml>`. On each reachable box it reverts the Lab 5 keys and the HEC host. Then it deletes the tunnels and DNS records. A box Show has already destroyed fails the run, which is expected: nothing is left on it. Then it deletes the persona bypass codes it recorded for each card. Codes whose ids it does not know (it could not tell them apart from another room's, or Duo's answer to their create was lost) stop at their `valid_secs`, and its last line says until when.
 2. Rotate the credentials the boxes held: the Web SDK secret, the read-only Status Admin API key and the CII API client (I1).
 3. The room stack: run its Lab 5 teardown on the TA side, and confirm CII's webhook target is gone before the stack is destroyed.
 4. Personas: `py scripts/identity/provision_personas.py --reset`. It re-enables and unlocks the contained victim and resyncs every HOTP token. Then *Clear all step-ups* and CII *Reset Feedback*. The trusted personas' exclusions stay.

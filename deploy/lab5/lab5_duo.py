@@ -23,7 +23,8 @@ secret is sent with GET.
 
 Every call raises ``DuoError`` and nothing else (``_Api``): a refusal from Duo,
 and any answer that never arrived or cannot be read, so each caller's
-per-card and per-account handling sees one error type.
+per-card and per-account handling sees one error type. ``DuoError.lost``
+tells the second kind (and a 5xx) apart: the call may have taken effect.
 """
 from __future__ import annotations
 
@@ -59,12 +60,17 @@ BYPASS_LIMIT = 100           # Duo's object limit: bypass codes per user
 
 class DuoError(Lab5Error):
     """A Duo API refusal or transport failure. ``status`` is the HTTP status
-    and ``code`` Duo's error code (40003: a group with that name exists)."""
+    and ``code`` Duo's error code (40003: a group with that name exists).
+    ``lost``: the call got no usable answer (none, one cut off or not the
+    JSON Duo documents, or a 5xx), so whether it took effect is unknown; a
+    refusal (4xx) and a check made before the call are not lost."""
 
-    def __init__(self, message: str, status: Optional[int] = None, code: Optional[int] = None) -> None:
+    def __init__(self, message: str, status: Optional[int] = None, code: Optional[int] = None,
+                 lost: bool = False) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
+        self.lost = lost
 
 
 # --------------------------------------------------------------------------- HOTP
@@ -182,11 +188,14 @@ class _Api:
     @staticmethod
     def _transport_error(method: str, path: str, exc: Exception) -> DuoError:
         """Only the exception's type is reported: an unfinished answer to a
-        create may hold what it created (a bypass code, say)."""
-        if isinstance(exc, OSError):
-            return DuoError(f"Duo {method} {path}: cannot reach Duo ({type(exc).__name__})")
-        return DuoError(f"Duo {method} {path}: Duo's answer was cut off or unreadable ({type(exc).__name__}), so "
-                        "whether the call took effect is unknown")
+        create may hold what it created (a bypass code, say). It never says
+        Duo could not be reached: the request may have gone out before the
+        answer was lost, so a call that changes something may have taken
+        effect."""
+        what = ("no answer from Duo" if isinstance(exc, OSError) and method == "GET" else
+                "Duo's answer was lost" if isinstance(exc, OSError) else "Duo's answer was cut off or unreadable")
+        effect = "" if method == "GET" else ", so whether the call took effect is unknown"
+        return DuoError(f"Duo {method} {path}: {what} ({type(exc).__name__}){effect}", lost=True)
 
     @staticmethod
     def _error(method: str, path: str, exc: RuntimeError) -> DuoError:
@@ -204,7 +213,10 @@ class _Api:
             # duo_client puts the whole body of an unreadable 200 answer in its message; it may hold what
             # the call created, so it is never repeated
             text = "Duo's answer was not the JSON it documents, so whether the call took effect is unknown"
-        return DuoError(f"Duo {method} {path}: {text[:200]}", status=status, code=code)
+        # Only a refusal (4xx) says the call made nothing: a 5xx (a gateway's 502/503/504 included), an
+        # unreadable 200 or an error without a status may come after Duo acted.
+        lost = not isinstance(status, int) or status == 200 or status >= 500
+        return DuoError(f"Duo {method} {path}: {text[:200]}", status=status, code=code, lost=lost)
 
 
 def _id(value: Any) -> str:
@@ -297,7 +309,9 @@ class AdminAPI(_Api):
         (unlimited) and ``valid_secs`` 0 (never expires), are refused.
 
         Returns the codes. The response is the only place they ever appear,
-        and it carries no id for them; no error message here repeats one."""
+        and it carries no id for them; no error message here repeats one. An
+        answer that is not ``count`` codes is a lost answer (DuoError.lost):
+        Duo may have made codes all the same."""
         count, reuse_count, valid_secs = int(count), int(reuse_count), int(valid_secs)
         if not 1 <= count <= BYPASS_PER_REQUEST:
             raise DuoError(f"refusing to create {count} bypass codes in one call: Duo creates 1 to "
@@ -311,7 +325,8 @@ class AdminAPI(_Api):
                             "preserve_existing": "true"})
         codes = result if isinstance(result, list) else []
         if len(codes) != count or not all(isinstance(c, str) and _BYPASS_CODE_RE.match(c) for c in codes):
-            raise DuoError(f"Duo POST /admin/v1/users/{{id}}/bypass_codes: expected {count} numeric code(s) back")
+            raise DuoError(f"Duo POST /admin/v1/users/{{id}}/bypass_codes: expected {count} numeric code(s) back",
+                           lost=True)
         return list(codes)
 
     def user_bypass_codes(self, user_id: str) -> List[Dict[str, Any]]:

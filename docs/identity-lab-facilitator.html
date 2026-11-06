@@ -157,7 +157,7 @@ ul,ol{padding-left:1.4rem}
 </ul>
 <h2>After the workshop, in this order</h2>
 <ol>
-<li><code>deploy/lab5/lab5-setup down &lt;workshop.yaml&gt;</code>. On each reachable box it reverts the Lab 5 keys and the HEC host. Then it deletes the tunnels and DNS records. A box Show has already destroyed fails the run, which is expected: nothing is left on it. Then it deletes the persona bypass codes it recorded for each card. Codes it could not tell apart from another room's stop at their <code>valid_secs</code>, and its last line says until when.</li>
+<li><code>deploy/lab5/lab5-setup down &lt;workshop.yaml&gt;</code>. On each reachable box it reverts the Lab 5 keys and the HEC host. Then it deletes the tunnels and DNS records. A box Show has already destroyed fails the run, which is expected: nothing is left on it. Then it deletes the persona bypass codes it recorded for each card. Codes whose ids it does not know (it could not tell them apart from another room's, or Duo's answer to their create was lost) stop at their <code>valid_secs</code>, and its last line says until when.</li>
 <li>Rotate the credentials the boxes held: the Web SDK secret, the read-only Status Admin API key and the CII API client (I1).</li>
 <li>The room stack: run its Lab 5 teardown on the TA side, and confirm CII's webhook target is gone before the stack is destroyed.</li>
 <li>Personas: <code>py scripts/identity/provision_personas.py --reset</code>. It re-enables and unlocks the contained victim and resyncs every HOTP token. Then <em>Clear all step-ups</em> and CII <em>Reset Feedback</em>. The trusted personas' exclusions stay.</li>
