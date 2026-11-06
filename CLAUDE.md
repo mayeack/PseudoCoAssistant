@@ -216,11 +216,20 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
 - Store and Duo calls run off the event loop; the middleware is pure ASGI (it
   sits on the SSE path).
 - **No identity secret in any log, at any level.** `backend/logging/redaction.py`
-  (installed by `setup_logging`, as a log record factory so child loggers such
-  as `urllib3.connectionpool` are covered) redacts every record of urllib3,
-  requests, httpx, httpcore, duo_universal and the identity modules, and the
-  exact identity secrets from every other logger. A new credential the app
-  handles is `redaction.register()`ed where it first appears.
+  (installed by `setup_logging` as a log record factory, so child loggers such
+  as `urllib3.connectionpool` are covered) redacts every record by pattern:
+  - the `duo_code`, `code`, `state`, `client_assertion`, `assertion` and token
+    query parameters;
+  - Authorization, Cookie, Set-Cookie and X-Access-Key values, the app's own
+    cookies, Bearer tokens and JWT-shaped strings;
+  - the exact values of the configured secrets (`DUO_CLIENT_SECRET`,
+    `DUO_ADMIN_SKEY`, `CII_CLIENT_SECRET`, `ACCESS_KEY`), compiled once at
+    startup and again when the config changes.
+
+  Nothing a request sends is ever registered, so no input can blank a username
+  out of the logs. A new credential goes on that configured-secrets list.
+  Every pattern must stay linear-time: a test times them all on adversarial
+  input.
 - **Inert means no requests.** `chat.js` polls `GET /api/identity/me` only
   while `gated.duo_signin` is open or `/api/server-info` `identity_session`
   says this browser holds a session (or the page already shows one). With
