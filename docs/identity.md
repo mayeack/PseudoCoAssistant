@@ -126,7 +126,10 @@ before any screen or model.
      CII has no record of), at `getEndUser`, or at `data` (a non-null field
      failed). Any error sits on `getEndUser` or its `endUserDetails`, at or
      below where the details stop, says the user was not found, and carries
-     no other code.
+     no other code. Its words must be about the user itself ("End user …
+     not found", "User does not exist", "No such user"): "No user
+     permissions are granted" or "User pool not found" is about something
+     else, so it is an error, never that answer.
    - Any other answer that carries an error is `unavailable`, details or not:
      a request-level error (no `data`), an error elsewhere or without a path,
      or a partial answer (say, `failingChecks` failed and came back null), so

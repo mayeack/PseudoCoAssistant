@@ -589,6 +589,22 @@ def test_cii_client() -> None:
         else:
             check(f"{case['name']}: the user's details", got is not None and got["found"] is True
                   and got["trust"] == case["trust"] and got["failing_checks"] == sorted(case["failing"]), str(got))
+    # The wording half of the rule, on both places the error may sit (the gate runs the same table).
+    shapes = (("on getEndUser", {"getEndUser": None}, ["getEndUser"]),
+              ("on endUserDetails", {"getEndUser": {"endUserDetails": None}}, ["getEndUser", "endUserDetails"]))
+    for expect, what in (("not_found", "not in CII yet"), ("unavailable", "a failed query (Lab5Error), never not in CII yet")):
+        misread = []
+        for message in table["wording"][expect]:
+            for where, data, path in shapes:
+                try:
+                    got = cii.parse_end_user({"data": data, "errors": [{"message": message, "path": path}]})
+                except Lab5Error:
+                    got = None
+                if (got == {"trust": "UNKNOWN", "failing_checks": [], "found": False}) != (expect == "not_found") \
+                        or (expect == "unavailable" and got is not None):
+                    misread.append(f"{message!r} {where}: {got}")
+        check(f"every {expect} wording of the shared table, on getEndUser and on endUserDetails: {what}",
+              not misread, "; ".join(misread))
 
 
 # =========================================================================== launchd

@@ -446,6 +446,22 @@ def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
                   st["sources"] == {"duo": "ok", "cii": "ok"} and st["available"] is True
                   and st["trust_level"] == case["trust"]
                   and sorted(st["failing_checks"]) == sorted(case["failing"]), str(st))
+    # The wording half of the rule, on both places the error may sit.
+    shapes = (("on getEndUser", {"getEndUser": None}, ["getEndUser"]),
+              ("on endUserDetails", {"getEndUser": {"endUserDetails": None}}, ["getEndUser", "endUserDetails"]))
+    for expect, what in (("not_found", "CII's 'no such user' (an answer: check ok, allowed)"),
+                         ("unavailable", "never 'no such user': unavailable, and fail-closed blocks it")):
+        misread = []
+        for message in table["wording"][expect]:
+            for where, data, path in shapes:
+                fake.cii_body = {"data": data, "errors": [{"message": message, "path": path}]}
+                lookup.clear_cache()
+                st = lookup.lookup("avery.kim")
+                closed = gate.decide(st, fail_open=False)
+                if st["sources"]["cii"] != expect or (closed["verdict"] == "allow") != (expect == "not_found"):
+                    misread.append(f"{message!r} {where}: {st['sources']['cii']}, {closed['verdict']}")
+        check(f"every {expect} wording of the shared table, on getEndUser and on endUserDetails: {what}",
+              not misread, "; ".join(misread))
     fake.cii_body = None
     lookup.clear_cache()
 

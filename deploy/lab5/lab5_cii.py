@@ -13,9 +13,13 @@ tests/test_identity_personas.py pins the two together):
 ``getEndUser(login: String!): GetEndUserOutput!``, whose ``endUserDetails``
 carries ``failingChecks`` and ``endUserTrustScore { levelOfTrust }``. A user
 CII has no record of yet reads the way the gate reads it (``not_found``): the
-details stop at ``endUserDetails`` or ``getEndUser`` (or ``data``), and any
-error sits on one of those two fields and says the user was not found. Any
-other error is a failed query, never "not in CII yet".
+details stop at a present, null ``endUserDetails``, at ``getEndUser`` or at
+``data``. With no error, a null ``getEndUser`` or null details is the answer
+(a null ``data`` is not). With errors, every one sits on ``getEndUser`` or
+``endUserDetails``, at or below where the details stop, says the user was not
+found (``_USER_NOT_FOUND_RE``), and carries no code or a not-found one
+(``NOT_FOUND_CODES``). Any other answer with an error is a failed query, never
+"not in CII yet", whatever its details say.
 ``tests/fixtures/cii_end_user_answers.json`` holds the cases the two must read
 the same way. Spikes S5/S6 confirm the shape on the tenant; personas.yaml ``cii.end_user_query``
 overrides the query, and an override must keep that shape, which is what the
@@ -45,8 +49,20 @@ GOOD_TRUST = ("TRUSTED", "FAVORABLE", "NEUTRAL")
 NOT_FOUND_PATHS = (["getEndUser"], ["getEndUser", "endUserDetails"])
 NOT_FOUND_CODES = frozenset({"NOTFOUND", "USERNOTFOUND", "ENDUSERNOTFOUND"})
 _USER_NOT_FOUND_RE = re.compile(
-    r"\b(?:end[ _-]?)?user\b[^\n]{0,200}?\b(?:not (?:been )?found|(?:does not|doesn't|not) exist)"
-    r"|\bno (?:such )?(?:end[ _-]?)?user\b", re.IGNORECASE)
+    # A sentence whose subject is the user itself: "<end> user [record|account|...] [with login] [<login>]
+    # [is|was|has] not (been) found / does not exist".
+    r"\b(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
+    r"(?:\s+(?:with|for|having|by)\s+(?:login|email|username|id))?"
+    r"(?:(?:\s*:\s*|\s+)(?:\"[^\"\n]{1,200}\"|'[^'\n]{1,200}'|`[^`\n]{1,200}`|\([^()\n]{1,200}\)"
+    r"|[^\s\"'`()]{0,200}[@.][^\s\"'`()]{0,200}))?"
+    r"(?:\s*:\s*|\s+)(?:(?:is|was|has|had)\s+)?(?:not\s+(?:been\s+)?found"
+    r"|(?:(?:does|did)\s+not|doesn't|didn't|not)\s+exist|(?:could|can)\s*not\s+be\s+found|can't\s+be\s+found)\b"
+    # "No such user", or "no user" at the end of a sentence or before "found", "with", a login.
+    r"|\bno\s+(?:such\s+)?(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
+    r"(?:\s*(?:$|[.:;,!])|\s+(?:found|exists?|with|matching|named)\b|\s+(?:for|by)\s+(?:login|email|username|id)\b"
+    r"|\s+(?:\"[^\"\n]{1,200}\"|'[^'\n]{1,200}'|`[^`\n]{1,200}`|\([^()\n]{1,200}\)"
+    r"|[^\s\"'`()]{0,200}[@.][^\s\"'`()]{0,200}))",
+    re.IGNORECASE)
 
 Transport = Callable[[str, str, Dict[str, str], Optional[bytes], float], Tuple[int, bytes]]
 

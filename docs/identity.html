@@ -180,7 +180,10 @@ wording of just any error. The user's details stop at <code>endUserDetails</code
 CII has no record of), at <code>getEndUser</code>, or at <code>data</code> (a non-null field
 failed). Any error sits on <code>getEndUser</code> or its <code>endUserDetails</code>, at or
 below where the details stop, says the user was not found, and carries
-no other code.</li>
+no other code. Its words must be about the user itself (&quot;End user …
+not found&quot;, &quot;User does not exist&quot;, &quot;No such user&quot;): &quot;No user
+permissions are granted&quot; or &quot;User pool not found&quot; is about something
+else, so it is an error, never that answer.</li>
 <li>Any other answer that carries an error is <code>unavailable</code>, details or not:
 a request-level error (no <code>data</code>), an error elsewhere or without a path,
 or a partial answer (say, <code>failingChecks</code> failed and came back null), so

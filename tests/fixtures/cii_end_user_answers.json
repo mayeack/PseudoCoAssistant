@@ -433,5 +433,36 @@
         "errors": "boom"
       }
     }
-  ]
+  ],
+  "wording": {
+    "_about": "Messages of a code-less error, each tried on getEndUser (getEndUser null) and on its endUserDetails (getEndUser an object, endUserDetails null). not_found: CII's 'no such user'. unavailable: words about something else (a permission, a scope, a pool, a session), never that answer.",
+    "not_found": [
+      "End user avery.kim@pseudocoassistant.com not found",
+      "User does not exist",
+      "No such user",
+      "No such user.",
+      "No such end user: avery.kim@pseudocoassistant.com",
+      "That user doesn't exist",
+      "The user has not been found",
+      "User with login 'avery.kim@pseudocoassistant.com' was not found",
+      "The requested end user (avery.kim@pseudocoassistant.com) was not found",
+      "User could not be found",
+      "No user found",
+      "No user with login avery.kim@pseudocoassistant.com",
+      "End user record not found"
+    ],
+    "unavailable": [
+      "No user permissions are granted to this API client",
+      "No user scope on this access token",
+      "User pool not found",
+      "Could not load user avery.kim@pseudocoassistant.com: upstream configuration not found",
+      "Permission 'read:user' not found for this API client",
+      "User permission does not exist for this API client",
+      "Required scope user.read not found in access token",
+      "User session not found",
+      "Role end-user-reader does not exist",
+      "Permission does not exist for this API client",
+      "Upstream timeout"
+    ]
+  }
 }

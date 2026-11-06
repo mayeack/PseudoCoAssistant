@@ -106,12 +106,30 @@ TOKEN_DEFAULT_LIFETIME_S = 10 * 3600.0
 #: but letters and digits removed (``NOT_FOUND``, ``NotFound``, ``not-found``
 #: all read NOTFOUND). Any other code is not that answer.
 CII_NOT_FOUND_CODES = frozenset({"NOTFOUND", "USERNOTFOUND", "ENDUSERNOTFOUND"})
-#: The wording of a "no such user" error: a user (or end user) that is not
-#: found or does not exist, or "no such user". Only checked on an error that
-#: is about ``getEndUser`` itself (see ``_cii_not_found``).
+#: The wording of a "no such user" error: a sentence about the user itself (an
+#: end user, or its record, account, profile or details, with its login quoted
+#: or as an address if any) that is not found or does not exist, or "no such
+#: user", or "no user" at the end of a sentence or before "found", "with" or a
+#: login. Anything else between "user" and the verb ("user pool", "user
+#: permission", "scope user.read", "no user permissions") is not the user.
+#: Checked only on an error that sits on ``getEndUser`` or its
+#: ``endUserDetails`` (``_CII_NOT_FOUND_PATHS``, see ``_cii_not_found``).
+#: ``deploy/lab5/lab5_cii.py`` holds the same pattern (test_identity_personas pins it).
 _CII_USER_NOT_FOUND_RE = re.compile(
-    r"\b(?:end[ _-]?)?user\b[^\n]{0,200}?\b(?:not (?:been )?found|(?:does not|doesn't|not) exist)"
-    r"|\bno (?:such )?(?:end[ _-]?)?user\b", re.IGNORECASE)
+    # A sentence whose subject is the user itself: "<end> user [record|account|...] [with login] [<login>]
+    # [is|was|has] not (been) found / does not exist".
+    r"\b(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
+    r"(?:\s+(?:with|for|having|by)\s+(?:login|email|username|id))?"
+    r"(?:(?:\s*:\s*|\s+)(?:\"[^\"\n]{1,200}\"|'[^'\n]{1,200}'|`[^`\n]{1,200}`|\([^()\n]{1,200}\)"
+    r"|[^\s\"'`()]{0,200}[@.][^\s\"'`()]{0,200}))?"
+    r"(?:\s*:\s*|\s+)(?:(?:is|was|has|had)\s+)?(?:not\s+(?:been\s+)?found"
+    r"|(?:(?:does|did)\s+not|doesn't|didn't|not)\s+exist|(?:could|can)\s*not\s+be\s+found|can't\s+be\s+found)\b"
+    # "No such user", or "no user" at the end of a sentence or before "found", "with", a login.
+    r"|\bno\s+(?:such\s+)?(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
+    r"(?:\s*(?:$|[.:;,!])|\s+(?:found|exists?|with|matching|named)\b|\s+(?:for|by)\s+(?:login|email|username|id)\b"
+    r"|\s+(?:\"[^\"\n]{1,200}\"|'[^'\n]{1,200}'|`[^`\n]{1,200}`|\([^()\n]{1,200}\)"
+    r"|[^\s\"'`()]{0,200}[@.][^\s\"'`()]{0,200}))",
+    re.IGNORECASE)
 
 _CACHE_MAX = 2048
 _FAILING_CHECKS_MAX = 32
