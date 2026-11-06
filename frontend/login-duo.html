@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="no-referrer">
+  <title>Sign in with Duo · PseudoCo Assistant</title>
+  <!-- Self-contained: no external fonts, scripts or images. Served by
+       backend/routers/identity_auth.py (_render_login), which fills the gate
+       and signed-in placeholders from the duo_signin host gate and the
+       request's verified identity. Every message below is fixed text keyed by
+       the ?error= code; nothing from the URL is ever written into the page. -->
+  <style>
+    :root{
+      --primary:#7c3aed; --primary-hover:#6d28d9; --ring:#c4b5fd;
+      --ink:#0f172a; --muted:#64748b; --bg1:#f5f3ff; --bg2:#ede9fe;
+      --danger:#b91c1c; --danger-bg:#fef2f2; --danger-line:#fecaca;
+      --note:#334155; --note-bg:#f8fafc; --note-line:#e2e8f0;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px 16px;
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+      background:radial-gradient(1200px 600px at 50% -10%, var(--bg1), var(--bg2)); color:var(--ink);
+    }
+    .card{
+      width:100%; max-width:420px; background:#fff; border:1px solid #e5e7eb; border-radius:20px;
+      box-shadow:0 20px 40px -12px rgba(15,23,42,.18), 0 2px 6px rgba(15,23,42,.06);
+      padding:36px 32px;
+    }
+    .brand{display:flex; align-items:center; gap:12px; margin-bottom:26px}
+    .logo{
+      width:42px; height:42px; border-radius:13px; flex:none;
+      background:linear-gradient(135deg, var(--primary), #a78bfa);
+      display:flex; align-items:center; justify-content:center; color:#fff;
+    }
+    .logo svg{width:23px; height:23px}
+    .brand b{font-size:18px; font-weight:700; letter-spacing:-.01em; display:block; line-height:1.1}
+    .brand small{color:var(--muted); font-size:12px}
+    h1{font-size:21px; margin:0 0 7px; letter-spacing:-.02em}
+    p.sub{margin:0 0 22px; color:var(--muted); font-size:14px; line-height:1.55}
+    label{display:block; font-size:13px; font-weight:600; margin:0 0 8px; color:#334155}
+    input[type=text]{
+      width:100%; padding:12px 14px; font-size:15px; border:1px solid #cbd5e1; border-radius:12px;
+      outline:none; background:#f8fafc;
+    }
+    input[type=text]:focus{border-color:var(--primary); box-shadow:0 0 0 4px rgba(196,181,253,.55); background:#fff}
+    input[disabled]{opacity:.6; cursor:not-allowed}
+    button.primary{
+      width:100%; margin-top:18px; padding:12px 16px; font-size:15px; font-weight:600; color:#fff;
+      background:var(--primary); border:0; border-radius:12px; cursor:pointer;
+    }
+    button.primary:hover{background:var(--primary-hover)}
+    button.primary[disabled]{background:#94a3b8; cursor:not-allowed}
+    button.link{background:none; border:0; padding:0; color:var(--primary); font:inherit; cursor:pointer; text-decoration:underline}
+    .msg{display:none; margin:0 0 18px; padding:11px 14px; font-size:13px; line-height:1.5; border-radius:10px}
+    .msg.show{display:block}
+    .msg.error{background:var(--danger-bg); border:1px solid var(--danger-line); color:var(--danger)}
+    .msg.note{background:var(--note-bg); border:1px solid var(--note-line); color:var(--note)}
+    .gate{display:none; margin:12px 0 0; color:var(--muted); font-size:12px; line-height:1.5}
+    .gate.show{display:block}
+    .foot{margin-top:22px; text-align:center; color:#94a3b8; font-size:12px; line-height:1.6}
+    .foot a{color:var(--primary)}
+  </style>
+</head>
+<body>
+  <main class="card" id="signin" data-gate="__DUO_SIGNIN_STATE__" data-gate-reason="__DUO_SIGNIN_REASON__"
+        data-signed-in-as="__SIGNED_IN_AS__">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none"><rect x="4" y="10" width="16" height="11" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </span>
+      <span><b id="brandName">PseudoCo Assistant</b><small>Verified sign-in</small></span>
+    </div>
+
+    <h1>Sign in with Duo</h1>
+    <p class="sub">Enter your username. Duo asks you to approve the sign-in, then brings you back here.</p>
+
+    <div class="msg error" id="errorMsg" role="alert"></div>
+    <div class="msg note" id="noticeMsg" role="status"></div>
+    <div class="msg note" id="signedInMsg" role="status">
+      <span id="signedInText"></span>
+      <form method="POST" action="/auth/identity/logout" style="display:inline">
+        <button type="submit" class="link">Sign out</button>
+      </form>
+    </div>
+
+    <form method="POST" action="/auth/duo/start">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none"
+             spellcheck="false" maxlength="128" required autofocus __DUO_SIGNIN_DISABLED__>
+      <button type="submit" class="primary" id="continueBtn" title="__DUO_SIGNIN_REASON__" __DUO_SIGNIN_DISABLED__>Continue with Duo</button>
+      <p class="gate" id="gateReason"></p>
+    </form>
+
+    <div class="foot">
+      <a href="/app">Continue without signing in</a><br>
+      PseudoCo Assistant · Authorized access only
+    </div>
+  </main>
+
+  <script>
+    // One fixed message per error code (backend/services/identity_signin.py
+    // ERROR_CODES; tests/test_duo_signin.py keeps the two lists in step).
+    const MESSAGES = {
+      unavailable: "Duo sign-in isn't available on this instance right now.",
+      bad_origin: "Start the sign-in from this page.",
+      invalid_username: "Enter a valid username.",
+      not_allowed: "That username can't sign in to this instance.",
+      rate_limited: "Too many sign-in attempts for that username. Wait a few minutes, then try again.",
+      state_mismatch: "That sign-in didn't start in this browser. Start again.",
+      nonce_mismatch: "That sign-in didn't start in this browser. Start again.",
+      state_expired: "That sign-in took too long or was already used. Start again.",
+      missing_code: "Duo didn't return a sign-in result. Start again.",
+      duo_denied: "Duo didn't approve the sign-in.",
+      duo_refused: "Duo didn't accept the sign-in. Start again.",
+      duo_unavailable: "Duo couldn't be reached. Try again in a minute.",
+      username_mismatch: "Duo signed in a different user than the one you entered. Start again.",
+      failed: "Sign-in failed. Start again."
+    };
+    const NOTICES = {
+      expired: "Your sign-in expired. Sign in again to continue.",
+      revoked: "This session was ended. Sign in again to continue.",
+      signed_out: "You're signed out."
+    };
+
+    const BRAND = {
+      medadvice: 'MedAdvice', taxadvice: 'TaxAdvice', benefitsadvice: 'BenefitsAdvice',
+      legaladvice: 'LegalAdvice', financeadvice: 'FinanceAdvice', telecomchatbot: 'Telecom Support',
+      retail: 'Retail Support', manufacturing: 'Manufacturing Ops'
+    };
+    try {
+      const brand = BRAND[localStorage.getItem('medadvice_theme')];
+      if (brand) {
+        document.getElementById('brandName').textContent = brand;
+        document.title = 'Sign in with Duo · ' + brand;
+      }
+    } catch (e) { /* storage blocked: keep the product name */ }
+
+    const root = document.getElementById('signin');
+    const q = new URLSearchParams(location.search);
+
+    function show(id, text) {
+      const el = document.getElementById(id);
+      el.textContent = text;
+      el.classList.add('show');
+    }
+
+    const code = q.get('error');
+    if (code) show('errorMsg', Object.prototype.hasOwnProperty.call(MESSAGES, code) ? MESSAGES[code] : MESSAGES.failed);
+    for (const flag of Object.keys(NOTICES)) {
+      if (q.get(flag) === '1') { show('noticeMsg', NOTICES[flag]); break; }
+    }
+
+    const who = root.dataset.signedInAs;
+    if (who) {
+      document.getElementById('signedInText').textContent = 'Signed in as ' + who + '. ';
+      document.getElementById('signedInMsg').classList.add('show');
+    }
+
+    // The Continue button follows the duo_signin host gate (rendered by the
+    // server); when it is closed, the reason is the tooltip and shows below.
+    if (root.dataset.gate !== 'enabled') {
+      const btn = document.getElementById('continueBtn');
+      btn.disabled = true;
+      document.getElementById('username').disabled = true;
+      show('gateReason', root.dataset.gateReason || 'Duo sign-in is not available on this instance.');
+    }
+  </script>
+</body>
+</html>

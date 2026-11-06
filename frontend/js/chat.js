@@ -13,6 +13,30 @@ let autoPromptEnabled = false;
 let autoPromptStatusInterval = null;
 let currentTheme = 'medadvice';
 
+// ---- Lab 5 identity: ONE fetch wrapper for every request this page makes ----
+// Once a Duo identity session is revoked, the identity middleware answers 403
+// identity_session_revoked to every request (401 identity_session_expired once
+// it expires), and several pollers below swallow their errors. So the check
+// lives here, once, around window.fetch itself: whichever request sees it first
+// raises #identityBanner. Only a clone of a JSON 401/403 is read; the response
+// itself (SSE streams included) reaches its caller untouched.
+const _pageFetch = window.fetch.bind(window);
+window.fetch = async function (input, init) {
+    const response = await _pageFetch(input, init);
+    if (response.status === 401 || response.status === 403) noteIdentityRefusal(response);
+    return response;
+};
+
+function noteIdentityRefusal(response) {
+    const type = response.headers.get('content-type') || '';
+    if (!type.includes('application/json')) return;
+    response.clone().json().then((data) => {
+        const detail = data && data.detail;
+        if (detail === 'identity_session_revoked') showIdentityBanner('revoked');
+        else if (detail === 'identity_session_expired') showIdentityBanner('expired');
+    }).catch(() => { /* not JSON after all */ });
+}
+
 const THEMES = {
     medadvice: {
         key: 'medadvice',
@@ -441,6 +465,10 @@ function updateColorSchemeButtons(mode) {
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
+    // Back from a Duo sign-in (/auth/duo/callback -> /app?signin=ok): forget the
+    // conversations this browser started before, under another identity or none.
+    consumeSigninRedirect();
+
     // Restore saved theme
     const savedTheme = localStorage.getItem('medadvice_theme') || 'medadvice';
     currentTheme = savedTheme;
@@ -871,7 +899,10 @@ async function applyDemoControlVisibility() {
 
 function refreshIndicators() {
     // Capabilities first: the provider/model gating in refreshActiveProvider reads them.
-    refreshServerInfo().then(refreshActiveProvider);
+    refreshServerInfo().then(() => {
+        refreshActiveProvider();
+        refreshIdentity();   // after server-info: the Sign-in link follows gated.duo_signin
+    });
     refreshActiveBlueprint();
     refreshStaticEmission();
     applyDemoControlVisibility();   // a Settings-page change shows within the poll interval
@@ -882,6 +913,129 @@ function startProviderPolling() {
     if (providerPollInterval) clearInterval(providerPollInterval);
     // Poll so an external model switch (e.g. the legacy eval runner) reflects here.
     providerPollInterval = setInterval(refreshIndicators, 10000);
+}
+
+// ---- Lab 5 identity: badge, banner, sign-in redirect ----
+// Identity comes only from the server's verified session (GET /api/identity/me,
+// polled with the indicators above); nothing here is ever sent as identity.
+// The badge shows the persona in neutral colours; the trust pill shows only
+// state, and only when the server reports one. Hidden unless signed in.
+let _identity = null;
+
+async function refreshIdentity() {
+    try {
+        const res = await fetch('/api/identity/me');
+        // 401/403: not signed in any more (the fetch wrapper raised the banner).
+        // Anything else that is not OK (a tunnel blip) keeps the last badge.
+        if (res.status === 401 || res.status === 403) { renderIdentity(null); return; }
+        if (!res.ok) return;
+        const data = await res.json();
+        renderIdentity(data && data.signed_in ? data : null);
+    } catch (e) { /* best-effort: the badge keeps its last state */ }
+}
+
+function renderIdentity(identity) {
+    _identity = identity;
+    const badge = document.getElementById('identityBadge');
+    const signin = document.getElementById('identitySignin');
+    if (!badge) return;
+    if (!identity) {
+        badge.classList.add('hidden');
+        const g = gateFor('duo_signin');
+        if (signin) signin.classList.toggle('hidden', !(g && g.enabled));
+        return;
+    }
+    const user = document.getElementById('identityUser');
+    if (user) user.textContent = identity.username || '';
+    badge.title = identity.expires_at
+        ? 'Verified with Duo until ' + parseServerTime(identity.expires_at).toLocaleString()
+        : 'Verified with Duo';
+    badge.classList.remove('hidden');
+    if (signin) signin.classList.add('hidden');
+    renderTrustPill(identity);
+    // A valid session again (signed in in another tab, say): the banner is stale.
+    hideIdentityBanner();
+}
+
+// Trust pill: colour is state. Duo status (locked out / disabled) wins over the
+// trust level; nothing is shown until the server reports either.
+const TRUST_PILL_COLORS = {
+    trusted: ['bg-green-100', 'text-green-700'],
+    neutral: ['bg-gray-100', 'text-gray-600'],
+    unknown: ['bg-gray-100', 'text-gray-600'],
+    questionable: ['bg-amber-100', 'text-amber-800'],
+    untrusted: ['bg-red-100', 'text-red-700'],
+    locked_out: ['bg-red-100', 'text-red-700'],
+    disabled: ['bg-red-100', 'text-red-700'],
+};
+
+function renderTrustPill(identity) {
+    const pill = document.getElementById('identityTrust');
+    if (!pill) return;
+    const status = String(identity.duo_status || '').toLowerCase().replace(/\s+/g, '_');
+    const level = String(identity.trust_level || '').toLowerCase().replace(/\s+/g, '_');
+    const key = (status === 'locked_out' || status === 'disabled') ? status : level;
+    const all = [].concat(...Object.values(TRUST_PILL_COLORS));
+    pill.classList.remove(...all);
+    if (!key || !TRUST_PILL_COLORS[key]) {
+        pill.textContent = '';
+        pill.classList.add('hidden', 'bg-gray-100', 'text-gray-600');
+        return;
+    }
+    pill.textContent = key.replace('_', ' ').toUpperCase();
+    pill.title = key === status ? 'Duo account status' : 'Cisco Identity Intelligence trust level';
+    pill.classList.add(...TRUST_PILL_COLORS[key]);
+    pill.classList.remove('hidden');
+}
+
+const IDENTITY_BANNERS = {
+    revoked: {
+        title: 'SESSION ENDED',
+        text: 'Your verified session was ended. Sign in again to continue as a verified user, '
+            + 'or sign out to continue without one.',
+        signout: true, dismiss: false,
+    },
+    expired: {
+        title: 'SIGN-IN EXPIRED',
+        text: 'Your Duo sign-in expired, so you are no longer a verified user. '
+            + 'Sign in again to continue with your identity.',
+        signout: false, dismiss: true,
+    },
+};
+
+function showIdentityBanner(kind) {
+    const spec = IDENTITY_BANNERS[kind];
+    const banner = document.getElementById('identityBanner');
+    if (!spec || !banner) return;
+    document.getElementById('identityBannerTitle').textContent = spec.title;
+    document.getElementById('identityBannerText').textContent = spec.text;
+    document.getElementById('identityBannerSignout').classList.toggle('hidden', !spec.signout);
+    document.getElementById('identityBannerDismiss').classList.toggle('hidden', !spec.dismiss);
+    banner.dataset.kind = kind;
+    banner.classList.remove('hidden');
+    renderIdentity(null);
+}
+
+function hideIdentityBanner() {
+    const banner = document.getElementById('identityBanner');
+    if (banner) banner.classList.add('hidden');
+}
+
+// /auth/duo/callback lands on /app?signin=ok. The conversations this browser
+// started before belong to whoever was signed in then (or to nobody), so the
+// saved session id and the Show Recent list are dropped, then the flag is
+// removed from the address bar so a reload or bookmark does not repeat it.
+function consumeSigninRedirect() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('signin') !== 'ok') return false;
+    try {
+        localStorage.removeItem('medadvice_session_id');
+        localStorage.removeItem(RECENT_SESSIONS_KEY);
+    } catch (e) { /* storage blocked */ }
+    params.delete('signin');
+    const rest = params.toString();
+    history.replaceState(null, '', window.location.pathname + (rest ? '?' + rest : '') + window.location.hash);
+    return true;
 }
 
 async function createNewSession() {

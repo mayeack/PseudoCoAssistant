@@ -629,7 +629,22 @@
                 </div>
                 <div class="flex flex-wrap justify-between items-baseline gap-x-4 gap-y-1 mt-2">
                     <p id="appSubtitle" class="text-gray-600">General Medical Guidance with AI Governance</p>
-                    <p class="text-xs text-gray-400">Session ID: <span id="sessionId" class="font-mono"></span></p>
+                    <span class="inline-flex flex-wrap items-baseline justify-end gap-x-3 gap-y-1">
+                        <!-- Lab 5 identity badge (chat.js renderIdentity, from GET /api/identity/me
+                             on the 10 s poll): the persona in neutral colours, a trust pill that
+                             only ever shows state, and Sign out. Hidden unless signed in. The
+                             "Sign in with Duo" link shows only while gated.duo_signin is open. -->
+                        <span id="identityBadge" class="hidden inline-flex items-baseline gap-1.5 text-xs text-gray-500">
+                            <span>Signed in as</span>
+                            <span id="identityUser" class="font-mono font-semibold text-gray-700"></span>
+                            <span id="identityTrust" class="hidden px-2 py-0.5 text-[10px] font-semibold rounded-full bg-gray-100 text-gray-600"></span>
+                            <form method="post" action="/auth/identity/logout" class="inline">
+                                <button type="submit" class="text-gray-500 underline hover:text-gray-700">Sign out</button>
+                            </form>
+                        </span>
+                        <a id="identitySignin" href="/login/duo" class="hidden text-xs text-gray-500 underline hover:text-gray-700">Sign in with Duo</a>
+                        <span class="text-xs text-gray-400">Session ID: <span id="sessionId" class="font-mono"></span></span>
+                    </span>
                 </div>
                 <!-- Interactive active-LLM controls: Provider → filtered Model; Static emission (Emit Actual by default). -->
                 <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mt-3">
@@ -653,6 +668,21 @@
                         <span class="text-amber-500 font-semibold uppercase tracking-wide text-[10px]">Static emission</span>
                         <select id="emissionSelect" onchange="onEmissionChange()" class="text-xs font-mono border border-amber-300 bg-amber-50 text-amber-800 rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-amber-300"></select>
                     </label>
+                </div>
+            </div>
+
+            <!-- Lab 5 identity banner (chat.js showIdentityBanner): raised by the single
+                 fetch wrapper when any request answers identity_session_revoked or
+                 identity_session_expired. Hidden otherwise. -->
+            <div id="identityBanner" class="hidden bg-amber-100 border-l-4 border-amber-500 p-4 mb-4 rounded" role="alert">
+                <p id="identityBannerTitle" class="font-bold text-amber-800"></p>
+                <p id="identityBannerText" class="text-amber-700"></p>
+                <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                    <a id="identityBannerSignin" href="/login/duo" class="font-semibold text-amber-800 underline">Sign in again</a>
+                    <form id="identityBannerSignout" method="post" action="/auth/identity/logout" class="inline">
+                        <button type="submit" class="text-amber-800 underline">Sign out</button>
+                    </form>
+                    <button type="button" id="identityBannerDismiss" onclick="hideIdentityBanner()" class="text-amber-800 underline">Dismiss</button>
                 </div>
             </div>
 
@@ -758,6 +788,6 @@
         </div>
     </div>
 
-    <script src="/static/js/chat.js?v=33"></script>
+    <script src="/static/js/chat.js?v=34"></script>
 </body>
 </html>

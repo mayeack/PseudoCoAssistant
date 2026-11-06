@@ -3,12 +3,15 @@ import secrets
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Form
+from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from starlette.concurrency import run_in_threadpool
 
 from backend.config import settings
 from backend.middleware.access_key import COOKIE_NAME, session_token
+from backend.middleware import identity as identity_mw
 from backend.middleware import settings_gate
+from backend.services import identity_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -57,9 +60,19 @@ async def login_submit(
 
 
 @router.get("/logout")
-async def logout():
+async def logout(request: Request):
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie(COOKIE_NAME, path="/")
+    # Lab 5: signing out of the room also ends the Duo identity session, if
+    # this browser has one (a revoked tombstone included). The store call is
+    # blocking database work, so it runs in the threadpool.
+    token = request.cookies.get(identity_mw.COOKIE_NAME)
+    if token:
+        try:
+            await run_in_threadpool(identity_store.end, token)
+        except Exception:  # noqa: BLE001 - sign-out never fails; the cookie goes regardless
+            logger.warning("identity session could not be ended at /logout", exc_info=True)
+        identity_mw.delete_identity_cookie(response)
     return response
 
 

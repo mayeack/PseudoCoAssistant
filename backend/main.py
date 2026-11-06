@@ -15,7 +15,7 @@ from backend.middleware.access_key import AccessKeyMiddleware
 from backend.middleware.body_limit import ChatBodyLimitMiddleware
 from backend.middleware.identity import IdentityMiddleware
 from backend.middleware.settings_gate import has_settings_access
-from backend.routers import chat, admin, auth, settings as settings_routes, incident, spray, toolguard, analytics, appointments, attachments
+from backend.routers import chat, admin, auth, settings as settings_routes, incident, spray, toolguard, analytics, appointments, attachments, identity_auth
 from backend.telemetry import otel, tracestate_guard
 
 # Cap inbound W3C tracestate before OpenTelemetry parses it (CVE-2026-114603).
@@ -95,6 +95,7 @@ app.include_router(toolguard.router)
 app.include_router(analytics.router)
 app.include_router(appointments.router)
 app.include_router(attachments.router)
+app.include_router(identity_auth.router)
 
 def _prewarm_llm_stack() -> None:
     """Absorb the first-turn cold start off the request path.
@@ -183,6 +184,16 @@ async def startup_event():
         logger.info("Settings loaded; HEC forwarders started")
     except Exception as e:
         logger.error(f"Failed to initialize settings/HEC: {e}")
+
+    # Lab 5 Duo sign-in: Duo's health check, once, on a daemon thread (never
+    # the event loop). Its result opens or closes the duo_signin host gate.
+    # A no-op unless DUO_ENABLED with the Web SDK keys and an https
+    # PUBLIC_BASE_URL (backend/services/identity_signin.py).
+    try:
+        from backend.services import identity_signin
+        identity_signin.start_health_check()
+    except Exception as e:
+        logger.error(f"Failed to start the Duo health check: {e}")
 
     # Pre-warm AFTER the persisted provider/model override is applied so the
     # right model gets loaded. Background thread: startup isn't blocked.
