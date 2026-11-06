@@ -80,9 +80,11 @@ def not_found(doc: Any) -> bool:
 
 def parse_end_user(doc: Any) -> Dict[str, Any]:
     """One getEndUser answer to ``{"trust", "failing_checks", "found"}``. CII's
-    "no such user" is ``found: False``. Any other answer with errors, or one
-    without details, raises: a partial or misshapen answer is a failed query,
-    never a user with no failing checks."""
+    "no such user" (``not_found``: an answer with no error at all) is
+    ``found: False``. Every answer that carries an error raises, whatever it
+    says or where it sits, and so does one without details: a partial or
+    misshapen answer is a failed query, never a user with no failing checks
+    and never "not in CII yet"."""
     if not_found(doc):
         return {"trust": "UNKNOWN", "failing_checks": [], "found": False}
     errors = doc.get("errors") if isinstance(doc, dict) else None

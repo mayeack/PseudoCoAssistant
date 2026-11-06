@@ -184,10 +184,14 @@ a guess, and a wrong guess turns a CII failure into a clean check.
 Spikes S5/S6 capture CII's real answer for a login it has no record of;
 if it is an error, that exact answer is added to the rule and the shared
 table, matched exactly.</li>
-<li>Any answer that carries an error is <code>unavailable</code>, details or not:
-a request-level error (no <code>data</code>), an error elsewhere or without a path,
-or a partial answer (say, <code>failingChecks</code> failed and came back null), so
-it can never pass for a clean check.</li>
+<li>Any answer that carries an error is <code>unavailable</code>, details or not,
+wherever the error sits: on <code>getEndUser</code> itself (with <code>getEndUser</code>
+null, or <code>data</code> null, since <code>GetEndUserOutput!</code> is non-null), on its
+<code>endUserDetails</code>, at the request level (no <code>data</code>), without a path, or
+in a partial answer (say, <code>failingChecks</code> failed and came back null).
+So it can never pass for a clean check. Only an <code>errors</code> that is
+absent, null or an empty list is no error at all; any other value
+carries one.</li>
 <li>What a partial answer did say still counts. GraphQL nulls only the
 fields that failed, so a trust level of <code>UNTRUSTED</code>, or a failing MFA
 Flood or Impossible Travel check, in its details blocks the turn whether

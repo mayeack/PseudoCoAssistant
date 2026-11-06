@@ -130,10 +130,14 @@ before any screen or model.
      Spikes S5/S6 capture CII's real answer for a login it has no record of;
      if it is an error, that exact answer is added to the rule and the shared
      table, matched exactly.
-   - Any answer that carries an error is `unavailable`, details or not:
-     a request-level error (no `data`), an error elsewhere or without a path,
-     or a partial answer (say, `failingChecks` failed and came back null), so
-     it can never pass for a clean check.
+   - Any answer that carries an error is `unavailable`, details or not,
+     wherever the error sits: on `getEndUser` itself (with `getEndUser`
+     null, or `data` null, since `GetEndUserOutput!` is non-null), on its
+     `endUserDetails`, at the request level (no `data`), without a path, or
+     in a partial answer (say, `failingChecks` failed and came back null).
+     So it can never pass for a clean check. Only an `errors` that is
+     absent, null or an empty list is no error at all; any other value
+     carries one.
    - What a partial answer did say still counts. GraphQL nulls only the
      fields that failed, so a trust level of `UNTRUSTED`, or a failing MFA
      Flood or Impossible Travel check, in its details blocks the turn whether
