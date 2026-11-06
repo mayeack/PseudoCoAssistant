@@ -1024,8 +1024,10 @@ function unverifiedOnly(identity) {
 }
 
 // Trust pill: colour is state. Duo status (locked out / disabled) wins over the
-// trust level; a lookup that could not answer shows a neutral note (the gate
-// fails open); nothing is shown until the server reports any of these.
+// trust level; a lookup that could not answer shows a neutral note; nothing is
+// shown until the server reports any of these. Its tooltip never contradicts
+// the banner: a lookup that did not answer in full lets messages through when
+// the gate fails open, and refuses them when it does not (the banner says why).
 const TRUST_PILL_COLORS = {
     trusted: ['bg-green-100', 'text-green-700'],
     favorable: ['bg-green-100', 'text-green-700'],
@@ -1053,9 +1055,17 @@ function renderTrustPill(identity) {
         return;
     }
     pill.textContent = key === 'unavailable' ? 'STATUS UNAVAILABLE' : key.replace('_', ' ').toUpperCase();
-    pill.title = key === 'unavailable'
-        ? 'Duo or Cisco Identity Intelligence could not be reached; your messages are not held up by it'
-        : (key === status ? 'Duo account status' : 'Cisco Identity Intelligence trust level');
+    const refused = identity.verdict === 'block' && !identity.override;
+    if (key === 'unavailable') {
+        pill.title = refused
+            ? 'Duo or Cisco Identity Intelligence did not answer in full, and your messages are refused (the banner says why)'
+            : 'Duo or Cisco Identity Intelligence could not be reached; your messages are not held up by it';
+    } else {
+        pill.title = (key === status ? 'Duo account status' : 'Cisco Identity Intelligence trust level')
+            + (refused && identity.identity_check === 'unavailable'
+                ? ' (Duo or Cisco Identity Intelligence did not answer in full; your messages are refused: the banner says why)'
+                : '');
+    }
     pill.classList.add(...TRUST_PILL_COLORS[key]);
     pill.classList.remove('hidden');
 }

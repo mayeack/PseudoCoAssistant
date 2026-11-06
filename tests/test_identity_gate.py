@@ -977,13 +977,21 @@ def test_rules() -> None:
     check("UI: the Unblock me toggle sits in #identityBanner (never the Demo Controls drawer), green accent",
           'id="identityUnblockToggle"' in banner and "peer-checked:bg-green-600" in banner
           and "identityUnblockToggle" not in drawer and "unblock" not in drawer.lower())
-    check("UI: the toggle calls /api/identity/unblock and /reblock; chat.js?v=39",
-          "'/api/identity/unblock' : '/api/identity/reblock'" in js and "/static/js/chat.js?v=39" in page)
+    check("UI: the toggle calls /api/identity/unblock and /reblock; chat.js?v=40",
+          "'/api/identity/unblock' : '/api/identity/reblock'" in js and "/static/js/chat.js?v=40" in page)
     banners = _banner_for({
         "fail_closed": {"signed_in": True, "username": "nina.osei", "verdict": "block", "identity_check": "unavailable",
                         "reasons": ["identity_unavailable"], "reasons_text": "your identity could not be verified"},
         "at_risk": {"signed_in": True, "username": "avery.kim", "verdict": "block", "identity_check": "ok",
                     "reasons": ["mfa_flood"], "reasons_text": "your account is failing the MFA Flood check"},
+        "fail_open": {"signed_in": True, "username": "nina.osei", "verdict": "allow", "identity_check": "unavailable",
+                      "reasons": []},
+        "fail_closed_cii_trusted": {"signed_in": True, "username": "nina.osei", "verdict": "block",
+                                    "identity_check": "unavailable", "trust_level": "TRUSTED",
+                                    "reasons": ["identity_unavailable"],
+                                    "reasons_text": "your identity could not be verified"},
+        "fail_closed_unblocked": {"signed_in": True, "username": "nina.osei", "verdict": "block", "override": True,
+                                  "identity_check": "unavailable", "reasons": ["identity_unavailable"]},
     })
     if banners is not None:
         closed, risk = banners.get("fail_closed") or {}, banners.get("at_risk") or {}
@@ -994,6 +1002,20 @@ def test_rules() -> None:
         check("UI: a block with a real reason keeps the at-risk banner",
               risk.get("kind") == "blocked" and risk.get("title") == "IDENTITY AT RISK"
               and "MFA Flood" in risk.get("text", ""), str(risk))
+        pills = {k: (banners.get(k) or {}).get("pill") or {} for k in
+                 ("fail_closed", "fail_open", "fail_closed_cii_trusted", "fail_closed_unblocked")}
+        check("UI: fail-closed, the trust pill's tooltip says messages are refused, as the banner does (never 'not "
+              "held up')", pills["fail_closed"].get("text") == "STATUS UNAVAILABLE"
+              and "refused" in pills["fail_closed"].get("title", "")
+              and "not held up" not in pills["fail_closed"].get("title", ""), str(pills["fail_closed"]))
+        check("UI: fail-open, the same pill says messages are not held up (no banner)",
+              "not held up" in pills["fail_open"].get("title", "") and not (banners.get("fail_open") or {}).get("shown"),
+              str(banners.get("fail_open")))
+        check("UI: fail-closed with CII still answering: its trust level shows, and its tooltip says why messages "
+              "are refused", pills["fail_closed_cii_trusted"].get("text") == "TRUSTED"
+              and "refused" in pills["fail_closed_cii_trusted"].get("title", ""), str(pills["fail_closed_cii_trusted"]))
+        check("UI: Unblock me on: messages go through, and the pill says they are not held up",
+              "not held up" in pills["fail_closed_unblocked"].get("title", ""), str(pills["fail_closed_unblocked"]))
     check("UI: the sign-in page offers Unblock me for a revoked session",
           'action="/api/identity/unblock"' in login and 'form.unblock' in login)
     claude = (ROOT / "CLAUDE.md").read_text()
@@ -1039,9 +1061,11 @@ for (const [name, me] of Object.entries(answers)) {
   ctx.__me = me;
   vm.runInContext('renderIdentity(__me)', ctx);
   const banner = els.identityBanner || { dataset: {}, _cls: new Set(['hidden']) };
+  const pill = els.identityTrust || { _cls: new Set(['hidden']) };
   out[name] = { kind: banner.dataset.kind || null, shown: !banner._cls.has('hidden'),
                 title: (els.identityBannerTitle || {}).textContent, text: (els.identityBannerText || {}).textContent,
-                unblock: els.identityBannerUnblock ? !els.identityBannerUnblock._cls.has('hidden') : null };
+                unblock: els.identityBannerUnblock ? !els.identityBannerUnblock._cls.has('hidden') : null,
+                pill: pill._cls.has('hidden') ? null : { text: pill.textContent, title: pill.title } };
 }
 console.log(JSON.stringify(out));
 """
