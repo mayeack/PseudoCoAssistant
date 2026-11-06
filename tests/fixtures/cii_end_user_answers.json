@@ -1,0 +1,322 @@
+{
+  "_about": "getEndUser answers that the app's gate (backend/services/identity_lookup._cii_parse) and the Mac's persona self-check (deploy/lab5/lab5_cii.parse_end_user) must read the same way. expect: found (details), not_found (CII's 'no such user'), unavailable (anything else). Run by tests/test_identity_gate.py and tests/test_identity_personas.py.",
+  "login": "avery.kim@pseudocoassistant.com",
+  "cases": [
+    {
+      "name": "details, an untrusted user failing two checks",
+      "expect": "found",
+      "trust": "UNTRUSTED",
+      "failing": [
+        "Impossible Travel",
+        "MFA Flood"
+      ],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [
+                "MFA Flood",
+                "Impossible Travel"
+              ],
+              "endUserTrustScore": {
+                "levelOfTrust": "UNTRUSTED",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "details, a neutral user failing nothing",
+      "expect": "found",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [],
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "the published shape for a user CII has no record of: endUserDetails null, no error",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": null,
+            "providerEndUserDetails": []
+          }
+        }
+      }
+    },
+    {
+      "name": "getEndUser null, no error",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": null
+        }
+      }
+    },
+    {
+      "name": "getEndUser null, a not-found error on it",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "data null (the non-null field failed), a NOT_FOUND error on getEndUser",
+      "expect": "not_found",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "message": "User does not exist",
+            "path": [
+              "getEndUser"
+            ],
+            "extensions": {
+              "code": "NOT_FOUND"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "endUserDetails null, a not-found error on endUserDetails",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": null
+          }
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser",
+              "endUserDetails"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "getEndUser null, a not-found error on its non-null endUserDetails",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "No such user",
+            "path": [
+              "getEndUser",
+              "endUserDetails"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "a request-level error (no data: a query the schema rejects)",
+      "expect": "unavailable",
+      "body": {
+        "errors": [
+          {
+            "message": "Field 'endUserDetails' not found in type: 'EndUser'"
+          }
+        ]
+      }
+    },
+    {
+      "name": "data null, an error with no path (a tenant problem)",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "message": "Tenant configuration not found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "a permission error on getEndUser itself",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "Permission does not exist for this API client",
+            "path": [
+              "getEndUser"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "a deeper partial failure (the details are null)",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": null
+          }
+        },
+        "errors": [
+          {
+            "message": "Trust score record not found",
+            "path": [
+              "getEndUser",
+              "endUserDetails",
+              "endUserTrustScore"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "details present, but failingChecks failed and came back null",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": null,
+              "endUserTrustScore": {
+                "levelOfTrust": "UNTRUSTED",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": [
+          {
+            "message": "Upstream timeout",
+            "path": [
+              "getEndUser",
+              "endUserDetails",
+              "failingChecks"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "a generic not-found with no path",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "message": "Requested resource not found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "the right words with a code that says otherwise",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ],
+            "extensions": {
+              "code": "FORBIDDEN"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a not-found error on getEndUser while getEndUser is an object",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": null
+          }
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "an empty data object",
+      "expect": "unavailable",
+      "body": {
+        "data": {}
+      }
+    },
+    {
+      "name": "data null, no error",
+      "expect": "unavailable",
+      "body": {
+        "data": null
+      }
+    },
+    {
+      "name": "getEndUser without endUserDetails",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": {}
+        }
+      }
+    },
+    {
+      "name": "errors that are not a list",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": "boom"
+      }
+    }
+  ]
+}

@@ -175,12 +175,19 @@ of yet, such as a new participant account, gets <code>identity_check=&quot;ok&qu
 and, with nothing against it, is allowed. The badge shows no trust
 level for it.</li>
 <li>CII's &quot;no such user&quot; is read from the answer's shape, never from the
-wording of just any error: <code>getEndUser</code> is null (or <code>data</code> is null
-because that field failed), and any error is about <code>getEndUser</code> itself
-(<code>path: [&quot;getEndUser&quot;]</code>), says the user was not found, and carries no
-other code. A request-level error (no <code>data</code>), an error elsewhere or
-without a path, or a nested failure is <code>unavailable</code>, so it can never
-pass for a clean check.</li>
+wording of just any error. The user's details stop at <code>endUserDetails</code>
+(present and null: the published <code>GetEndUserOutput!</code> answer for a user
+CII has no record of), at <code>getEndUser</code>, or at <code>data</code> (a non-null field
+failed). Any error sits on <code>getEndUser</code> or its <code>endUserDetails</code>, at or
+below where the details stop, says the user was not found, and carries
+no other code.</li>
+<li>Any other answer that carries an error is <code>unavailable</code>, details or not:
+a request-level error (no <code>data</code>), an error elsewhere or without a path,
+or a partial answer (say, <code>failingChecks</code> failed and came back null), so
+it can never pass for a clean check.</li>
+<li>The Mac's persona self-check (<code>deploy/lab5/lab5_cii.py</code>) reads CII by
+the same rule, and both run the cases in
+<code>tests/fixtures/cii_end_user_answers.json</code>.</li>
 </ul>
 </li>
 </ol>

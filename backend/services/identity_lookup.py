@@ -472,31 +472,58 @@ def _error_code_of(error: Mapping[str, Any]) -> str:
     return re.sub(r"[^A-Z0-9]+", "", str(code).upper())
 
 
+#: Where a CII "no such user" error may sit: on ``getEndUser`` itself, or on
+#: its ``endUserDetails`` (the published ``GetEndUserOutput!`` keeps the
+#: wrapper and nulls the details).
+_CII_NOT_FOUND_PATHS = (["getEndUser"], ["getEndUser", "endUserDetails"])
+
+
 def _cii_not_found(body: Any) -> bool:
     """Whether a GraphQL answer is CII's own "no such user".
 
-    Only ``getEndUser`` itself may be missing: ``data`` is there, and either
-    an object whose ``getEndUser`` is null, or null itself because that
-    non-null field failed (GraphQL nulls the parent of a failed non-null
-    field). With no error, a null ``getEndUser`` is the answer. With errors,
-    every one must be about that field (``path`` exactly ``["getEndUser"]``)
-    and say that the user was not found (``_CII_USER_NOT_FOUND_RE``), and a
-    code it carries must be one of ``CII_NOT_FOUND_CODES``. Anything else is
-    not an answer: a request-level error (no ``data``: a query the schema
-    rejects), an error at another path or none (a nested or partial failure,
-    a tenant or permission problem), or other wording."""
+    The user's details must stop at one of three places, and nowhere deeper:
+    ``data`` is null (a non-null field failed and GraphQL nulled its parent),
+    ``getEndUser`` is null, or ``getEndUser`` is an object whose
+    ``endUserDetails`` is present and null. The last is the published schema's
+    answer for a user CII has no record of yet (``GetEndUserOutput!`` with a
+    nullable ``endUserDetails``). With no error, a null ``getEndUser`` or null
+    details is the answer; a null ``data`` is not. With errors, every one must
+    sit on ``getEndUser`` or its ``endUserDetails`` (``_CII_NOT_FOUND_PATHS``),
+    at or below where the details stop, say that the user was not found
+    (``_CII_USER_NOT_FOUND_RE``), and carry no code or one of
+    ``CII_NOT_FOUND_CODES``. Anything else is not an answer: a request-level
+    error (no ``data``: a query the schema rejects), an error at another path
+    or none (a deeper partial failure, a tenant or permission problem), or
+    other wording.
+
+    ``deploy/lab5/lab5_cii.py`` applies the same rule on the Mac;
+    ``tests/fixtures/cii_end_user_answers.json`` holds the cases both must
+    read the same way."""
     if not isinstance(body, Mapping) or "data" not in body:
         return False
     data, errors = body.get("data"), body.get("errors")
-    if data is not None and not (isinstance(data, Mapping) and "getEndUser" in data
-                                 and data.get("getEndUser") is None):
+    if data is None:
+        stop = 0
+    elif isinstance(data, Mapping) and "getEndUser" in data:
+        end_user = data.get("getEndUser")
+        if end_user is None:
+            stop = 1
+        elif (isinstance(end_user, Mapping) and "endUserDetails" in end_user
+              and end_user.get("endUserDetails") is None):
+            stop = 2
+        else:
+            return False
+    else:
         return False
     if not errors:
-        return data is not None
+        return stop > 0
     if not isinstance(errors, list):
         return False
     for error in errors:
-        if not isinstance(error, Mapping) or error.get("path") != ["getEndUser"]:
+        if not isinstance(error, Mapping):
+            return False
+        path = error.get("path")
+        if path not in _CII_NOT_FOUND_PATHS or len(path) < stop:
             return False
         if not _CII_USER_NOT_FOUND_RE.search(str(error.get("message") or "")[:1000]):
             return False
@@ -504,6 +531,31 @@ def _cii_not_found(body: Any) -> bool:
         if code and code not in CII_NOT_FOUND_CODES:
             return False
     return True
+
+
+def _cii_parse(body: Any) -> Dict[str, Any]:
+    """One GraphQL answer to ``{state, trust_level, failing_checks, [error], fetched_at}``.
+
+    CII's "no such user" (``_cii_not_found``) is ``not_found``. Any other
+    answer that carries errors is ``unavailable``, even with details in it: a
+    partial answer (say, ``failingChecks`` failed and came back null) would
+    otherwise read as a user with no failing checks. Details with no error
+    are ``ok``; anything else is ``unavailable``."""
+    if _cii_not_found(body):
+        return {"state": NOT_FOUND, "trust_level": None, "failing_checks": [], "fetched_at": _now_iso()}
+    if not isinstance(body, Mapping):
+        return _unavailable("bad_response")
+    if body.get("errors"):
+        return _unavailable("graphql_error")
+    data = body.get("data")
+    end_user = data.get("getEndUser") if isinstance(data, Mapping) else None
+    details = end_user.get("endUserDetails") if isinstance(end_user, Mapping) else None
+    if not isinstance(details, Mapping):
+        return _unavailable("bad_response")
+    score = details.get("endUserTrustScore") if isinstance(details.get("endUserTrustScore"), Mapping) else {}
+    level = str(score.get("levelOfTrust") or "").strip().upper() or None
+    return {"state": OK, "trust_level": level if level in TRUST_LEVELS or level is None else "OTHER",
+            "failing_checks": _sanitize_checks(details.get("failingChecks")), "fetched_at": _now_iso()}
 
 
 def _cii_fetch(login: str) -> Dict[str, Any]:
@@ -525,18 +577,7 @@ def _cii_fetch(login: str) -> Dict[str, Any]:
         body = response.json()
     except ValueError:
         return _unavailable("bad_response")
-    data = body.get("data") if isinstance(body, dict) else None
-    end_user = data.get("getEndUser") if isinstance(data, dict) else None
-    details = end_user.get("endUserDetails") if isinstance(end_user, dict) else None
-    if not isinstance(details, dict):
-        if _cii_not_found(body):
-            return {"state": NOT_FOUND, "trust_level": None, "failing_checks": [], "fetched_at": _now_iso()}
-        errors = body.get("errors") if isinstance(body, dict) else None
-        return _unavailable("graphql_error" if errors else "bad_response")
-    score = details.get("endUserTrustScore") if isinstance(details.get("endUserTrustScore"), dict) else {}
-    level = str(score.get("levelOfTrust") or "").strip().upper() or None
-    return {"state": OK, "trust_level": level if level in TRUST_LEVELS or level is None else "OTHER",
-            "failing_checks": _sanitize_checks(details.get("failingChecks")), "fetched_at": _now_iso()}
+    return _cii_parse(body)
 
 
 def cii_login(username: str, duo_answer: Optional[Mapping[str, Any]] = None) -> Optional[str]:

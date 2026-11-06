@@ -11,9 +11,13 @@ The shape is the published schema's (docs.oort.io Public API), the same one
 the app's gate asks (``backend/services/identity_lookup.CII_END_USER_QUERY``;
 tests/test_identity_personas.py pins the two together):
 ``getEndUser(login: String!): GetEndUserOutput!``, whose ``endUserDetails``
-carries ``failingChecks`` and ``endUserTrustScore { levelOfTrust }``. A null
-``endUserDetails`` (or ``getEndUser``) is a user CII has no record of yet.
-Spikes S5/S6 confirm it on the tenant; personas.yaml ``cii.end_user_query``
+carries ``failingChecks`` and ``endUserTrustScore { levelOfTrust }``. A user
+CII has no record of yet reads the way the gate reads it (``not_found``): the
+details stop at ``endUserDetails`` or ``getEndUser`` (or ``data``), and any
+error sits on one of those two fields and says the user was not found. Any
+other error is a failed query, never "not in CII yet".
+``tests/fixtures/cii_end_user_answers.json`` holds the cases the two must read
+the same way. Spikes S5/S6 confirm the shape on the tenant; personas.yaml ``cii.end_user_query``
 overrides the query, and an override must keep that shape, which is what the
 parser reads. Values are parsed defensively: a trust level may come back as a
 string or as an object, and a failing check as a name or as an object.
@@ -21,6 +25,7 @@ string or as an object, and a failing check as a name or as an object.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -36,6 +41,13 @@ END_USER_QUERY = ("query Lab5EndUser($login: String!) { getEndUser(login: $login
 TRUST_LEVELS = ("TRUSTED", "FAVORABLE", "NEUTRAL", "QUESTIONABLE", "UNTRUSTED", "UNKNOWN")
 GOOD_TRUST = ("TRUSTED", "FAVORABLE", "NEUTRAL")
 
+# CII's "no such user" (the gate's rule: backend/services/identity_lookup._cii_not_found).
+NOT_FOUND_PATHS = (["getEndUser"], ["getEndUser", "endUserDetails"])
+NOT_FOUND_CODES = frozenset({"NOTFOUND", "USERNOTFOUND", "ENDUSERNOTFOUND"})
+_USER_NOT_FOUND_RE = re.compile(
+    r"\b(?:end[ _-]?)?user\b[^\n]{0,200}?\b(?:not (?:been )?found|(?:does not|doesn't|not) exist)"
+    r"|\bno (?:such )?(?:end[ _-]?)?user\b", re.IGNORECASE)
+
 Transport = Callable[[str, str, Dict[str, str], Optional[bytes], float], Tuple[int, bytes]]
 
 
@@ -50,6 +62,81 @@ def _check_name(value: Any) -> str:
     if isinstance(value, dict):
         value = value.get("name") or value.get("checkId") or value.get("id") or value.get("title")
     return str(value or "").strip()
+
+
+def _error_code(error: Dict[str, Any]) -> str:
+    extensions = error.get("extensions") if isinstance(error.get("extensions"), dict) else {}
+    code = extensions.get("code") or extensions.get("errorType") or error.get("errorType") or ""
+    return re.sub(r"[^A-Z0-9]+", "", str(code).upper())
+
+
+def not_found(doc: Any) -> bool:
+    """Is this GraphQL answer CII's "no such user"? The same rule as the gate's
+    ``_cii_not_found``: the details stop at ``data``, ``getEndUser`` or a present,
+    null ``endUserDetails``; with no error a null ``getEndUser`` or null details
+    is the answer; every error sits on ``getEndUser`` or ``endUserDetails``, at or
+    below where the details stop, says the user was not found, and carries no
+    code or a not-found one."""
+    if not isinstance(doc, dict) or "data" not in doc:
+        return False
+    data, errors = doc.get("data"), doc.get("errors")
+    if data is None:
+        stop = 0
+    elif isinstance(data, dict) and "getEndUser" in data:
+        user = data.get("getEndUser")
+        if user is None:
+            stop = 1
+        elif isinstance(user, dict) and "endUserDetails" in user and user.get("endUserDetails") is None:
+            stop = 2
+        else:
+            return False
+    else:
+        return False
+    if not errors:
+        return stop > 0
+    if not isinstance(errors, list):
+        return False
+    for error in errors:
+        if not isinstance(error, dict):
+            return False
+        path = error.get("path")
+        if path not in NOT_FOUND_PATHS or len(path) < stop:
+            return False
+        if not _USER_NOT_FOUND_RE.search(str(error.get("message") or "")[:1000]):
+            return False
+        code = _error_code(error)
+        if code and code not in NOT_FOUND_CODES:
+            return False
+    return True
+
+
+def parse_end_user(doc: Any) -> Dict[str, Any]:
+    """One getEndUser answer to ``{"trust", "failing_checks", "found"}``. CII's
+    "no such user" is ``found: False``. Any other answer with errors, or one
+    without details, raises: a partial or misshapen answer is a failed query,
+    never a user with no failing checks."""
+    if not_found(doc):
+        return {"trust": "UNKNOWN", "failing_checks": [], "found": False}
+    errors = doc.get("errors") if isinstance(doc, dict) else None
+    if errors:
+        first = errors[0] if isinstance(errors, list) and errors else errors
+        message = str(first.get("message") if isinstance(first, dict) else first)[:200]
+        raise Lab5Error(f"CII query failed ({message}); spikes S5/S6 pin the query: "
+                        "set cii.end_user_query in scripts/identity/personas.yaml")
+    data = doc.get("data") if isinstance(doc, dict) else None
+    user = data.get("getEndUser") if isinstance(data, dict) else None
+    details = user.get("endUserDetails") if isinstance(user, dict) else None
+    if not isinstance(details, dict):
+        raise Lab5Error("CII answered getEndUser in a shape the self-check cannot read (no endUserDetails); "
+                        "spikes S5/S6 pin the query: set cii.end_user_query in scripts/identity/personas.yaml")
+    score = details.get("endUserTrustScore")
+    level = score.get("levelOfTrust") if isinstance(score, dict) else score
+    checks = details.get("failingChecks") or []
+    if not isinstance(checks, list):
+        checks = [checks]
+    return {"trust": _trust(level),
+            "failing_checks": sorted({_check_name(c) for c in checks if _check_name(c)}),
+            "found": True}
 
 
 class CIIClient:
@@ -92,27 +179,10 @@ class CIIClient:
         return token
 
     def end_user(self, login: str) -> Dict[str, Any]:
-        """``{"trust": "NEUTRAL", "failing_checks": [...], "found": bool}``."""
+        """``{"trust": "NEUTRAL", "failing_checks": [...], "found": bool}`` (``parse_end_user``)."""
         doc = self._post(self.api_url, {"query": self.query, "variables": {"login": login}},
                          {"Authorization": f"Bearer {self.token()}"})
-        if doc.get("errors"):
-            first = doc["errors"][0] if isinstance(doc["errors"], list) and doc["errors"] else {}
-            message = str(first.get("message") if isinstance(first, dict) else first)[:200]
-            raise Lab5Error(f"CII query failed ({message}); spikes S5/S6 pin the query: "
-                            "set cii.end_user_query in scripts/identity/personas.yaml")
-        data = doc.get("data") if isinstance(doc.get("data"), dict) else {}
-        user = data.get("getEndUser")
-        details = user.get("endUserDetails") if isinstance(user, dict) else None
-        if not isinstance(details, dict):
-            return {"trust": "UNKNOWN", "failing_checks": [], "found": False}
-        score = details.get("endUserTrustScore")
-        level = score.get("levelOfTrust") if isinstance(score, dict) else score
-        checks = details.get("failingChecks") or []
-        if not isinstance(checks, list):
-            checks = [checks]
-        return {"trust": _trust(level),
-                "failing_checks": sorted({_check_name(c) for c in checks if _check_name(c)}),
-                "found": True}
+        return parse_end_user(doc)
 
 
 def cii_client(keychain: Keychain, transport: Transport, query: str = "") -> CIIClient:

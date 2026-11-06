@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import io
+import json
 import os
 import random
 import re
@@ -569,6 +570,25 @@ def test_cii_client() -> None:
     except Lab5Error:
         ok = True
     check("a plain-http CII URL is refused", ok)
+
+    # The gate (backend/services/identity_lookup._cii_parse) runs the same table
+    # in tests/test_identity_gate.py: a user the gate reads as "not in CII yet"
+    # is one the self-check reads that way too, and an answer the gate counts
+    # as an outage is a failed query here, never "not found".
+    table = json.loads((ROOT / "tests" / "fixtures" / "cii_end_user_answers.json").read_text())
+    for case in table["cases"]:
+        try:
+            got = cii.parse_end_user(case["body"])
+        except Lab5Error:
+            got = None
+        if case["expect"] == "unavailable":
+            check(f"{case['name']}: a failed query (Lab5Error)", got is None, str(got))
+        elif case["expect"] == "not_found":
+            check(f"{case['name']}: not in CII yet", got == {"trust": "UNKNOWN", "failing_checks": [],
+                                                              "found": False}, str(got))
+        else:
+            check(f"{case['name']}: the user's details", got is not None and got["found"] is True
+                  and got["trust"] == case["trust"] and got["failing_checks"] == sorted(case["failing"]), str(got))
 
 
 # =========================================================================== launchd

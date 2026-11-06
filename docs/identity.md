@@ -121,12 +121,19 @@ before any screen or model.
      and, with nothing against it, is allowed. The badge shows no trust
      level for it.
    - CII's "no such user" is read from the answer's shape, never from the
-     wording of just any error: `getEndUser` is null (or `data` is null
-     because that field failed), and any error is about `getEndUser` itself
-     (`path: ["getEndUser"]`), says the user was not found, and carries no
-     other code. A request-level error (no `data`), an error elsewhere or
-     without a path, or a nested failure is `unavailable`, so it can never
-     pass for a clean check.
+     wording of just any error. The user's details stop at `endUserDetails`
+     (present and null: the published `GetEndUserOutput!` answer for a user
+     CII has no record of), at `getEndUser`, or at `data` (a non-null field
+     failed). Any error sits on `getEndUser` or its `endUserDetails`, at or
+     below where the details stop, says the user was not found, and carries
+     no other code.
+   - Any other answer that carries an error is `unavailable`, details or not:
+     a request-level error (no `data`), an error elsewhere or without a path,
+     or a partial answer (say, `failingChecks` failed and came back null), so
+     it can never pass for a clean check.
+   - The Mac's persona self-check (`deploy/lab5/lab5_cii.py`) reads CII by
+     the same rule, and both run the cases in
+     `tests/fixtures/cii_end_user_answers.json`.
 
 ### The block event
 

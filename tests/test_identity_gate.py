@@ -221,10 +221,12 @@ class FakeServices:
         login = body.get("variables", {}).get("login")
         user = self.cii.get(login)
         if user is None:
-            # A resolver error is about its field: GraphQL puts the field's path on it.
-            return httpx.Response(200, json={"data": {"getEndUser": None},
-                                             "errors": [{"message": f"End user {login} not found",
-                                                         "path": ["getEndUser"]}]})
+            # The published schema's answer for a user CII has no record of
+            # (GetEndUserOutput! with null details), the same as the Mac's
+            # tests/lab5_fakes.FakeCII; the other "no such user" shapes are in
+            # tests/fixtures/cii_end_user_answers.json.
+            return httpx.Response(200, json={"data": {"getEndUser": {"endUserDetails": None,
+                                                                     "providerEndUserDetails": []}}})
         return httpx.Response(200, json={"data": {"getEndUser": {"endUserDetails": {
             "login": login, "status": "ACTIVE", "failingChecks": user["failingChecks"],
             "endUserTrustScore": {"levelOfTrust": user["levelOfTrust"], "lastUpdated": "2026-11-05T09:00:00Z"}}}}})
@@ -409,54 +411,30 @@ def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
     _configure(True)
     fake = _fresh_fake()
     fake.set_user("avery.kim", trust="UNTRUSTED", failing=["MFA Flood", "Impossible Travel"])
-    login = "avery.kim@pseudocoassistant.com"
-    misread = {
-        "a request-level error (no data: a query the schema rejects)":
-            {"errors": [{"message": "Field 'endUserDetails' not found in type: 'EndUser'"}]},
-        "data null, an error with no path (a tenant problem)":
-            {"data": None, "errors": [{"message": "Tenant configuration not found"}]},
-        "a permission error on getEndUser itself":
-            {"data": {"getEndUser": None}, "errors": [{"message": "Permission does not exist for this API client",
-                                                       "path": ["getEndUser"]}]},
-        "a nested partial failure (the details are null)":
-            {"data": {"getEndUser": {"endUserDetails": None}},
-             "errors": [{"message": "Trust score record not found",
-                         "path": ["getEndUser", "endUserDetails", "endUserTrustScore"]}]},
-        "a generic not-found with no path":
-            {"data": None, "errors": [{"message": "Requested resource not found"}]},
-        "the right words with a code that says otherwise":
-            {"data": {"getEndUser": None}, "errors": [{"message": f"End user {login} not found",
-                                                       "path": ["getEndUser"], "extensions": {"code": "FORBIDDEN"}}]},
-        "an empty data object":
-            {"data": {}},
-    }
-    for name, body in misread.items():
+    table = json.loads((ROOT / "tests" / "fixtures" / "cii_end_user_answers.json").read_text())
+    check("the shared answer table has every kind of answer",
+          {c["expect"] for c in table["cases"]} == {"found", "not_found", "unavailable"})
+    for case in table["cases"]:
+        name, body, expect = case["name"], case["body"], case["expect"]
         fake.cii_body = body
         lookup.clear_cache()
         st = lookup.lookup("avery.kim")
         closed = gate.decide(st, fail_open=False)
         opened = gate.decide(st, fail_open=True)
-        check(f"{name}: CII unavailable, never not_found; fail-closed blocks, fail-open says unavailable",
-              st["sources"] == {"duo": "ok", "cii": "unavailable"} and st["available"] is False
-              and closed["verdict"] == "block" and closed["reasons"] == ["identity_unavailable"]
-              and opened["verdict"] == "allow" and opened["check"] == "unavailable", f"{st} {closed}")
-    answers = {
-        "getEndUser null, no error": {"data": {"getEndUser": None}},
-        "getEndUser null, a not-found error on it": {
-            "data": {"getEndUser": None},
-            "errors": [{"message": f"End user {login} not found", "path": ["getEndUser"]}]},
-        "data null (the non-null field failed), a NOT_FOUND error on getEndUser": {
-            "data": None,
-            "errors": [{"message": "User does not exist", "path": ["getEndUser"], "extensions": {"code": "NOT_FOUND"}}]},
-    }
-    for name, body in answers.items():
-        fake.cii_body = body
-        lookup.clear_cache()
-        st = lookup.lookup("avery.kim")
-        v = gate.decide(st, fail_open=False)
-        check(f"{name}: CII's 'no such user', an answer (check ok)",
-              st["sources"] == {"duo": "ok", "cii": "not_found"} and st["available"] is True
-              and v["check"] == "ok" and v["verdict"] == "allow", f"{st} {v}")
+        if expect == "unavailable":
+            check(f"{name}: CII unavailable, never not_found; fail-closed blocks, fail-open says unavailable",
+                  st["sources"] == {"duo": "ok", "cii": "unavailable"} and st["available"] is False
+                  and closed["verdict"] == "block" and closed["reasons"] == ["identity_unavailable"]
+                  and opened["verdict"] == "allow" and opened["check"] == "unavailable", f"{st} {closed}")
+        elif expect == "not_found":
+            check(f"{name}: CII's 'no such user', an answer (check ok)",
+                  st["sources"] == {"duo": "ok", "cii": "not_found"} and st["available"] is True
+                  and closed["check"] == "ok" and closed["verdict"] == "allow", f"{st} {closed}")
+        else:
+            check(f"{name}: read as the user's details",
+                  st["sources"] == {"duo": "ok", "cii": "ok"} and st["available"] is True
+                  and st["trust_level"] == case["trust"]
+                  and sorted(st["failing_checks"]) == sorted(case["failing"]), str(st))
     fake.cii_body = None
     lookup.clear_cache()
 
