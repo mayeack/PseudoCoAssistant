@@ -1339,8 +1339,8 @@ def test_victim_clash_after_down() -> None:
     for name, root, why in (
             ("its workshop file names avery.kim again (a swap back that check previewed)",
              world({"01": swapped}, [failed], saved_victim="avery.kim"),
-             "its workshop file names avery.kim (as of its last check, up, status or down), so its fresh cards "
-             "would carry codes for avery.kim again"),
+             "its workshop file names avery.kim (as of its last check, up, status, down or handouts), so its "
+             "fresh cards would carry codes for avery.kim again"),
             ("its workshop.json names no victim", world({"01": swapped}, [failed], saved={}),
              "nothing on this Mac says which victim its workshop file names"),
             ("its file turns bypass codes off",
@@ -1379,8 +1379,8 @@ def test_victim_clash_after_down() -> None:
     lists = lambda *nn: dict(on, instances=list(nn))
     ended = dict(gone, env=dict(swapped["env"], reverted=True, serves=[]))
     wait = lp_minute(now + 7200)
-    dropped_note = ("Its workshop file no longer lists instance(s) 02 (as of its last check, up, status or down), and "
-                    "`down` and `handouts` reach only the instances it lists")
+    dropped_note = ("Its workshop file no longer lists instance(s) 02 (as of its last check, up, status, down or "
+                    "handouts), and `down` and `handouts` reach only the instances it lists")
     for name, root in (
             ("both cards hold the old victim's codes",
              world({"01": swapped, "02": swapped}, [failed], saved=lists("01"), handout=("01", "02"),
@@ -1531,6 +1531,31 @@ def lp_minute(ts: float) -> str:
 def lb_unreadable_until(path: Path) -> float:
     import lab5_bypass
     return lab5_bypass.unreadable_until(path)
+
+
+def test_workshop_file_recorded() -> None:
+    print("== workshop.json keeps what the workshop file says at each check, up, status, down and handouts ==")
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        saved = tmp / "state" / "workshops" / "acme" / "workshop.json"
+        read = lambda: json.loads(saved.read_text())  # noqa: E731
+        rc, out = run_cli(world, tmp, "check")
+        check("check records the victim, the settings and the instances the file lists, next to the zone",
+              rc == 0 and read().get("victim") == "avery.kim" and read().get("instances") == ["01", "02"]
+              and read().get("participants_enabled") is False and read().get("zone_id"), str(read()))
+        (tmp / "workshop.yaml").write_text(WORKSHOP_YAML.replace("  - instance: 2\n    host: 198.51.100.2\n", ""))
+        saved.write_text('{"victim": "ave')                               # cut short
+        rc, out = run_cli(world, tmp, "handouts")
+        check("handouts records it too, before it refuses (participant accounts are off here), and writes afresh "
+              "a workshop.json that cannot be read",
+              rc == 2 and "participants.enabled is false" in out and read().get("instances") == ["01"]
+              and read().get("victim") == "avery.kim" and read().get("participants_enabled") is False,
+              out + saved.read_text())
+        saved.write_text("[1, 2]")                                        # JSON, but not an object
+        rc, out = run_cli(world, tmp, "check")
+        check("check writes afresh a workshop.json that is not an object, never a traceback",
+              rc == 0 and read().get("instances") == ["01"] and read().get("zone_id"), out + saved.read_text())
 
 
 def test_victim_swap_in_progress() -> None:
@@ -1684,8 +1709,8 @@ def main() -> int:
                  test_wrong_password_and_cli, test_down_failures_are_failures, test_identity_values_and_rollback,
                  test_diff_on_long_env,
                  test_example_yaml, test_cloudflare_client, test_remote_helpers, test_status_victim_check,
-                 test_shared_victim_refused, test_victim_clash_after_down, test_victim_swap_in_progress,
-                 test_lost_session_is_a_lab5_error):
+                 test_shared_victim_refused, test_victim_clash_after_down, test_workshop_file_recorded,
+                 test_victim_swap_in_progress, test_lost_session_is_a_lab5_error):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

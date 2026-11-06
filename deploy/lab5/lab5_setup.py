@@ -1442,16 +1442,26 @@ def connect_cloudflare(ctx: Ctx, transport: Callable[..., Tuple[int, bytes]]) ->
         ctx.zone_id, ctx.account_id = ws.zone_id or zone_id, ws.account_id or account_id
     if not ctx.account_id:
         raise Lab5Error("could not tell the Cloudflare account from the zone; set cloudflare.account_id")
-    saved = ctx.state.load_workshop()
-    # What the file says now (victim_clashes reads it for another workshop's
-    # refusal): its victim, its settings, and the instances it lists, which
-    # are all that `down` and `handouts` reach. A box's own record says what
-    # it serves.
-    saved.update(workshop=ws.name, zone=ws.zone, zone_id=ctx.zone_id, account_id=ctx.account_id,
-                 victim=ws.victim, participants_enabled=ws.participants_enabled,
-                 bypass_codes_enabled=ws.bypass_codes.enabled, instances=[b.nn for b in ws.boxes])
-    ctx.state.save_workshop(saved)
+    record_file(ctx.state, ws, zone=ws.zone, zone_id=ctx.zone_id, account_id=ctx.account_id)
     ctx.out.line(f"Cloudflare: zone {ws.zone} ({ctx.zone_id}), token {last4(token)}")
+
+
+def record_file(state: StateStore, ws: Workshop, **more: Any) -> None:
+    """Keep in workshop.json what the workshop file says now: its victim, its
+    settings, and the instances it lists, which are all that `down` and
+    `handouts` reach (``more``: what this run learned besides). Every
+    check, up, status, down and handouts run does, so another workshop's
+    clash refusal (victim_clashes) reads the file this one last ran with; a
+    box's own record says what it serves. A workshop.json that cannot be
+    read is written afresh: it holds nothing a later run does not rewrite."""
+    try:
+        saved = state.load_workshop()
+    except (OSError, ValueError):
+        saved = {}
+    saved = saved if isinstance(saved, dict) else {}
+    saved.update(more, workshop=ws.name, victim=ws.victim, participants_enabled=ws.participants_enabled,
+                 bypass_codes_enabled=ws.bypass_codes.enabled, instances=[b.nn for b in ws.boxes])
+    state.save_workshop(saved)
 
 
 def _state_doc(path: Path) -> Optional[Dict[str, Any]]:
@@ -1509,11 +1519,15 @@ def _box_running(rec: Optional[Dict[str, Any]]) -> bool:
     return not (rec.get("env") or {}).get("reverted") and not rec.get("revert_pending")
 
 
+#: When what another workshop's file says was recorded (``record_file``).
+_RECORDED = "as of its last check, up, status, down or handouts"
+
+
 def _listed_instances(saved: Optional[Dict[str, Any]]) -> Optional[List[str]]:
     """The instances another workshop's file listed at its last check, up,
-    status or down (workshop.json), the only ones its `down` and `handouts`
-    reach; None when nothing on this Mac says (a workshop.json from before
-    it kept them, or a field of the wrong type)."""
+    status, down or handouts (workshop.json), the only ones its `down` and
+    `handouts` reach; None when nothing on this Mac says (a workshop.json
+    from before it kept them, or a field of the wrong type)."""
     listed = (saved or {}).get("instances")
     if not isinstance(listed, list) or not all(isinstance(nn, str) for nn in listed):
         return None
@@ -1532,19 +1546,19 @@ def _handouts_blocker(other: Path, saved: Optional[Dict[str, Any]], victim: str,
     then deletes the card's earlier batches. So it clears those codes only
     when that file names another victim and turns participant accounts and
     bypass codes on (what workshop.json kept at that workshop's last check,
-    up, status or down), and when its handout has a card for each of those
-    instances."""
+    up, status, down or handouts), and when its handout has a card for each
+    of those instances."""
     saved = saved or {}
     names = str(saved.get("victim") or "").strip().lower()
     if not names:
         return (f"nothing on this Mac says which victim its workshop file names, so its fresh cards may carry codes "
                 f"for {victim} again")
     if names == victim.strip().lower():
-        return (f"its workshop file names {victim} (as of its last check, up, status or down), so its fresh cards "
-                f"would carry codes for {victim} again")
+        return (f"its workshop file names {victim} ({_RECORDED}), so its fresh cards would carry codes for "
+                f"{victim} again")
     if saved.get("participants_enabled") is False or saved.get("bypass_codes_enabled") is False:
-        return ("its workshop file turns participant accounts or bypass codes off (as of its last check, up, status "
-                "or down), so `handouts` puts no codes on its cards")
+        return (f"its workshop file turns participant accounts or bypass codes off ({_RECORDED}), so `handouts` "
+                "puts no codes on its cards")
     handout = participants.Handout(other, other.name)
     if not handout.csv_path.exists():
         return "its handout is gone, and `handouts` puts codes only on a card its handout holds"
@@ -1585,8 +1599,8 @@ def victim_clashes(root: Path, ws: Workshop, now: float) -> List[str]:
     names each of these and the steps that clear all of them together.
 
     `down` and `handouts` reach only the instances that workshop's file
-    lists (``_listed_instances``, as its last check, up, status or down
-    recorded). A box or card that holds the victim but belongs to an
+    lists (``_listed_instances``, as its last check, up, status, down or
+    handouts recorded). A box or card that holds the victim but belongs to an
     instance the file no longer lists (a box dropped from it, say, because
     Show destroyed it) is cleared by neither until that instance is back in
     the file, so the steps start there; and only a box the file lists counts
@@ -1732,8 +1746,8 @@ def _clash_advice(other: Path, admits: Sequence[str], unknown_boxes: Sequence[st
     if wait_alone is not None and acts:
         advice += f", or wait until {participants.minute(wait_alone)}"
     if unlisted:
-        note = (f". Its workshop file no longer lists instance(s) {', '.join(unlisted)} (as of its last check, up, "
-                f"status or down), and `down` and `handouts` reach only the instances it lists") + note
+        note = (f". Its workshop file no longer lists instance(s) {', '.join(unlisted)} ({_RECORDED}), and `down` "
+                f"and `handouts` reach only the instances it lists") + note
     return advice + note
 
 
@@ -1840,13 +1854,16 @@ def run_handouts(args: argparse.Namespace, deps: Deps) -> int:
     except Lab5Error as exc:
         print(f"lab5-setup: {exc}", file=out)
         return 2
+    state = StateStore(deps.state_root or StateStore.default_root(), ws.name)
+    # Before any refusal: another workshop's clash refusal names this step
+    # and reads what this file says (a box dropped from it, say).
+    record_file(state, ws)
     if not ws.participants_enabled:
         print("lab5-setup handouts: participants.enabled is false, so there is no handout to put codes on", file=out)
         return 2
     if not ws.bypass_codes.enabled:
         print("lab5-setup handouts: bypass_codes.enabled is false in the workshop file", file=out)
         return 2
-    state = StateStore(deps.state_root or StateStore.default_root(), ws.name)
     state.ensure()
     reporter = Reporter(redactor, out=out, log_path=state.run_log("handouts"))
     keychain = Keychain(redactor, deps.keychain_runner) if deps.keychain_runner else Keychain(redactor)

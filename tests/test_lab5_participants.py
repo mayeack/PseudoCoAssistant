@@ -2230,6 +2230,45 @@ def test_victim_clash_advice_clears_it() -> None:
         rc, out = globex("check")
         check("...followed, it clears", "is still in use by workshop" not in out, out)
 
+    # handouts records what its file says too, before it refuses anything:
+    # acme may run only the step the refusal names after editing its file.
+    with tempfile.TemporaryDirectory() as tmp:
+        h, globex = rooms(tmp)
+        h.run("up")
+        (h.tmp / "workshop.yaml").write_text(swap)
+        h.run("up")
+        (h.tmp / "workshop.yaml").write_text(one_box)            # and no check, up, status or down after it
+        rc, out = globex("check")
+        check("acme drops instance 2 from its file and runs nothing after: the refusal reads the file acme last ran "
+              "with, so it offers handouts --revoke with acme's file",
+              rc == 2 and "run `lab5-setup handouts --revoke` with acme's workshop file first" in out
+              and "put instance" not in out, out)
+        h.run("handouts", "--revoke")
+        saved = json.loads((h.root / "workshops" / "acme" / "workshop.json").read_text())
+        rc, out = globex("check")
+        check("...acme follows it; handouts records the file it ran with, so the next refusal is not the same one: "
+              "it puts instance 02 back first",
+              saved.get("instances") == ["01"] and rc == 2 and dropped + "handouts --revoke`" in out, out)
+        (h.tmp / "workshop.yaml").write_text(swap)
+        h.run("handouts", "--revoke")
+        rc, out = globex("check")
+        check("...and following that clears it", "is still in use by workshop" not in out, out)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        h, globex = rooms(tmp)
+        h.run("up")
+        (h.tmp / "workshop.yaml").write_text(swap)
+        h.run("up")
+        (h.tmp / "workshop.yaml").write_text(swap + "bypass_codes:\n  enabled: false\n")
+        rc, out = h.run("handouts", "--revoke")
+        rc2, out2 = globex("check")
+        check("acme turns bypass codes off and runs only handouts, which refuses but records the file first: globex "
+              "is told down, never the handouts --revoke that just refused",
+              rc == 2 and "bypass_codes.enabled is false" in out and rc2 == 2
+              and "run `lab5-setup down` with acme's workshop file first" in out2
+              and "turns participant accounts or bypass codes off" in out2
+              and "run `lab5-setup handouts --revoke`" not in out2, out + out2)
+
 
 def test_bypass_valid_until_after_creates() -> None:
     print("== a card's time is taken after its last create: never earlier than a code's own expiry ==")
