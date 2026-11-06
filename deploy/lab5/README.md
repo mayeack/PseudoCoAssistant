@@ -23,7 +23,7 @@ deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at
 |---|---|
 | `check` | Connects to each box and reads its version, `.env` and HEC destinations. Prints the exact `.env` diff, the HEC host change, the tunnel and DNS plan, and a verdict per box. A box that `up` would accept says **ready, nothing to upgrade**. It also says what `up` would do for each participant account and for the persona bypass codes on its card, and fails each card whose codes `up` would refuse. It changes nothing on the boxes, in Cloudflare or in Duo. |
 | `up` | Runs each box in parallel, in this order: version check, backup, Lab 5 `.env` keys, tunnel and DNS, HEC host, restart, preflight. Any refusal happens before the first change. Then it creates a participant account for each box that came up, puts the room personas' bypass codes on its card, and writes the handout. |
-| `status` | Checks each box's tunnel health, DNS record, connector unit and `.env` drift, then runs the preflight. It also lists `l5-<workshop>-*` tunnels and DNS records that no box record owns, each participant account's state and age, each room persona's Duo status, and how long each card's persona bypass codes have left. |
+| `status` | Checks each box's tunnel health, DNS record, connector unit and `.env` drift, whether the box's own Identity Risk Gate blocks the room's victim (see below), then runs the preflight. It also lists `l5-<workshop>-*` tunnels and DNS records that no box record owns, each participant account's state and age, each room persona's Duo status, and how long each card's persona bypass codes have left. |
 | `handouts` | Puts a fresh batch of persona bypass codes on each handout card (or `--only` some), for lab-day morning or a lost card. It touches no box, tunnel or participant account, and asks for no SSH password. The codes it replaces stay valid until they expire, unless `--revoke` deletes them. |
 | `down` | Removes the connector, reverts the Lab 5 keys and the HEC host on every reachable box, then deletes the DNS records and tunnels that `up` recorded. A box it cannot reach or cannot finish fails the run, and the last line says how to re-run it. Running it twice is safe: the second run changes nothing. Then it deletes the persona bypass codes recorded for each card, and its last line says until when any code it could not delete stays valid. |
 | `expire` | Day 7: disables each participant account. Day 14: deletes it and its HOTP token, which frees the Duo seat. Without a workshop file it covers every workshop, which is how the daily launchd job runs it. It is idempotent and never touches a persona or a bypass code. |
@@ -87,7 +87,7 @@ Copy `deploy/lab5/workshop.example.yaml`, one per delivery. It holds no secrets:
 
 - `workshop` names the delivery. Box *nn* becomes tunnel `l5-<workshop>-<nn>` and host `l5-<workshop>-<nn>.pseudocoassistant.com`. Use a new name each time, because the tool refuses to take over a tunnel or record it did not create.
 - `stack.hec_url` is the room's Splunk stack. `up` looks for the box's existing destination with that URL.
-- `room.victim` goes on every box's `IDENTITY_ALLOWED_USERS`, together with the trusted personas and that box's participant account. To swap to `room.fallback`, change `victim` and re-run `up`.
+- `room.victim` goes on every box's `IDENTITY_ALLOWED_USERS`, together with the trusted personas and that box's participant account. To swap to `room.fallback`, change `victim` and re-run `up`. Every room needs its own victim (plan 4.3): `check`, `up` and `handouts` refuse a victim that another workshop on this Mac names while that workshop is still up (its `down` has not run) or still holds unexpired bypass codes for it, because one room's containment would end the other room's victim sessions and void its codes.
 - `participants:` is optional. `enabled` (default `true`) creates one participant account per box. `cii_url` is the Identity Intelligence sign-in link printed on the handout. `email_domain` defaults to `zone`. Turn the accounts off for a dry run that should use no Duo seats.
 - `bypass_codes:` is optional (see "Persona bypass codes"). `count` (default 1, at most 10) is the codes per persona per box, `reuse_count` (default 5, at most 20) the sign-ins each code allows, and `valid_hours` (default 12, at most 72) how long a batch lasts from the moment it is issued. `enabled: false` puts no persona codes on the cards. The codes ride on the participant handout, so they need `participants.enabled`.
 - `personas_file` is the persona cast. It defaults to `scripts/identity/personas.yaml`. `expire` never touches a persona, and `up` only gives the room's personas their bypass codes: no persona is ever changed, disabled or deleted.
@@ -132,6 +132,9 @@ After the boxes, `up` creates a **participant account** for each box that came u
   - its report says what is still on the box, and the run ends with a `NEXT:` line that names the `--only` re-run;
   - its record keeps a pending revert, which `status` shows, until a `down` finishes on the box;
   - if Show has already destroyed the box, the failure is expected: nothing is left on it to revert.
+  - an SSH session lost partway (paramiko's `SSHException`, an `EOFError`) is the same: the box fails, its revert stays pending, and its DNS record and tunnel are still deleted.
+
+**The victim check (`status`).** On each box, `status` runs the gate's own lookup and decision for `room.victim` with the box's venv, code and `.env` (`<checkout>/venv/bin/python -I -`, the script on stdin): the Duo Status keys and the CII API client that `up` wrote there. It is read-only (a Duo Admin API GET, a CII token and query) and prints only fixed codes. `FAIL` when the box cannot ask Duo or CII about the victim (for example a stale `pseudoco-lab5-duo-status-skey`: Duo answers 401, no email is known, and CII is not asked), because with `IDENTITY_FAIL_OPEN` on the gate would then let the victim chat and nothing else would say so; `FAIL` too when Duo has no such user or the release has no gate. `WARN` while the gate would let the victim chat (before the takeover, CII does not show it failing yet). `OK` when the gate blocks it, a contained victim (disabled in Duo) included. By lab day (T-0) the row must be `OK`.
 
 Participant accounts stay until `expire` disables them at day 7 and deletes them at day 14. `down` also deletes the persona bypass codes it recorded for each card (see "Persona bypass codes"). Any it could not tell apart from another room's stop at their `valid_secs`, and the last line of `down` says when. Rotate the Duo and CII credentials after the workshop (I1).
 
@@ -141,7 +144,7 @@ Participant accounts stay until `expire` disables them at day 7 and deletes them
 
 - **Username** `l5-<workshop>-<nn>`, **email** `l5-<workshop>-<nn>@pseudocoassistant.com` (the zone, or `participants.email_domain`). Identity Intelligence matches users by email.
 - **Notes**: `lab5-setup participant; workshop=<workshop>; instance=<nn>; created=<UTC time>`.
-- **Groups**: **CII Read-Only**, which gives Duo SSO into Identity Intelligence as read-only, and **`l5-<workshop>`**, created on the first `up`. `up` refuses to start if Duo has no CII Read-Only group. CII Read-Only is also the group that gets the account through the Sign-in app, whose User access must admit it (see "Duo applications" above). Never PseudoCo Workforce: that is the persona cast's group.
+- **Groups**: **`l5-<workshop>`**, created on the first `up`, then **CII Read-Only**, which gives Duo SSO into Identity Intelligence as read-only. The workshop group goes first because it is the third marker `expire` needs: a run stopped between the two adds leaves an account `expire` still disables and deletes, never one in CII Read-Only that it would leave alone. `up` refuses to start if Duo has no CII Read-Only group. CII Read-Only is also the group that gets the account through the Sign-in app, whose User access must admit it (see "Duo applications" above). Never PseudoCo Workforce: that is the persona cast's group.
 - **Its own HOTP token** (type h6, serial = the username), created through the API and attached. `up` computes the token's first 10 passcodes for the handout and then discards the secret, so the passcodes cannot be printed again. `--reissue-passcodes` replaces the token, and the old passcodes stop working.
 - The account stays **active** and MFA-required. It never gets bypass status or bypass codes of its own: the bypass codes on its card are the room personas'.
 
@@ -157,7 +160,7 @@ An account with the participant's name that `up` did not create (its notes lack 
 
 - At day 7 it sets `status=disabled`. That denies sign-in and invalidates remembered devices, though an open CII tab may last until CII's idle timeout.
 - At day 14 it deletes the account's HOTP token, then the account. Deleting through the API is immediate and permanent and skips Duo's Trash. That is why it needs all three markers, and why `--dry-run` exists. If the token cannot be deleted, the account is kept for the next run.
-- Everything else, such as a user without the markers, is listed as left alone.
+- Everything else, such as a user without the markers, is listed as left alone. One exception is reported as a failure, so the daily run notifies: an account with the participant name and the notes marker for that same workshop and instance, but not in `l5-<workshop>` (a run stopped between creating it and adding it to its groups). `expire` still leaves it alone, and its row says how to finish it: re-run `up --only <n>` for that workshop, or delete it in the Admin Panel. `status` names it the same way.
 - It writes a run log to `~/.pseudoco-lab5/runs/`. A failed run raises a macOS notification and exits 1.
 
 **Seats.** Disabled users still hold a Duo seat. Only deletion frees one. You need seats for your own account, the persona cast and every participant account from the last 14 days. Each seat also covers up to 5 CII identities.
@@ -260,13 +263,14 @@ An `APP_VERSION` line left in the template's `.env` overrides what `/health` rep
 `tests/test_lab5_participants.py` and `tests/test_identity_personas.py` cover the participant accounts, `expire`, the persona scripts and the launchd templates. They run against an in-memory Duo, CII and Keychain (`tests/lab5_fakes.py`), and pin the following:
 
 - `up` creates the accounts with all three markers and a handout whose passcodes Duo accepts;
-- `expire` acts only on fully marked accounts, at day 7 and day 14, and never on a persona, while a participant account that is also in PseudoCo Workforce is still expired;
+- `expire` acts only on fully marked accounts, at day 7 and day 14, and never on a persona, while a participant account that is also in PseudoCo Workforce is still expired; a half-made account (no workshop group) is left alone but fails the run, and `up` adds the workshop group before CII Read-Only;
 - the persona tool, the README and the runbook say which groups each lab app admits: Sign-in admits CII Read-Only too, and no text limits every lab app to PseudoCo Workforce;
 - `up` puts one batch of persona bypass codes per box on its card: to the cast's victim and trusted personas only, with `reuse_count` 5, `valid_secs` from `valid_hours` and `preserve_existing=true`. Duo accepts the codes up to their uses and until `valid_secs`, while no code reaches the output, a log or the state, and no persona HOTP code is read or printed;
 - a re-run keeps a valid batch and reissues one whose `count`, `reuse_count` or `valid_hours` changed, `handouts` issues a fresh one and touches nothing else, and a run that would pass Duo's 100-code limit issues nothing;
 - a room persona in bypass status or disabled stops every card's batch in `check`, `up` and `handouts`, and `status` shows each persona's Duo status; a locked-out one gets no reset advice, and its cards get the other personas' codes and are partial, not failed;
 - a create without a usable answer (a timeout before or after Duo made the codes, an answer cut off, a 502, 503 or 504, a malformed 200) is never listed again: its persona's ids are unknown for that card, and its row says, in one wording, when any codes it made expire and that the tool cannot revoke them. `down` and `handouts --revoke` delete none of them, nor another room's codes for that persona, nor a late commit's; they say when those codes expire, and `down` never claims every batch was deleted;
 - a Duo error or a handout lock timeout fails only its card: `up` still finishes, exits 1 and records a partial batch as incomplete;
+- a batch `down` deleted is dead on its card: `status` and `check` say so and `up` issues a fresh one; an unreadable participant record fails its card in `down` and never lets it say every batch was deleted; a card's time is taken after its last create;
 - each batch records exactly the ids Duo lists as new around a create that returned its codes, and unknown ids when another room's create makes that ambiguous; `down` and `handouts --revoke` delete exactly the recorded ones, and `expire` deletes none;
 - the Sign-in policy is described as bypass code + hardware token everywhere, and nothing asks for a policy with bypass codes alone;
 - each secret reaches Duo once, in a POST body, and the Keychain only on stdin;
@@ -278,7 +282,9 @@ An `APP_VERSION` line left in the template's `.env` overrides what `/health` rep
 - `up` on a box with Labs 0–4 settings keeps every other `.env` line and every other destination field;
 - `check` changes nothing;
 - `down` restores the original bytes, and a second `down` is a no-op;
-- a `down` that cannot reach or finish a box exits 1, keeps it pending, and a re-run finishes it;
+- a `down` that cannot reach or finish a box exits 1, keeps it pending, and a re-run finishes it; a lost SSH session (`SSHException`, `EOFError`) is a box failure like any other;
+- `status` runs the victim check on each box and fails a box whose own gate cannot verify the victim;
+- `check` and `up` refuse a victim another live workshop on this Mac names;
 - `identity:` values the app could not start with are refused, and an app that does not come back after `up` gets its `.env` rolled back;
 - `check` renders its diff on long and repetitive `.env` files, `.env.example` included;
 - no secret reaches argv, a URL, the output, the run log or the state directory.

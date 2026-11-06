@@ -88,7 +88,9 @@ before any screen or model.
      outage or throttle never hides that user's CII block. The email lives
      in memory only: after a restart, or while Duo refuses the Status keys,
      no email is known yet, CII is not asked, and the lookup says so
-     (`unavailable`, error `no_login`), never `not_found`.
+     (`unavailable`, error `no_login`), never `not_found`. `lab5-setup
+     status` runs this lookup for the room's victim on each box, and fails a
+     box that cannot ask Duo or CII.
    - **Limits.** Each call allows 3 s to connect and 5 s per read, and runs
      off the event loop. Each source's answer is cached per user for
      `IDENTITY_STATUS_TTL_SECONDS` (10 s), failures included.

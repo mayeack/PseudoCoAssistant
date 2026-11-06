@@ -166,6 +166,13 @@ class FakeBox:
         self.mutations: List[str] = []
         self.restarts = 0
         self.http_log: List[Tuple[str, str, Dict[str, str]]] = []
+        # What the gate's lookup says about a user when the self-check runs on the box
+        # (sources, errors, verdict ...); the Duo / CII keys come from the .env on disk.
+        self.victim_answer: Dict[str, Any] = {
+            "sources": {"duo": "ok", "cii": "ok"}, "errors": {}, "available": True, "verdict": "block",
+            "reasons": ["mfa_flood", "impossible_travel"], "duo_status": "active", "trust_level": "QUESTIONABLE",
+            "failing_checks": ["MFA Flood", "Impossible Travel"]}
+        self.victim_runs: List[Tuple[List[str], Optional[bytes]]] = []
         self._load_running_env()
 
     # what the running app read at its last start
@@ -221,6 +228,17 @@ class FakeBox:
             return R(0 if entry and argv[2].encode() in entry[0] else 1)
         if argv[:2] == ["test", "-e"]:
             return R(0 if argv[2] in self.files else 1)
+        if argv[0] == "/home/splunk/DemoBot/venv/bin/python" and argv[1:3] == ["-I", "-"]:
+            self.victim_runs.append((argv, stdin))          # the victim self-check: read-only
+            lines = envfile.split_lines(envfile.decode(self.files["/home/splunk/DemoBot/.env"][0]))
+            on = envfile.get(lines, "DUO_ENABLED") == "true"
+            answer = {"duo_configured": on and all(envfile.get(lines, k) for k in ("DUO_ADMIN_IKEY", "DUO_ADMIN_SKEY",
+                                                                                  "DUO_API_HOST")),
+                      "cii_configured": all(envfile.get(lines, k) for k in ("CII_CLIENT_ID", "CII_CLIENT_SECRET",
+                                                                             "CII_TOKEN_URL", "CII_API_URL"))}
+            if answer["duo_configured"] and answer["cii_configured"]:
+                answer.update(self.victim_answer)
+            return R(0, json.dumps(answer) + "\n")
         # ---- everything below changes the box
         self.mutations.append(joined if not stdin else f"{joined} <stdin>")
         if argv[:2] == ["sh", "-c"] and argv[3:4] == ["lab5-mkdir"]:
@@ -418,6 +436,8 @@ class FakeWorld:
         self.connects: List[Tuple[str, str]] = []
         self.prompts: List[str] = []
         self.https_log: List[Tuple[str, str, Dict[str, str]]] = []
+        self.notes: List[Tuple[str, str]] = []       # desktop notifications the tool raised
+        self.duo_transports: List[Tuple[str, str]] = []
 
     def connector_for(self, tunnel_id: str) -> Optional[FakeBox]:
         t = self.cf.tunnels.get(tunnel_id)
@@ -467,10 +487,16 @@ class FakeWorld:
         self.prompts.append(text)
         return SSH_PASSWORD if len(self.prompts) == 1 else ""   # Enter = same as previous
 
+    def no_duo(self, kind: str, ikey: str, skey: str, host: str):
+        """This suite's Duo: none. Every Duo call fails before any network."""
+        self.duo_transports.append((kind, host))
+        raise Lab5Error("no Duo in tests/test_lab5_setup.py")
+
     def deps(self, state_root: Path, out: io.StringIO) -> "ls.Deps":
         return ls.Deps(connect=self.connect, cloudflare_transport=self.cf, keychain_runner=self.security,
                        https=self.https, resolve=self.resolve, prompt=self.prompt, state_root=state_root,
-                       out=out, sleep=lambda s: None, app_wait_s=0.0, preflight_wait_s=0.0)
+                       out=out, sleep=lambda s: None, app_wait_s=0.0, preflight_wait_s=0.0,
+                       duo_transport=self.no_duo, notify=lambda title, msg: self.notes.append((title, msg)))
 
 
 WORKSHOP_YAML = """
@@ -626,6 +652,13 @@ def test_up_status_down() -> None:
         check("status exits 0", rc == 0, out3)
         check("status: tunnels healthy, connector active", out3.count(": healthy") == 2
               and out3.count(f"{remote.UNIT_NAME}: active") == 2, out3)
+        check("status: each box's own gate blocks the room's victim (run on the box, its venv, script on stdin)",
+              out3.count("OK       victim       the box's Identity Risk Gate blocks avery.kim: mfa_flood, "
+                         "impossible_travel") == 2
+              and all(b.victim_runs and b.victim_runs[-1][0] == ["/home/splunk/DemoBot/venv/bin/python", "-I", "-",
+                                                                "/home/splunk/DemoBot", "avery.kim"]
+                      and b"identity_lookup.lookup(user)" in (b.victim_runs[-1][1] or b"")
+                      for b in world.boxes.values()), out3)
 
         secrets_all = all_secrets(world)
         state_text = "".join(p.read_text() for p in (tmp / "state").rglob("*") if p.is_file())
@@ -775,6 +808,9 @@ def test_wrong_password_and_cli() -> None:
         rc = ls.main(["expire", str(Path(tmp) / "workshop.yaml")], deps=world.deps(Path(tmp) / "state", out_io))
         check("expire without the Provisioner keys exits 2 and names the Keychain item",
               rc == 2 and "pseudoco-lab5-duo-provisioner-ikey" in out_io.getvalue(), out_io.getvalue())
+        check("...and its notification goes to the suite's fake, never to osascript (no real desktop alert)",
+              len(world.notes) == 1 and world.notes[0][0] == "lab5-setup expire"
+              and ls.Deps().notify is not world.deps(Path(tmp), io.StringIO()).notify, str(world.notes))
     for bad, why in ((WORKSHOP_YAML.replace("workshop: acme", "workshop: Acme_1"), "bad workshop name"),
                      (WORKSHOP_YAML.replace("https://http-inputs", "http://http-inputs"), "http HEC URL"),
                      (WORKSHOP_YAML.replace("instance: 2", "instance: 1"), "duplicate instance")):
@@ -1047,12 +1083,180 @@ def test_diff_on_long_env() -> None:
               rc == 0 and "ready, nothing to upgrade" in out and "+PUBLIC_BASE_URL=https://" in out, out)
 
 
+def test_status_victim_check() -> None:
+    print("== status: does each box's own Identity Risk Gate block the room's victim? ==")
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        run_cli(world, tmp, "up")
+        box = world.boxes["01"]
+        cases = (
+            ("a stale Status key (Duo 401, so no email and CII not asked)",
+             {"sources": {"duo": "unavailable", "cii": "unavailable"}, "errors": {"duo": "http_401", "cii": "no_login"},
+              "available": False, "verdict": "allow", "reasons": []},
+             "FAIL", ["cannot verify avery.kim (duo http_401, cii no_login)", "pseudoco-lab5-duo-status-ikey",
+                      "IDENTITY_FAIL_OPEN"]),
+            ("a CII API client CII refuses",
+             {"sources": {"duo": "ok", "cii": "unavailable"}, "errors": {"cii": "token_http_401"},
+              "available": False, "verdict": "allow", "reasons": []},
+             "FAIL", ["cii token_http_401", "pseudoco-lab5-cii-"]),
+            ("no such Duo user",
+             {"sources": {"duo": "not_found", "cii": "unavailable"}, "errors": {"cii": "no_login"},
+              "available": False, "verdict": "block", "reasons": ["duo_user_not_found"]},
+             "FAIL", ["Duo has no user avery.kim", "provision_personas.py"]),
+            ("before the takeover: not failing yet",
+             {"sources": {"duo": "ok", "cii": "ok"}, "errors": {}, "available": True, "verdict": "allow",
+              "reasons": [], "trust_level": "NEUTRAL", "failing_checks": []},
+             "WARN", ["would let avery.kim chat now (trust NEUTRAL, failing checks: none)", "T-0"]),
+            ("contained: disabled in Duo",
+             {"sources": {"duo": "ok", "cii": "ok"}, "errors": {}, "available": True, "verdict": "block",
+              "reasons": ["duo_disabled", "mfa_flood"]},
+             "OK", ["blocks avery.kim: duo_disabled, mfa_flood (contained"]),
+        )
+        for name, answer, status, needles in cases:
+            box.victim_answer = answer
+            rc, out = run_cli(world, tmp, "status", "--only", "1")
+            row = next((l for l in out.splitlines() if l.split()[1:2] == ["victim"]), "")
+            check(f"{name}: {status}" + (" (the run fails)" if status == "FAIL" else ""),
+                  row.split()[:1] == [status] and all(n in row for n in needles)
+                  and (rc == 1) == (status == "FAIL"), row or out)
+        real = box._dispatch
+        box._dispatch = lambda argv, stdin, sudo: (remote.CmdResult(1, "", "ModuleNotFoundError: No module named "
+                                                                           "'backend.services.identity_gate'\n")
+                                                   if argv[0].endswith("/venv/bin/python") else real(argv, stdin, sudo))
+        rc, out = run_cli(world, tmp, "status", "--only", "1")
+        check("a release without the gate: the self-check's failure is a FAIL naming it",
+              rc == 1 and "the victim self-check did not run on the box (exit 1: ModuleNotFoundError" in out, out)
+        box._dispatch = real
+        env_path = "/home/splunk/DemoBot/.env"
+        lines = envfile.split_lines(envfile.decode(box.files[env_path][0]))
+        box.files[env_path] = (envfile.encode("".join(l for l in lines if not l.startswith("CII_"))), 0o600)
+        rc, out = run_cli(world, tmp, "status", "--only", "1")
+        check("a box whose .env lost the CII keys: FAIL, re-run up", rc == 1 and "has no CII API client" in out, out)
+
+
+def test_shared_victim_refused() -> None:
+    print("== a victim another live workshop on this Mac names is refused (plan 4.3) ==")
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        rc, out = run_cli(world, tmp, "up")
+        check("workshop acme is up with avery.kim", rc == 0, out)
+        other = tmp / "globex"
+        other.mkdir()
+        (other / "workshop.yaml").write_text(WORKSHOP_YAML.replace("workshop: acme", "workshop: globex")
+                                             .replace("198.51.100.", "203.0.113."))
+        boxes_before = {nn: len(b.commands) for nn, b in world.boxes.items()}
+        for command in ("check", "up"):
+            out_io = io.StringIO()
+            rc = ls.main([command, str(other / "workshop.yaml")], deps=world.deps(tmp / "state", out_io))
+            text = out_io.getvalue()
+            check(f"globex {command} with the same victim: refused (exit 2) before any box or Cloudflare call, "
+                  "naming acme",
+                  rc == 2 and "room.victim avery.kim is also the victim of workshop acme" in text
+                  and "still up" in text and "room.fallback" in text, text)
+        check("...nothing was run on any box", {nn: len(b.commands) for nn, b in world.boxes.items()} == boxes_before)
+        (other / "workshop.yaml").write_text((other / "workshop.yaml").read_text()
+                                             .replace("victim: avery.kim", "victim: jordan.reyes")
+                                             .replace("fallback: jordan.reyes", "fallback: casey.wong"))
+        out_io = io.StringIO()
+        rc = ls.main(["check", str(other / "workshop.yaml")], deps=world.deps(tmp / "state", out_io))
+        check("globex with its own victim is not refused for it",
+              "is also the victim of workshop" not in out_io.getvalue(), out_io.getvalue())
+        rc, out = run_cli(world, tmp, "down")
+        (other / "workshop.yaml").write_text((other / "workshop.yaml").read_text()
+                                             .replace("victim: jordan.reyes", "victim: avery.kim"))
+        out_io = io.StringIO()
+        ls.main(["check", str(other / "workshop.yaml")], deps=world.deps(tmp / "state", out_io))
+        check("once acme has run down, its victim is free again",
+              "is also the victim of workshop" not in out_io.getvalue(), out_io.getvalue())
+
+
+class _FakeSSHException(Exception):
+    """paramiko.SSHException stands in: not an OSError."""
+
+
+class _DeadChannel:
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+    def exec_command(self, *a, **k):
+        raise self.exc
+
+    def open_sftp(self):
+        raise self.exc
+
+    def close(self) -> None:
+        raise self.exc
+
+
+def test_lost_session_is_a_lab5_error() -> None:
+    print("== a lost SSH session (SSHException, EOFError) is a Lab5Error, never an error that ends the report ==")
+    import types
+    saved = sys.modules.get("paramiko")
+    sys.modules["paramiko"] = types.SimpleNamespace(SSHException=_FakeSSHException)
+    try:
+        for exc in (_FakeSSHException("SSH session not active"), _FakeSSHException("Timeout opening channel."),
+                    EOFError(), _FakeSSHException("Server connection dropped")):
+            box = object.__new__(remote.ParamikoBox)
+            box._client, box._sftp = _DeadChannel(exc), None
+            for name, call in (("run", lambda: box.run(["systemctl", "restart", "demobot-app"])),
+                               ("read_file", lambda: box.read_file("/home/splunk/DemoBot/.env")),
+                               ("file_mode", lambda: box.file_mode("/home/splunk/DemoBot/.env"))):
+                try:
+                    call()
+                    got = "returned"
+                except Lab5Error:
+                    got = "Lab5Error"
+                except BaseException as other:  # noqa: BLE001
+                    got = type(other).__name__
+                check(f"{type(exc).__name__}({exc}) in {name}: a Lab5Error", got == "Lab5Error", got)
+            try:
+                box.close()
+                closed = True
+            except BaseException:  # noqa: BLE001
+                closed = False
+            check(f"{type(exc).__name__}: closing the dead session never raises", closed)
+        box = object.__new__(remote.ParamikoBox)
+        box._client = types.SimpleNamespace(open_sftp=lambda: types.SimpleNamespace(
+            lstat=lambda path: (_ for _ in ()).throw(FileNotFoundError(2, "No such file"))))
+        box._sftp = None
+        check("file_mode of a missing file is still None", box.file_mode("/nope") is None)
+    finally:
+        if saved is None:
+            sys.modules.pop("paramiko", None)
+        else:
+            sys.modules["paramiko"] = saved
+
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        run_cli(world, tmp, "up", "--only", "1")
+        box = world.boxes["01"]
+        real = box._dispatch
+
+        def drop_at_restart(argv, stdin, sudo):
+            if argv[:2] == ["systemctl", "restart"] and argv[-1] == "demobot-app":
+                raise Lab5Error("`systemctl` on the box failed (SSHException)")
+            return real(argv, stdin, sudo)
+
+        box._dispatch = drop_at_restart
+        rc, out = run_cli(world, tmp, "down", "--only", "1")
+        rec = json.loads((tmp / "state/workshops/acme/boxes/01.json").read_text())
+        check("down: a session lost at the restart leaves the revert pending and still deletes the DNS record and "
+              "tunnel", rc == 1 and rec.get("revert_pending") and rec["dns"].get("deleted")
+              and rec["tunnel"].get("deleted") and not world.cf.records, out)
+        rc, out = run_cli(world, tmp, "status", "--only", "1")
+        check("...and status shows the pending revert", "an earlier down could not revert this box" in out, out)
+
+
 def main() -> int:
     for test in (test_envfile, test_check_is_read_only, test_up_status_down, test_refusals,
                  test_down_without_record, test_preflight_gate_and_unreachable, test_failed_up_resumes,
                  test_wrong_password_and_cli, test_down_failures_are_failures, test_identity_values_and_rollback,
                  test_diff_on_long_env,
-                 test_example_yaml, test_cloudflare_client, test_remote_helpers):
+                 test_example_yaml, test_cloudflare_client, test_remote_helpers, test_status_victim_check,
+                 test_shared_victim_refused, test_lost_session_is_a_lab5_error):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

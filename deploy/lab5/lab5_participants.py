@@ -112,6 +112,30 @@ def age_text(seconds: float) -> str:
     return f"{max(0.0, seconds) / DAY:.1f} d"
 
 
+def half_made(user: Dict[str, Any], personas: Set[str]) -> Optional[Dict[str, str]]:
+    """``{"workshop", "nn"}`` for an account lab5-setup created that a run
+    left half made: the participant name and the notes marker naming that
+    same workshop and instance, but not (yet) its workshop group, so expire
+    leaves it alone and its seat is never freed. Re-running `up` for that
+    instance finishes it. None for anything else."""
+    name = str(user.get("username") or "")
+    m = USERNAME_RE.match(name)
+    notes = parse_notes(user.get("notes"))
+    if not m or not notes or name in personas or is_persona_notes(user.get("notes")):
+        return None
+    if notes["workshop"] != m.group("workshop") or notes["nn"] != m.group("nn"):
+        return None
+    if group_name(m.group("workshop")) in group_names(user):
+        return None
+    return {"workshop": m.group("workshop"), "nn": m.group("nn")}
+
+
+def half_made_note(half: Dict[str, str]) -> str:
+    return (f"half made: a run stopped before adding it to group {group_name(half['workshop'])}, so expire leaves "
+            f"it alone and its Duo seat is never freed. Re-run `lab5-setup up <{half['workshop']}'s workshop.yaml> "
+            f"--only {int(half['nn'])}` to finish it, or delete it in the Admin Panel")
+
+
 def ownership(user: Dict[str, Any], personas: Set[str], persona_group: str,
               require_group: bool = True) -> Tuple[Optional[Dict[str, str]], str]:
     """``(markers, "")`` when lab5-setup created this account, else ``(None, why)``.
@@ -443,7 +467,10 @@ def ensure(env: Env, nn: str, url: str, access_key: str, reissue: bool = False) 
                      created_at=stamp, workshop=env.workshop, instance=nn)
     user_id = str(user.get("user_id"))
     have = set(group_names(user))
-    for group in (CII_READ_ONLY, group_name(env.workshop)):
+    # The workshop group first: it is the third marker expire needs, so a run
+    # stopped between the two adds never leaves an account in CII Read-Only
+    # that expire would never disable or delete.
+    for group in (group_name(env.workshop), CII_READ_ONLY):
         if group not in have:
             admin.add_user_group(user_id, env.groups[group])
 
@@ -513,6 +540,10 @@ def status_rows(env: Env, numbers: Iterable[str]) -> List[Row]:
             rows.append(("FAIL", name, "missing: up creates it"))
             continue
         markers, why = ownership(user, env.personas, env.persona_group)
+        half = half_made(user, env.personas)
+        if half and half["workshop"] == env.workshop:
+            rows.append(("FAIL", name, half_made_note(half)))
+            continue
         if not markers or markers["workshop"] != env.workshop:
             rows.append(("FAIL", name, f"not a lab5-setup participant account of this workshop ({why})"))
             continue
@@ -541,7 +572,7 @@ def status_rows(env: Env, numbers: Iterable[str]) -> List[Row]:
 @dataclass
 class Decision:
     user: Dict[str, Any]
-    action: str            # disable | delete | none | skip
+    action: str            # disable | delete | none | skip | half (left alone, but reported as failed)
     detail: str
     workshop: str = ""
     nn: str = ""
@@ -551,6 +582,9 @@ class Decision:
 def decide(user: Dict[str, Any], personas: Set[str], persona_group: str, now: float) -> Decision:
     markers, why = ownership(user, personas, persona_group)
     if not markers:
+        half = half_made(user, personas)
+        if half:     # never acted on (it lacks a marker), but never silent: the daily run fails and notifies
+            return Decision(user, "half", f"left alone: {half_made_note(half)}", half["workshop"], half["nn"])
         return Decision(user, "skip", f"left alone: {why}")
     action, detail = _schedule(user, now)
     return Decision(user, action, detail, markers["workshop"], markers["nn"], persona_group_note(markers))
@@ -589,6 +623,11 @@ def expire(admin: AdminAPI, root: Path, personas: Set[str], persona_group: str, 
         if d.action == "skip":
             counts["skipped"] += 1
             line(f"  SKIP     {name:<24} {d.detail}{d.note}")
+            continue
+        if d.action == "half":
+            counts["skipped"] += 1
+            failed.append(name)
+            line(f"  FAIL     {name:<24} {d.detail}")
             continue
         if d.action == "none":
             counts["unchanged"] += 1

@@ -68,14 +68,14 @@ For the live replay, one victim has Duo Mobile on a facilitator phone (`replay_d
 3. `deploy/lab5/lab5-setup up <workshop.yaml>`. The boxes get their Lab 5 keys, tunnel and DNS name, HEC host and restart. Then every box that came up gets its participant account `l5-<workshop>-<nn>`, its card gets the team's bypass codes for the room's victim and each trusted persona, and the handout is written.
 4. **Temporary passwords.** `up` prints an Admin Panel link per account. Open each one, click *Create temporary password* (valid 30 days) and write it on that participant's card. The Admin API cannot set passwords. While you are in the Admin Panel, check that **PseudoCo Lab: Sign-in** still admits **CII Read-Only** (step 4 of "Once, before the first delivery") and that its policy still allows bypass code + hardware token. `up` reminds you, because it cannot check either.
 5. Print `~/.pseudoco-lab5/workshops/<workshop>/handout.html` and cut the cards apart.
-6. `deploy/lab5/lab5-setup status <workshop.yaml>`. Every box should be green. Participants show "no password yet" until they sign in to CII and set their own. Each room persona shows its Duo status, and each card's persona codes show how long they have left.
+6. `deploy/lab5/lab5-setup status <workshop.yaml>`. Every box should be green. Participants show "no password yet" until they sign in to CII and set their own. Each room persona shows its Duo status, and each card's persona codes show how long they have left. Each box's `victim` row runs its own Identity Risk Gate on the room's victim: a `FAIL` there means the box cannot ask Duo or CII (a stale Status key, say), and must be fixed before lab day. A `WARN` is expected until the takeover's failures reach CII.
 
 A box that `up` refused is reported with the reason. Fix it, then re-run with `--only <n>`. A re-run keeps the accounts and their cards. A card whose persona codes failed (a Duo error, say) is named in the `RESULT` line, and a re-run of `up` finishes it. Passcodes are shown only once, so for a lost card use `up --only <n> --reissue-passcodes` (the old passcodes stop working), then `handouts --only <n> --revoke`. That puts fresh persona codes on the card and deletes the lost card's.
 
 ## Lab day
 
 **Before attendees sit down (T-0):**
-- `lab5-setup status` again. Every tunnel should be healthy and `duo_signin` not gated. If the cards' persona codes expire before the lab ends, run `deploy/lab5/lab5-setup handouts <workshop.yaml>` and print the cards again, with the temporary passwords copied over. The old codes stay valid until they expire, unless you add `--revoke`.
+- `lab5-setup status` again. Every tunnel should be healthy, `duo_signin` not gated, and every box's `victim` row `OK`: its gate blocks the room's victim. If the cards' persona codes expire before the lab ends, run `deploy/lab5/lab5-setup handouts <workshop.yaml>` and print the cards again, with the temporary passwords copied over. The old codes stay valid until they expire, unless you add `--revoke`.
 - `persona_activity.py selfcheck`. The trusted personas should pass. The room's victim should fail MFA Flood and Impossible Travel in CII.
 - In the Admin Panel, *Users → Clear all step-ups*.
 - In each instance's Demo Controls, turn **Trigger Demo Incident** off. Its synthetic incident would crowd the room stack.
@@ -118,7 +118,7 @@ That way the AI Defense blocks in the room stack belong to the victim alone, and
 - **S1** (marked for discussion): how the victim's `FAILED_CHECK` reaches a stack that only exists from T-1. It decides when the takeover runs.
 - **A persona's bypass code in the Universal Prompt.** Each persona also has a hardware token (script-only), which Duo may offer first. Attendees pick *Other options*, then *Bypass Code*. A code typed into the wrong method counts as a failed attempt toward the lockout. Check the flow in the dry run.
 - **Spike S15** has not run. It should prove three things: that API group membership grants CII Read-Only, that a password plus an HOTP passcode reaches CII, and what disabling does to a live CII session.
-- **The victim checks in `status`** (victim blocked on each box, victim failing in CII, its events in the stack) arrive with the identity gate and the S1 decision.
+- **The room checks in `status`** (the victim's events in the stack) wait on the S1 decision. The per-box check that each box's gate blocks the victim is in `status` already.
 
 ## Quick reference
 

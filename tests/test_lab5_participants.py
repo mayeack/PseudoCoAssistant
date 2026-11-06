@@ -367,12 +367,17 @@ def test_expire() -> None:
         ids = _seed_expire(h)
         untouched = {k: dict(h.duo.users[ids[k]]) for k in ("no_marker", "no_group", "wrong_nn", "persona_notes",
                                                              "persona", "admin", "young")}
+        # l5-acme-05 is half made (the name and notes markers, CII Read-Only, but not l5-acme): every run
+        # leaves it alone and reports it as a failure, so the daily job notifies instead of skipping it forever.
         rc, out = h.run("expire", "--dry-run", yaml=False)
-        check("--dry-run exits 0 and changes nothing", rc == 0 and not h.duo.mutations(), out + str(h.duo.mutations()))
+        check("--dry-run changes nothing (exit 1: the half-made account needs a hand)",
+              rc == 1 and not h.duo.mutations(), out + str(h.duo.mutations()))
         check("--dry-run lists the plan", "would disable" in out and "would delete it and its HOTP token" in out, out)
 
+        h.notes.clear()
         rc, out = h.run("expire", yaml=False)
-        check("expire exits 0", rc == 0, out)
+        check("expire exits 1 for the half-made account alone, and notifies",
+              rc == 1 and "1 failed" in out and h.notes and h.notes[-1][0] == "lab5-setup expire", out)
         check("day 8: disabled", h.duo.users[ids["day8"]]["status"] == "disabled", out)
         check("another workshop's day-9 account: disabled too (no workshop file = every workshop)",
               h.duo.users[ids["other_ws"]]["status"] == "disabled")
@@ -386,18 +391,20 @@ def test_expire() -> None:
         for key, before in untouched.items():
             check(f"left alone: {key}", h.duo.users.get(ids[key]) == before, str(h.duo.users.get(ids[key])))
         check("the persona is never even a candidate", "avery.kim" not in out)
-        check("unmarked l5- accounts are reported as left alone",
-              out.count("SKIP") == 4 and "it is a persona" in out and "not in group l5-acme" in out
-              and "another workshop or instance" in out and "participant marker" in out, out)
+        check("unmarked l5- accounts are reported as left alone, the half-made one as a failure with its fix",
+              out.count("SKIP") == 3 and "it is a persona" in out and "another workshop or instance" in out
+              and "participant marker" in out
+              and any(l.split()[:2] == ["FAIL", "l5-acme-05"] and "half made" in l and "--only 5" in l
+                      for l in out.splitlines()), out)
         check("the run log is written", any((h.root / "runs").glob("*-expire.log")))
 
         rc, out2 = h.run("expire", yaml=False)
-        check("a second run the same day changes nothing", rc == 0 and "CHANGED" not in out2, out2)
+        check("a second run the same day changes nothing", rc == 1 and "CHANGED" not in out2, out2)
 
         h.clock.advance_days(7)
         rc, out3 = h.run("expire", yaml=False)
         check("a week later: the day-8 account (now 15 days) is deleted",
-              rc == 0 and ids["day8"] not in h.duo.users, out3)
+              rc == 1 and ids["day8"] not in h.duo.users, out3)
         check("and the young one (now 10 days) is disabled", h.duo.users[ids["young"]]["status"] == "disabled", out3)
         for key in ("no_marker", "no_group", "wrong_nn", "persona_notes", "persona", "admin"):
             check(f"still left alone: {key}", h.duo.users.get(ids[key]) == untouched[key])
@@ -1983,6 +1990,61 @@ def test_bypass_valid_until_after_creates() -> None:
               and "stay valid until" in out, out)
 
 
+def test_half_made_participant() -> None:
+    print("== a run stopped between creating an account and its groups: never in CII Read-Only alone, never silent ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        adds: List[str] = []
+
+        def fail_second_add(method: str, path: str) -> None:      # the account's second group add: a 503
+            if method == "POST" and re.fullmatch(r"/admin/v1/users/[^/]+/groups", path):
+                adds.append(path)
+                if len(adds) == 2:
+                    h.duo.fail[("POST", path)] = DuoFailure(503, 50301, "Service unavailable")
+        h.duo.call_hooks.append(fail_second_add)
+        rc, out = h.run("up", "--only", "1")
+        h.duo.call_hooks.clear()
+        h.duo.fail.clear()
+        user = h.duo.by_name("l5-acme-01")
+        groups = {g["name"] for g in user["groups"]} if user else set()
+        check("the workshop group is added first: stopped between the adds, the account is in l5-acme, never in "
+              "CII Read-Only alone", rc == 1 and groups == {"l5-acme"}, f"{groups} {out}")
+        h.clock.advance_days(15)
+        rc, out = h.run("expire", yaml=False)
+        check("...so it carries all three markers, and expire deletes it on schedule (the seat is freed)",
+              rc == 0 and h.duo.by_name("l5-acme-01") is None, out)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        h.duo.fail[("POST", "/admin/v1/users/")] = DuoFailure(503, 50301, "Service unavailable")
+        real = h.duo.fail.pop(("POST", "/admin/v1/users/"))
+
+        def fail_first_add(method: str, path: str) -> None:       # created, then every group add fails
+            if method == "POST" and re.fullmatch(r"/admin/v1/users/[^/]+/groups", path):
+                h.duo.fail[("POST", path)] = real
+        h.duo.call_hooks.append(fail_first_add)
+        rc, out = h.run("up", "--only", "1")
+        h.duo.call_hooks.clear()
+        h.duo.fail.clear()
+        user = h.duo.by_name("l5-acme-01")
+        check("an account left in no group (the first add failed)", rc == 1 and user is not None
+              and not user["groups"], out)
+        rc, out = h.run("status")
+        row = next((line for line in out.splitlines() if line.split()[:2] == ["FAIL", "l5-acme-01"]), "")
+        check("status names it half made and how to finish it", "half made" in row and "--only 1" in row, out)
+        h.clock.advance_days(15)
+        h.notes.clear()
+        rc, out = h.run("expire", yaml=False)
+        check("expire leaves it alone (it lacks a marker) but never silently: a FAIL row, exit 1, a notification",
+              rc == 1 and h.duo.by_name("l5-acme-01") is not None and "half made" in out
+              and h.notes and h.notes[-1][0] == "lab5-setup expire", out)
+        h.clock.advance_days(-15)
+        rc, out = h.run("up", "--only", "1")
+        user = h.duo.by_name("l5-acme-01")
+        check("a re-run of up finishes it (both groups)", rc == 0 and {g["name"] for g in user["groups"]}
+              == {"l5-acme", "CII Read-Only"}, out)
+
+
 def main() -> int:
     for test in (test_units, test_up_creates_participants, test_check_and_refusals, test_expire,
                  test_expire_after_up_cleans_the_handout, test_signin_user_access_docs,
@@ -1991,7 +2053,8 @@ def main() -> int:
                  test_bypass_settings_change_reissues, test_bypass_revocation, test_bypass_persona_groups,
                  test_handouts_revoke_waits_for_the_new_batch, test_duo_transport_errors, test_contained_victim,
                  test_bypass_locked_out_is_temporary, test_bypass_lost_create_answer, test_signin_policy_docs,
-                 test_bypass_down_then_up, test_bypass_unreadable_record, test_bypass_valid_until_after_creates):
+                 test_bypass_down_then_up, test_bypass_unreadable_record, test_bypass_valid_until_after_creates,
+                 test_half_made_participant):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

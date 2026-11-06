@@ -441,12 +441,87 @@ def revoke_codes(ctx: "Ctx", deps: "Deps", numbers: Sequence[str]) -> List[str]:
     return failed
 
 
-def victim_blocked(ctx: "Ctx", box: BoxSpec, app: Optional[remote.AppClient]) -> Tuple[str, str]:
-    return "SKIP", "victim-blocked self-check arrives with the identity gate (12.1, app branch)"
+# Runs on the box with its own venv, code and .env (the Status keys and the CII
+# API client `up` wrote there): the gate's own lookup and decision for one
+# username, as JSON. Read-only (a Duo Admin API GET, a CII token and query);
+# it prints fixed-vocabulary codes, never a key, URL or answer body.
+VICTIM_CHECK_SCRIPT = b"""\
+import json, os, sys
+checkout, user = sys.argv[1], sys.argv[2]
+os.chdir(checkout)
+sys.path.insert(0, checkout)
+from backend.services import identity_gate, identity_lookup
+answer = {"duo_configured": identity_lookup.duo_configured(), "cii_configured": identity_lookup.cii_configured()}
+if answer["duo_configured"] and answer["cii_configured"]:
+    status = identity_lookup.lookup(user)
+    verdict = identity_gate.decide(status, fail_open=True)
+    answer.update(sources=status.get("sources"), errors=status.get("errors"), available=status.get("available"),
+                  verdict=verdict["verdict"], reasons=verdict["reasons"], duo_status=verdict["duo_status"],
+                  trust_level=verdict["trust_level"], failing_checks=verdict["failing_checks"])
+print(json.dumps(answer))
+"""
+# What to fix when a box's lookup cannot ask one source about the victim.
+_SOURCE_FIX = {"duo": "the Status app's keys (Keychain items pseudoco-lab5-duo-status-ikey / -skey, then re-run up)",
+               "cii": "the CII API client (Keychain items pseudoco-lab5-cii-*, then re-run up)"}
+
+
+def victim_check_command(box: BoxSpec, victim: str) -> Tuple[List[str], bytes]:
+    """The box's own interpreter, isolated, with the script on stdin."""
+    return [f"{box.checkout}/venv/bin/python", "-I", "-", box.checkout, victim], VICTIM_CHECK_SCRIPT
+
+
+def victim_blocked(ctx: "Ctx", box: BoxSpec, rem: Any) -> Tuple[str, str]:
+    """`status` per box (12.3, plan 4.6): does this box's Identity Risk Gate
+    block the room's victim? It runs the gate's own lookup on the box, with
+    the box's own Status and CII credentials, so a key Duo or CII refuses is
+    caught here instead of on lab day: with IDENTITY_FAIL_OPEN (the default)
+    a lookup that cannot answer lets the victim chat, and nothing else says
+    so. FAIL when the box cannot ask Duo or CII about the victim, or Duo has
+    no such user; WARN while CII does not show it failing yet (before the
+    takeover); OK when the gate blocks it (contained included)."""
+    victim = ctx.ws.victim
+    argv, script = victim_check_command(box, victim)
+    try:
+        res = rem.run(argv, stdin=script, timeout=60.0)
+    except Lab5Error as exc:
+        return "FAIL", f"the victim self-check could not run on the box ({exc})"
+    lines = [line for line in (res.out or "").splitlines() if line.strip()]
+    try:
+        answer = json.loads(lines[-1]) if res.rc == 0 and lines else None
+    except ValueError:
+        answer = None
+    if not isinstance(answer, dict):
+        tail = ((res.err or "").strip().splitlines() or ["no answer"])[-1][:200]
+        return "FAIL", f"the victim self-check did not run on the box (exit {res.rc}: {tail})"
+    missing = [name for name, key in (("Duo Status keys", "duo_configured"), ("CII API client", "cii_configured"))
+               if not answer.get(key)]
+    if missing:
+        return "FAIL", (f"the box's .env has no {' or '.join(missing)} (DUO_ENABLED, DUO_ADMIN_*, CII_*): the gate "
+                        f"cannot check {victim}; re-run up")
+    sources = answer.get("sources") or {}
+    errors = answer.get("errors") or {}
+    down = [k for k in ("duo", "cii") if sources.get(k) not in ("ok", "not_found")]
+    if sources.get("duo") == "not_found":
+        return "FAIL", f"Duo has no user {victim}: provision the cast (scripts/identity/provision_personas.py)"
+    if down:
+        said = ", ".join(f"{k} {errors.get(k) or sources.get(k) or 'no answer'}" for k in down)
+        fixes = "; ".join(_SOURCE_FIX[k] for k in down if not (k == "cii" and errors.get("cii") == "no_login"))
+        return "FAIL", (f"the box cannot verify {victim} ({said}): with IDENTITY_FAIL_OPEN on, its gate would let "
+                        f"the victim chat. Check {fixes or _SOURCE_FIX['duo']}")
+    reasons = list(answer.get("reasons") or [])
+    if answer.get("verdict") == "block":
+        contained = " (contained: its Duo account is disabled)" if "duo_disabled" in reasons else ""
+        return "OK", f"the box's Identity Risk Gate blocks {victim}: {', '.join(reasons)}{contained}"
+    trust = answer.get("trust_level") or ("no record in CII yet" if sources.get("cii") == "not_found" else "unknown")
+    checks = ", ".join(answer.get("failing_checks") or []) or "none"
+    return "WARN", (f"the box's Identity Risk Gate would let {victim} chat now (trust {trust}, failing checks: "
+                    f"{checks}). Expected before the takeover; by lab day (T-0) it must block: MFA Flood and "
+                    "Impossible Travel")
 
 
 def room_checks(ctx: "Ctx") -> List[Tuple[str, str, str]]:
-    return [("SKIP", "room", "victim failing in CII / its events in the stack: waits on the S1 decision (12.4)")]
+    return [("SKIP", "room", "the victim's events in the stack: waits on the S1 decision (12.4); whether each box's "
+                             "gate blocks the victim is its `victim` row")]
 
 
 # =========================================================================== runtime
@@ -1020,7 +1095,7 @@ def status_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
             hosts = [str(d.get("host")) for d in dests
                      if d.get("url") and normalize_hec_url(str(d["url"])) == normalize_hec_url(ws.hec_url)]
             rep.add("OK" if hosts == [rep.hostname] else "WARN", "HEC host", ", ".join(hosts) or "no room destination")
-            v_status, v_detail = victim_blocked(ctx, box, facts.app)
+            v_status, v_detail = victim_blocked(ctx, box, rem)
             rep.add(v_status, "victim", v_detail)
         except Lab5Error as exc:
             rep.add("FAIL", "status", str(exc))
@@ -1296,9 +1371,59 @@ def connect_cloudflare(ctx: Ctx, transport: Callable[..., Tuple[int, bytes]]) ->
     if not ctx.account_id:
         raise Lab5Error("could not tell the Cloudflare account from the zone; set cloudflare.account_id")
     saved = ctx.state.load_workshop()
-    saved.update(workshop=ws.name, zone=ws.zone, zone_id=ctx.zone_id, account_id=ctx.account_id)
+    saved.update(workshop=ws.name, zone=ws.zone, zone_id=ctx.zone_id, account_id=ctx.account_id,
+                 victim=ws.victim)        # victim_clashes() reads it from the other workshops
     ctx.state.save_workshop(saved)
     ctx.out.line(f"Cloudflare: zone {ws.zone} ({ctx.zone_id}), token {last4(token)}")
+
+
+def _read_state(path: Path) -> Dict[str, Any]:
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def victim_clashes(root: Path, ws: Workshop, now: float) -> List[str]:
+    """Another live workshop under this Mac's state root with the same room
+    victim. Plan 4.3 refuses a room rather than share a victim: one room's
+    containment (claim 4) would end the other room's victim sessions and
+    void its cards' victim codes, and lab5-setup would report that as the
+    other room's own containment. A workshop counts while `down` has not run
+    for it (a tunnel recorded and not deleted, a .env not reverted, a revert
+    pending), or while it holds victim bypass codes that have not expired."""
+    out: List[str] = []
+    folder = Path(root) / "workshops"
+    if not folder.is_dir():
+        return out
+    for other in sorted(d for d in folder.iterdir() if d.is_dir() and d.name != ws.name):
+        why = ""
+        if _read_state(other / "workshop.json").get("victim") == ws.victim:
+            for path in sorted((other / "boxes").glob("*.json")):
+                rec = _read_state(path)
+                tunnel, env = rec.get("tunnel") or {}, rec.get("env") or {}
+                if (tunnel.get("id") and not tunnel.get("deleted")) or (env and not env.get("reverted")) \
+                        or rec.get("revert_pending"):
+                    why = "it is still up (`lab5-setup down` has not run for it)"
+                    break
+        if not why:
+            for path in sorted((other / "participants").glob("*.json")):
+                batches = _read_state(path).get("bypass_batches")
+                for batch in batches if isinstance(batches, list) else []:
+                    until = participants.parse_time(str(batch.get("valid_until") or "")) \
+                        if isinstance(batch, dict) else None
+                    if until is not None and until > now and ws.victim in (batch.get("personas") or []):
+                        why = f"its cards carry bypass codes for {ws.victim} until {participants.minute(until)}"
+                        break
+                if why:
+                    break
+        if why:
+            out.append(f"room.victim {ws.victim} is also the victim of workshop {other.name}, and {why}. Every room "
+                       f"needs its own victim (plan 4.3): one room's containment would end the other's victim "
+                       f"sessions and codes. Use another victim (room.fallback, say), or run `lab5-setup down` with "
+                       f"{other.name}'s workshop file first")
+    return out
 
 
 def run_parallel(ctx: Ctx, boxes: Sequence[BoxSpec], fn: Callable[[Ctx, BoxSpec], BoxReport]) -> List[BoxReport]:
@@ -1410,6 +1535,9 @@ def run_handouts(args: argparse.Namespace, deps: Deps) -> int:
     reporter = Reporter(redactor, out=out, log_path=state.run_log("handouts"))
     keychain = Keychain(redactor, deps.keychain_runner) if deps.keychain_runner else Keychain(redactor)
     try:
+        clashes = victim_clashes(state.root, ws, deps.now())
+        if clashes:
+            raise Lab5Error(clashes[0])
         env = accounts_env(ws, keychain, reporter.line, state.root, deps)
         personas = bypass.room_personas(ws.victim, ws.trusted, env.cast)
         codes = ws.bypass_codes
@@ -1502,6 +1630,10 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
     try:
         reporter.line(f"lab5-setup {args.command}: workshop {ws.name}, {len(boxes)} box(es), "
                       f"required release {ws.required_version}, state {state.dir}")
+        if args.command in ("check", "up"):
+            clashes = victim_clashes(state.root, ws, deps.now())
+            if clashes:
+                raise Lab5Error(clashes[0])
         if args.command in ("check", "up", "status"):
             load_creds(ctx)                 # local first: a missing item fails before any network call
         if with_participants:

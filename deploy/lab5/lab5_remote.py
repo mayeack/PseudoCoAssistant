@@ -16,7 +16,6 @@ import hashlib
 import json
 import secrets
 import shlex
-import socket
 import threading
 import time
 from dataclasses import dataclass, field
@@ -139,6 +138,21 @@ def _recording_policy(known: KnownHosts, notes: List[str]):
 
 
 # --------------------------------------------------------------------------- the box
+def session_errors() -> Tuple[type, ...]:
+    """What a lost or dead SSH session raises: socket and SFTP errors
+    (OSError), a failed send (EOFError) and paramiko's own SSHException ("SSH
+    session not active", "Timeout opening channel.", "Server connection
+    dropped"). Neither of the last two is an OSError, so each is named here:
+    every ParamikoBox method turns them into a Lab5Error, which `up` and
+    `down` handle (a revert left pending, the DNS record and tunnel still
+    deleted), instead of an error that ends the box's report."""
+    try:
+        import paramiko
+    except ImportError:          # the app's venv (tests): no session to lose
+        return (OSError, EOFError)
+    return (OSError, EOFError, paramiko.SSHException)
+
+
 class ParamikoBox:
     """One SSH connection to a Show box, password auth only."""
 
@@ -178,17 +192,23 @@ class ParamikoBox:
                 return fh.read()
         except FileNotFoundError:
             return None
-        except IOError as exc:
-            if getattr(exc, "errno", None) == 2:
+        except session_errors() as exc:
+            if isinstance(exc, OSError) and getattr(exc, "errno", None) == 2:
                 return None
             raise Lab5Error(f"cannot read {path} on the box ({type(exc).__name__})")
 
     def file_mode(self, path: str) -> Optional[int]:
+        """The file's permission bits, or None when it does not exist. A lost
+        session is a Lab5Error, never a silent None."""
         import stat as _stat
         try:
             st = self._sftp_client().lstat(path)
-        except IOError:
+        except FileNotFoundError:
             return None
+        except session_errors() as exc:
+            if isinstance(exc, OSError) and getattr(exc, "errno", None) == 2:
+                return None
+            raise Lab5Error(f"cannot read the mode of {path} on the box ({type(exc).__name__})")
         if _stat.S_ISLNK(st.st_mode):
             raise Lab5Error(f"{path} is a symlink; lab5-setup edits only a regular file")
         return _stat.S_IMODE(st.st_mode)
@@ -227,7 +247,7 @@ class ParamikoBox:
             out = chan_out.read().decode("utf-8", "replace")
             err = chan_err.read().decode("utf-8", "replace")
             rc = chan_out.channel.recv_exit_status()
-        except (socket.timeout, OSError) as exc:
+        except session_errors() as exc:          # socket.timeout is an OSError
             raise Lab5Error(f"`{argv[0]}` on the box failed ({type(exc).__name__})")
         result = CmdResult(rc=rc, out=out, err=err)
         if check and rc != 0:
@@ -252,18 +272,27 @@ class ParamikoBox:
                 if not data:
                     break
                 chunks.append(data)
-        except (socket.timeout, OSError) as exc:
+        except session_errors() as exc:
             raise Lab5Error(f"{method} {path} on the box timed out ({type(exc).__name__})")
         finally:
-            chan.close()
+            try:
+                chan.close()
+            except Exception:  # noqa: BLE001 - a dead channel: nothing to close
+                pass
         return parse_http_response(b"".join(chunks))
 
     def close(self) -> None:
+        """Best effort: closing a session that is already gone never raises
+        (it runs in the `finally` of every box command)."""
         try:
             if self._sftp is not None:
                 self._sftp.close()
-        finally:
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             self._client.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # --------------------------------------------------------------------------- app API
