@@ -46,7 +46,8 @@ not be asked (no CII login known) is ``unavailable`` (error ``no_login``),
 never ``not_found``. CII's "no such user" is read from the answer's shape
 alone, an answer with no error at all (``_cii_not_found``): a failure taken
 for one would make the check "ok" and let the turn through even with
-``IDENTITY_FAIL_OPEN`` off, so no error ever counts as one, whatever it says.
+``IDENTITY_FAIL_OPEN`` off, so no error ever counts as one, whatever it says
+or what code it carries.
 """
 from __future__ import annotations
 
@@ -464,12 +465,14 @@ def _cii_not_found(body: Any) -> bool:
     ``""``, 0, false) included, here and in ``_cii_parse``.
 
     An answer that carries any error is never this answer, whatever the error
-    says or where it sits. Telling a missing user from a missing permission,
-    scope, role or tenant by the words of a message is a guess, and a wrong
-    guess turns a CII failure into a clean check (an allow under
-    IDENTITY_FAIL_OPEN=false). Spikes S5/S6 capture CII's real answer for a
-    login it has no record of; if that answer is an error, it is added here
-    and to the shared table matched exactly, never by its wording.
+    says, what code it carries or where it sits. Telling a missing user from a
+    missing permission, scope, role or tenant by the words of a message is a
+    guess, and so is reading a code (a ``NOT_FOUND`` or ``USER_NOT_FOUND``
+    says something was not found, not what); a wrong guess turns a CII
+    failure into a clean check (an allow under IDENTITY_FAIL_OPEN=false).
+    Spikes S5/S6 capture CII's real answer for a login it has no record of;
+    if that answer is an error, it is added here and to the shared table
+    matched exactly, never by its wording or a code.
 
     ``deploy/lab5/lab5_cii.py`` applies the same rule on the Mac,
     tests/test_identity_personas.py pins the two copies' code together, and

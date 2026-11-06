@@ -128,9 +128,11 @@ before any screen or model.
      with no error at all, whose `getEndUser` is null or holds a present,
      null `endUserDetails` (the published `GetEndUserOutput!` answer for a
      user CII has no record of). No error is ever that answer, whatever it
-     says or where it sits: telling "User … not found" from "Permission
-     read:user not found" or "Role end-user does not exist" by their words is
-     a guess, and a wrong guess turns a CII failure into a clean check.
+     says, what code it carries or where it sits: telling "User … not found"
+     from "Permission read:user not found" or "Role end-user does not exist"
+     by their words is a guess, and so is reading a `NOT_FOUND` or
+     `USER_NOT_FOUND` code, which says something was not found but not what.
+     A wrong guess turns a CII failure into a clean check.
      Spikes S5/S6 capture CII's real answer for a login it has no record of;
      if it is an error, that exact answer is added to the rule and the shared
      table, matched exactly.

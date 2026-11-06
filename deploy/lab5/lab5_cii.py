@@ -15,9 +15,10 @@ carries ``failingChecks`` and ``endUserTrustScore { levelOfTrust }``. A user
 CII has no record of yet reads the way the gate reads it (``not_found``): an
 answer with no error at all whose ``getEndUser`` is null or holds a present,
 null ``endUserDetails``. Any answer that carries an error is a failed query,
-never "not in CII yet", whatever the error says or its details hold: reading
-a missing user from the words of a message is a guess that a permission or
-scope error can pass. If spikes S5/S6 show CII answers an unknown login with
+never "not in CII yet", whatever the error says, what code it carries or what
+its details hold: reading a missing user from the words of a message, or from
+a code such as ``USER_NOT_FOUND``, is a guess that a permission or scope error
+can pass. If spikes S5/S6 show CII answers an unknown login with
 an error, that exact answer is added to both copies and the shared table.
 ``tests/fixtures/cii_end_user_answers.json`` holds the cases the two must read
 the same way. Spikes S5/S6 confirm the shape on the tenant; personas.yaml ``cii.end_user_query``
@@ -63,7 +64,8 @@ def not_found(doc: Any) -> bool:
     """Is this GraphQL answer CII's "no such user"? The gate's rule
     (``identity_lookup._cii_not_found``): an answer with ``data`` and no error
     at all, whose ``getEndUser`` is null or holds a present, null
-    ``endUserDetails``. An answer with any error never is, whatever it says.
+    ``endUserDetails``. An answer with any error never is, whatever it says or
+    what code it carries.
     No error at all is ``errors`` absent, null or an empty list; any other
     value carries one, a falsy one (``{}``, ``""``, 0, false) included, here
     and in ``parse_end_user``."""
@@ -82,9 +84,9 @@ def parse_end_user(doc: Any) -> Dict[str, Any]:
     """One getEndUser answer to ``{"trust", "failing_checks", "found"}``. CII's
     "no such user" (``not_found``: an answer with no error at all) is
     ``found: False``. Every answer that carries an error raises, whatever it
-    says or where it sits, and so does one without details: a partial or
-    misshapen answer is a failed query, never a user with no failing checks
-    and never "not in CII yet"."""
+    says, what code it carries or where it sits, and so does one without
+    details: a partial or misshapen answer is a failed query, never a user
+    with no failing checks and never "not in CII yet"."""
     if not_found(doc):
         return {"trust": "UNKNOWN", "failing_checks": [], "found": False}
     errors = doc.get("errors") if isinstance(doc, dict) else None

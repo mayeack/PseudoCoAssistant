@@ -1,5 +1,5 @@
 {
-  "_about": "getEndUser answers that the app's gate (backend/services/identity_lookup._cii_parse) and the Mac's persona self-check (deploy/lab5/lab5_cii.parse_end_user) must read the same way. expect: found (details, no error), not_found (CII's 'no such user': no error at all, and getEndUser null or a present, null endUserDetails), unavailable (anything else, every answer that carries an error included, whatever the error says). No error at all is errors absent, null or an empty list; any other errors value carries one, an empty object, an empty string, 0 or false included. An unavailable case may carry trust, failing and reasons: what a partial answer did say, which the gate keeps and still blocks on (reasons: its block; none: nothing against the user), while the self-check reads every unavailable answer as a failed query. If spikes S5/S6 show CII answers a login it has no record of with an error, that exact answer is added here as not_found and matched exactly in both copies, never by its words. Run by tests/test_identity_gate.py and tests/test_identity_personas.py.",
+  "_about": "getEndUser answers that the app's gate (backend/services/identity_lookup._cii_parse) and the Mac's persona self-check (deploy/lab5/lab5_cii.parse_end_user) must read the same way. expect: found (details, no error), not_found (CII's 'no such user': no error at all, and getEndUser null or a present, null endUserDetails), unavailable (anything else, every answer that carries an error included, whatever the error says and whatever code it carries). No error at all is errors absent, null or an empty list; any other errors value carries one, an empty object, an empty string, 0 or false included. An unavailable case may carry trust, failing and reasons: what a partial answer did say, which the gate keeps and still blocks on (reasons: its block; none: nothing against the user), while the self-check reads every unavailable answer as a failed query. error_messages and coded_errors are errors tried in every shape of error_shapes, each unavailable with nothing learned. If spikes S5/S6 show CII answers a login it has no record of with an error, that exact answer is added here as not_found and matched exactly in both copies, never by its words or by a code. Run by tests/test_identity_gate.py and tests/test_identity_personas.py.",
   "login": "avery.kim@pseudocoassistant.com",
   "cases": [
     {
@@ -84,24 +84,6 @@
             "path": [
               "getEndUser"
             ]
-          }
-        ]
-      }
-    },
-    {
-      "name": "data null (the non-null field failed), a NOT_FOUND error on getEndUser (an error, so never 'no such user')",
-      "expect": "unavailable",
-      "body": {
-        "data": null,
-        "errors": [
-          {
-            "message": "User does not exist",
-            "path": [
-              "getEndUser"
-            ],
-            "extensions": {
-              "code": "NOT_FOUND"
-            }
           }
         ]
       }
@@ -357,183 +339,6 @@
         "errors": [
           {
             "message": "Requested resource not found"
-          }
-        ]
-      }
-    },
-    {
-      "name": "a not-found message with a FORBIDDEN code (an error, so never 'no such user')",
-      "expect": "unavailable",
-      "body": {
-        "data": {
-          "getEndUser": null
-        },
-        "errors": [
-          {
-            "message": "End user avery.kim@pseudocoassistant.com not found",
-            "path": [
-              "getEndUser"
-            ],
-            "extensions": {
-              "code": "FORBIDDEN"
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "a USER_NOT_FOUND code (extensions.code) (an error, so never 'no such user')",
-      "expect": "unavailable",
-      "body": {
-        "data": {
-          "getEndUser": null
-        },
-        "errors": [
-          {
-            "message": "End user avery.kim@pseudocoassistant.com not found",
-            "path": [
-              "getEndUser"
-            ],
-            "extensions": {
-              "code": "USER_NOT_FOUND"
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "an END_USER_NOT_FOUND code (extensions.code) (an error, so never 'no such user')",
-      "expect": "unavailable",
-      "body": {
-        "data": {
-          "getEndUser": null
-        },
-        "errors": [
-          {
-            "message": "End user avery.kim@pseudocoassistant.com not found",
-            "path": [
-              "getEndUser"
-            ],
-            "extensions": {
-              "code": "END_USER_NOT_FOUND"
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "a not-found code written another way (not-found) (an error, so never 'no such user')",
-      "expect": "unavailable",
-      "body": {
-        "data": {
-          "getEndUser": null
-        },
-        "errors": [
-          {
-            "message": "End user avery.kim@pseudocoassistant.com not found",
-            "path": [
-              "getEndUser"
-            ],
-            "extensions": {
-              "code": "not-found"
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "errorType NotFound in extensions (an error, so never 'no such user')",
-      "expect": "unavailable",
-      "body": {
-        "data": {
-          "getEndUser": null
-        },
-        "errors": [
-          {
-            "message": "End user avery.kim@pseudocoassistant.com not found",
-            "path": [
-              "getEndUser"
-            ],
-            "extensions": {
-              "errorType": "NotFound"
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "AppSync's errorType UserNotFound (an error, so never 'no such user')",
-      "expect": "unavailable",
-      "body": {
-        "data": {
-          "getEndUser": null
-        },
-        "errors": [
-          {
-            "message": "End user avery.kim@pseudocoassistant.com not found",
-            "path": [
-              "getEndUser"
-            ],
-            "errorType": "UserNotFound"
-          }
-        ]
-      }
-    },
-    {
-      "name": "AppSync's errorType Unauthorized on a not-found message (an error, so never 'no such user')",
-      "expect": "unavailable",
-      "body": {
-        "data": {
-          "getEndUser": null
-        },
-        "errors": [
-          {
-            "message": "End user avery.kim@pseudocoassistant.com not found",
-            "path": [
-              "getEndUser"
-            ],
-            "errorType": "Unauthorized"
-          }
-        ]
-      }
-    },
-    {
-      "name": "errorType Unauthorized in extensions on a not-found message (an error, so never 'no such user')",
-      "expect": "unavailable",
-      "body": {
-        "data": {
-          "getEndUser": null
-        },
-        "errors": [
-          {
-            "message": "End user avery.kim@pseudocoassistant.com not found",
-            "path": [
-              "getEndUser"
-            ],
-            "extensions": {
-              "errorType": "Unauthorized"
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "a NOT_FOUND code next to an Unauthorized errorType (an error, so never 'no such user')",
-      "expect": "unavailable",
-      "body": {
-        "data": {
-          "getEndUser": null
-        },
-        "errors": [
-          {
-            "message": "End user avery.kim@pseudocoassistant.com not found",
-            "path": [
-              "getEndUser"
-            ],
-            "extensions": {
-              "code": "NOT_FOUND"
-            },
-            "errorType": "Unauthorized"
           }
         ]
       }
@@ -797,8 +602,8 @@
       }
     }
   ],
-  "error_messages": {
-    "_about": "Messages of a code-less error, each tried in every shape below: on getEndUser (getEndUser null), on its endUserDetails (getEndUser an object, endUserDetails null), on getEndUser with data null (the shape the published schema gives such an error: getEndUser returns the non-null GetEndUserOutput!, so an error on it nulls the whole of data), and with no path (data null). Every one is unavailable, whatever it says: the first ones read like CII saying 'no such user', the rest are about something else (a permission, a scope, a role, a pool, a session, another principal). No error is ever read as that answer by its words.",
+  "error_shapes": {
+    "_about": "Where an error in a getEndUser answer sits, each tried with every message of error_messages and every error of coded_errors: on getEndUser (getEndUser null), on its endUserDetails (getEndUser an object, endUserDetails null), on getEndUser with data null (the shape the published schema gives such an error: getEndUser returns the non-null GetEndUserOutput!, so an error on it nulls the whole of data), and with no path (data null).",
     "shapes": [
       {
         "where": "on getEndUser",
@@ -833,7 +638,10 @@
         "data": null,
         "path": null
       }
-    ],
+    ]
+  },
+  "error_messages": {
+    "_about": "Messages of a code-less error, each tried in every shape of error_shapes. Every one is unavailable, whatever it says: the first ones read like CII saying 'no such user', the rest are about something else (a permission, a scope, a role, a pool, a session, another principal). No error is ever read as that answer by its words.",
     "messages": [
       "End user avery.kim@pseudocoassistant.com not found",
       "User does not exist",
@@ -904,6 +712,139 @@
       "User (read) not found",
       "Role for user api.client not found",
       "No user 'read access@tenant' granted"
+    ]
+  },
+  "coded_errors": {
+    "_about": "Errors that carry a code, in each place a GraphQL server puts one: extensions.code, extensions.errorType, extensions.classification (graphql-java, Spring for GraphQL), AppSync's errorType and GitHub's type on the error itself. Each is tried, with its path from the shape, in every shape of error_shapes, data null on getEndUser (the published schema's shape) included. Every one is unavailable, whatever its code says: a code that reads 'not found' or 'user not found' is still an error, and no error is ever 'no such user' (a refused API client can carry one, as the USER_NOT_FOUND code on a permission message here does). An answer spikes S5/S6 pin as CII's own goes to cases, matched exactly.",
+    "errors": [
+      {
+        "name": "a NOT_FOUND code (extensions.code)",
+        "error": {
+          "message": "User does not exist",
+          "extensions": {
+            "code": "NOT_FOUND"
+          }
+        }
+      },
+      {
+        "name": "a USER_NOT_FOUND code (extensions.code)",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "extensions": {
+            "code": "USER_NOT_FOUND"
+          }
+        }
+      },
+      {
+        "name": "a USER_NOT_FOUND code on a refused API client's message",
+        "error": {
+          "message": "Permission read:user not found for this API client",
+          "extensions": {
+            "code": "USER_NOT_FOUND"
+          }
+        }
+      },
+      {
+        "name": "an END_USER_NOT_FOUND code (extensions.code)",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "extensions": {
+            "code": "END_USER_NOT_FOUND"
+          }
+        }
+      },
+      {
+        "name": "a not-found code written another way (not-found)",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "extensions": {
+            "code": "not-found"
+          }
+        }
+      },
+      {
+        "name": "errorType NotFound in extensions",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "extensions": {
+            "errorType": "NotFound"
+          }
+        }
+      },
+      {
+        "name": "errorType UserNotFound in extensions",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "extensions": {
+            "errorType": "UserNotFound"
+          }
+        }
+      },
+      {
+        "name": "AppSync's errorType UserNotFound",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "errorType": "UserNotFound"
+        }
+      },
+      {
+        "name": "AppSync's errorType NotFound",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "errorType": "NotFound"
+        }
+      },
+      {
+        "name": "classification NOT_FOUND in extensions (graphql-java, Spring for GraphQL)",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "extensions": {
+            "classification": "NOT_FOUND"
+          }
+        }
+      },
+      {
+        "name": "a type NOT_FOUND on the error (GitHub's GraphQL API)",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "type": "NOT_FOUND"
+        }
+      },
+      {
+        "name": "a FORBIDDEN code on a not-found message",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "extensions": {
+            "code": "FORBIDDEN"
+          }
+        }
+      },
+      {
+        "name": "AppSync's errorType Unauthorized on a not-found message",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "errorType": "Unauthorized"
+        }
+      },
+      {
+        "name": "errorType Unauthorized in extensions on a not-found message",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "extensions": {
+            "errorType": "Unauthorized"
+          }
+        }
+      },
+      {
+        "name": "a NOT_FOUND code next to an Unauthorized errorType",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "extensions": {
+            "code": "NOT_FOUND"
+          },
+          "errorType": "Unauthorized"
+        }
+      }
     ]
   }
 }

@@ -408,7 +408,8 @@ def _status(**over):
 
 
 def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
-    print("CII 'no such user': read from the answer's shape alone; no error is ever one, whatever it says")
+    print("CII 'no such user': read from the answer's shape alone; no error is ever one, whatever it says or what "
+          "code it carries")
     _configure(True)
     fake = _fresh_fake()
     fake.set_user("avery.kim", trust="UNTRUSTED", failing=["MFA Flood", "Impossible Travel"])
@@ -447,34 +448,67 @@ def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
                   st["sources"] == {"duo": "ok", "cii": "ok"} and st["available"] is True
                   and st["trust_level"] == case["trust"]
                   and sorted(st["failing_checks"]) == sorted(case["failing"]), str(st))
-    # No error is ever "no such user", whatever it says: every message of the
-    # shared table, in every shape such an error takes, is unavailable.
-    shapes = table["error_messages"]["shapes"]
-    check("the shared table tries each message with data null and the error on getEndUser too (the shape the "
+    # No error is ever "no such user", whatever it says or what code it
+    # carries: every code-less message of the shared table, and every error
+    # of it that carries a code, in every shape such an error takes, is
+    # unavailable with nothing learned.
+    shapes = table["error_shapes"]["shapes"]
+    check("the shared table tries each error with data null and the error on getEndUser too (the shape the "
           "published schema gives an error there: GetEndUserOutput! is non-null)",
           any(s["data"] is None and s["path"] == ["getEndUser"] for s in shapes), str(shapes))
-    misread = []
-    for message in table["error_messages"]["messages"]:
-        for shape in shapes:
-            fake.cii_body = _error_answer(shape, message)
-            lookup.clear_cache()
-            st = lookup.lookup("avery.kim")
-            closed = gate.decide(st, fail_open=False)
-            opened = gate.decide(st, fail_open=True)
-            if (st["sources"]["cii"] != "unavailable" or closed["reasons"] != ["identity_unavailable"]
-                    or opened["check"] != "unavailable"):
-                misread.append(f"{message!r} {shape['where']}: {st['sources']['cii']}, {closed['verdict']}")
-    check(f"every error message of the shared table, in each of its {len(shapes)} shapes (on getEndUser, on "
-          "endUserDetails, on getEndUser with data null, with no path): unavailable, never 'no such user' "
-          "(fail-closed blocks it as not verifiable, fail-open says unavailable)", not misread, "; ".join(misread))
+    coded = table["coded_errors"]["errors"]
+    places = {"extensions.code": lambda e: (e.get("extensions") or {}).get("code"),
+              "extensions.errorType": lambda e: (e.get("extensions") or {}).get("errorType"),
+              "extensions.classification": lambda e: (e.get("extensions") or {}).get("classification"),
+              "errorType": lambda e: e.get("errorType"), "type": lambda e: e.get("type")}
+    check("the shared table's coded errors carry a code in each place a GraphQL server puts one, a user-not-found "
+          "code among them, and each is an error with a message and no path of its own (the shape gives it)",
+          all(any(read(c["error"]) for c in coded) for read in places.values())
+          and any(places["extensions.code"](c["error"]) == "USER_NOT_FOUND" for c in coded)
+          and all(c["error"].get("message") and "path" not in c["error"] for c in coded), str(coded)[:400])
+    for what, errors in (("code-less error message", [(m, m) for m in table["error_messages"]["messages"]]),
+                         ("error that carries a code", [(c["name"], c["error"]) for c in coded])):
+        misread = []
+        for name, error in errors:
+            for shape in shapes:
+                fake.cii_body = _error_answer(shape, error)
+                lookup.clear_cache()
+                st = lookup.lookup("avery.kim")
+                wrong = _misread_error(st, gate.decide(st, fail_open=False), gate.decide(st, fail_open=True))
+                if wrong:
+                    misread.append(f"{name!r} {shape['where']}: {wrong}")
+        check(f"every {what} of the shared table ({len(errors)}), in each of its {len(shapes)} shapes (on "
+              "getEndUser, on endUserDetails, on getEndUser with data null, with no path): unavailable with nothing "
+              "learned, never 'no such user' (fail-closed blocks it as not verifiable, fail-open allows it as "
+              "unavailable)", not misread, "; ".join(misread)[:2000])
     fake.cii_body = None
     lookup.clear_cache()
 
 
-def _error_answer(shape, message):
-    """A getEndUser answer carrying one code-less error with this message, in
-    one of the shared table's shapes (``error_messages.shapes``)."""
-    error = {"message": message, **({"path": shape["path"]} if shape["path"] else {})}
+def _misread_error(st, closed, opened):
+    """What is wrong with the gate's reading of an answer whose one error
+    says nothing against the user ("" when nothing): it must be CII
+    unavailable with nothing learned, block fail-closed as not verifiable and
+    allow fail-open as unavailable (the checks the table's cases make)."""
+    if st["sources"] != {"duo": "ok", "cii": "unavailable"} or st["available"] is not False:
+        return f"sources {st['sources']}, available {st['available']}"
+    if st["trust_level"] is not None or st["failing_checks"]:
+        return f"learned trust {st['trust_level']}, failing {st['failing_checks']}"
+    if (closed["check"] != "unavailable" or closed["verdict"] != "block"
+            or closed["reasons"] != ["identity_unavailable"]):
+        return f"fail-closed {closed['check']} {closed['verdict']} {closed['reasons']}"
+    if opened["check"] != "unavailable" or opened["verdict"] != "allow" or opened["reasons"] != []:
+        return f"fail-open {opened['check']} {opened['verdict']} {opened['reasons']}"
+    return ""
+
+
+def _error_answer(shape, error):
+    """A getEndUser answer carrying one error in one of the shared table's
+    shapes (``error_shapes``): a code-less error with this message
+    (``error_messages``), or this error (``coded_errors``), with the shape's
+    path."""
+    error = copy.deepcopy(error) if isinstance(error, dict) else {"message": error}
+    error = {**error, **({"path": shape["path"]} if shape["path"] else {})}
     return {"data": copy.deepcopy(shape["data"]), "errors": [error]}
 
 
@@ -530,27 +564,32 @@ def test_victim_self_check_on_a_partial_answer() -> None:
 
 
 def test_victim_self_check_on_a_refused_client() -> None:
-    print("lab5-setup status: an error on getEndUser is 'cannot verify', never 'not in CII yet', whatever it says")
+    print("lab5-setup status: an error on getEndUser is 'cannot verify', never 'not in CII yet', whatever it says "
+          "or what code it carries")
     _configure(True)
     fake = _fresh_fake()
     fake.set_user("avery.kim", trust="NEUTRAL")
-    shapes = json.loads((ROOT / "tests" / "fixtures" / "cii_end_user_answers.json").read_text())[
-        "error_messages"]["shapes"]
+    table = json.loads((ROOT / "tests" / "fixtures" / "cii_end_user_answers.json").read_text())
+    shapes = table["error_shapes"]["shapes"]
     # Each once read as CII's "no such user" through the wording rule (a scope,
     # a role, a quoted word or another principal taken for the user or its
     # login), so the row said WARN "trust no record in CII yet". Each is tried
-    # in every shape of the shared table, data null on getEndUser included.
-    for message in ("No user (or group) permission granted to this API client",
-                    "No user 'read' scope granted to this API client",
-                    "Required scope user:read.all not found in access token",
-                    "Permission read:user not found for this API client",
-                    "Role end-user does not exist",
-                    "No user for abc123XYZ@clients",
-                    "User abc123XYZ@clients not found",
-                    "End user avery.kim@pseudocoassistant.com not found"):
+    # in every shape of the shared table, data null on getEndUser included,
+    # and so is every error of the table that carries a code: a code that
+    # reads "user not found" never makes it "no record in CII" either.
+    messages = ("No user (or group) permission granted to this API client",
+                "No user 'read' scope granted to this API client",
+                "Required scope user:read.all not found in access token",
+                "Permission read:user not found for this API client",
+                "Role end-user does not exist",
+                "No user for abc123XYZ@clients",
+                "User abc123XYZ@clients not found",
+                "End user avery.kim@pseudocoassistant.com not found")
+    for message, error in [(m, m) for m in messages] + [(c["name"], c["error"])
+                                                        for c in table["coded_errors"]["errors"]]:
         for shape in shapes:
             where = shape["where"]
-            status, detail = _box_victim_row(fake, _error_answer(shape, message))
+            status, detail = _box_victim_row(fake, _error_answer(shape, error))
             check(f"{message!r} {where}: the box's victim row is FAIL (cannot verify), never WARN 'no record in CII'",
                   status == "FAIL" and "cannot verify avery.kim (cii graphql_error)" in detail
                   and "no record in CII" not in detail, f"{status}: {detail}")
