@@ -1021,6 +1021,12 @@ def test_rules() -> None:
     claude = (ROOT / "CLAUDE.md").read_text()
     check("CLAUDE.md: 'Identity sign-in' and 'Identity Risk Gate' sections",
           "## Identity sign-in" in claude and "## Identity Risk Gate" in claude)
+    from backend.agents.nodes import identity as identity_node
+    gate_rules = claude.split("## Identity Risk Gate", 1)[-1].split("\n## ", 1)[0]
+    check("CLAUDE.md states both block events the node writes: compromised_identity / HIGH, and the neutral "
+          "fail-closed identity_unverified / MEDIUM",
+          f'"{identity_node.SAFETY_CATEGORY}"' in gate_rules and f'"{identity_node.UNVERIFIED_CATEGORY}"' in gate_rules
+          and "severity HIGH" in gate_rules and "severity MEDIUM" in gate_rules, gate_rules[-900:])
     check("docs/identity.md and its .html rendering exist",
           (ROOT / "docs" / "identity.md").exists() and (ROOT / "docs" / "identity.html").exists())
     check("tests/run_all.sh runs this suite", "tests/test_identity_gate.py" in (ROOT / "tests" / "run_all.sh").read_text())

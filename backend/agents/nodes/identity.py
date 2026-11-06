@@ -21,7 +21,10 @@ engine calls ``identity_gate_turn`` before its own policy check (parity).
   severity HIGH (never EMERGENCY), no escalation event, never "injection".
 - **Fail open (A3):** an unavailable lookup allows the turn with
   ``identity_check="unavailable"``; with ``IDENTITY_FAIL_OPEN`` off it is
-  blocked with a neutral "could not be verified" banner.
+  blocked, and that block is neutral (nothing is known against the identity:
+  ``identity_gate.unverified_only``): ``safety_categories=["identity_unverified"]``,
+  severity MEDIUM and the IDENTITY NOT VERIFIED "could not be verified"
+  banner, never the compromised-identity block above.
 - **Unblock me:** a session with ``override`` True gets the real verdict
   recorded (``identity_risk``, plus ``identity_override`` on every event) and
   the turn goes on.

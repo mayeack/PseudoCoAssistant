@@ -282,6 +282,12 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   `safety_categories=["compromised_identity"]`, severity HIGH (never
   EMERGENCY), no escalation, the typed message only, `theme=` and the turn's
   identity / attachment fields. Never tagged "injection" (Lab 4's correlation).
+  A fail-closed block (`IDENTITY_FAIL_OPEN` off and nothing known against the
+  identity: `identity_gate.unverified_only`) is neutral on purpose:
+  `safety_categories=["identity_unverified"]`, severity MEDIUM and the
+  IDENTITY NOT VERIFIED banner, so the executive overlay never counts every
+  signed-in user as a compromised identity during a Duo or CII outage. Never
+  "fix" it to `compromised_identity` / HIGH.
 - Extend `tests/test_identity_gate.py` and the `identity_*` scenarios in
   `tests/test_blueprint_parity.py` in the same PR as any identity change. The
   attachment rules above are unchanged.
