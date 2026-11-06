@@ -4,10 +4,12 @@ Automatically generates realistic medical consultation sessions for testing and 
 """
 
 import asyncio
+import math
 import random
+import time
 import uuid
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 import httpx
 
@@ -31,6 +33,11 @@ class AutoPrompterService:
     # sessions mid-conversation while the server finished each turn anyway. Same
     # budget as the incident load driver (routers/incident.py).
     TURN_TIMEOUT_S = 150.0
+
+    # The generator turns itself off this long after it is switched on, so a
+    # demo box left with the toggle on doesn't keep generating LLM traffic
+    # indefinitely. Same idea as Trigger Demo Incident / Prompt Injection Spray.
+    DEFAULT_DURATION_S = 3600
 
     # Realistic medical consultation scenarios with multi-turn conversations
     CONSULTATION_SCENARIOS = [
@@ -121,6 +128,13 @@ class AutoPrompterService:
         self._task: Optional[asyncio.Task] = None
         self._sessions_created = 0
         self._last_session_time: Optional[datetime] = None
+        # Run timer: the current (or last) run's length, when it started
+        # (monotonic, for remaining_s) and when it ends (wall clock, for the API).
+        self._duration_s: Optional[float] = None
+        self._started_monotonic: Optional[float] = None
+        self._expires_at: Optional[datetime] = None
+        # True when the last run ended because its timer ran out, not via stop().
+        self._auto_stopped = False
         # Derived from settings.port, not hardcoded 8001: on any other PORT the
         # toggle appeared to start but every self-call hit a dead port, so the
         # demo produced no traffic at all. (incident.py already did this.)
@@ -131,29 +145,45 @@ class AutoPrompterService:
         return self._running
     
     @property
+    def remaining_s(self) -> Optional[int]:
+        """Whole seconds until the timer turns the generator off; None when stopped."""
+        if not self._running or self._duration_s is None or self._started_monotonic is None:
+            return None
+        elapsed = time.monotonic() - self._started_monotonic
+        return max(0, math.ceil(self._duration_s - elapsed))
+
+    @property
     def stats(self) -> Dict[str, Any]:
         return {
             "running": self._running,
             "sessions_created": self._sessions_created,
-            "last_session_time": self._last_session_time.isoformat() if self._last_session_time else None
+            "last_session_time": self._last_session_time.isoformat() if self._last_session_time else None,
+            "duration_s": int(self._duration_s) if self._duration_s is not None else None,
+            "remaining_s": self.remaining_s,
+            "expires_at": self._expires_at.isoformat() if (self._running and self._expires_at) else None,
+            "auto_stopped": self._auto_stopped,
         }
-    
-    async def start(self):
-        """Start the auto-prompter"""
+
+    async def start(self, duration_s: Optional[float] = None):
+        """Start the auto-prompter; it turns itself off after ``duration_s`` (default 60 min)."""
         if self._running:
             logger.warning("Auto-prompter is already running")
             return
-        
+
+        self._duration_s = float(duration_s) if duration_s else float(self.DEFAULT_DURATION_S)
+        self._started_monotonic = time.monotonic()
+        self._expires_at = datetime.now(timezone.utc) + timedelta(seconds=self._duration_s)
+        self._auto_stopped = False
         self._running = True
-        self._task = asyncio.create_task(self._run_loop())
-        logger.info("Auto-prompter started")
-    
+        self._task = asyncio.create_task(self._run_for(self._duration_s))
+        logger.info("Auto-prompter started (turns off after %d min)", int(self._duration_s // 60))
+
     async def stop(self):
         """Stop the auto-prompter"""
         if not self._running:
             logger.warning("Auto-prompter is not running")
             return
-        
+
         self._running = False
         if self._task:
             self._task.cancel()
@@ -162,7 +192,21 @@ class AutoPrompterService:
             except asyncio.CancelledError:
                 pass
         logger.info("Auto-prompter stopped")
-    
+
+    async def _run_for(self, duration_s: float):
+        """Run the session loop until the timer runs out (or stop() cancels it).
+
+        wait_for cancels the loop at the deadline, including a session that is
+        mid-conversation; the server still finishes the turn it is serving.
+        """
+        try:
+            await asyncio.wait_for(self._run_loop(), timeout=duration_s)
+        except asyncio.TimeoutError:
+            self._auto_stopped = True
+            logger.info("Auto-prompter auto-stopped after %d min", int(duration_s) // 60)
+        finally:
+            self._running = False
+
     async def _run_loop(self):
         """Main loop that creates sessions every minute"""
         while self._running:

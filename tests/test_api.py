@@ -1032,7 +1032,17 @@ def main() -> int:
         check("Composer: attachment chip row present", 'id="attachmentChip"' in a_html)
         check("Composer: the attachment controls are outside the Demo Controls drawer",
               all(f'id="{i}"' not in _drawer for i in ("attachButton", "attachmentInput", "attachmentChip")))
-        check("Chat: chat.js cache-buster bumped to v=33", "/static/js/chat.js?v=33" in a_html)
+        check("Chat: chat.js cache-buster bumped to v=34", "/static/js/chat.js?v=34" in a_html)
+        # Auto-Generate Sessions turns itself off after 60 minutes; the countdown
+        # lives inside the existing #autoPromptStats counter, beside the pill.
+        check("Auto-Generate Sessions: card says it turns off after 60 minutes",
+              "Turns off after 60 minutes." in _drawer)
+        check("Auto-Generate Sessions: countdown span sits inside #autoPromptStats",
+              re.search(r'id="autoPromptStats"[^>]*>\s*Sessions: <span id="autoPromptCount">0</span>'
+                        r'<span id="autoPromptRemaining"', a_html) is not None)
+        check("chat.js: Auto-Generate Sessions renders remaining_s and the auto-stop tooltip",
+              "data.remaining_s" in _chat_js and "data.auto_stopped" in _chat_js
+              and "getElementById('autoPromptRemaining')" in _chat_js)
         check("chat.js: a stage label for attachment_intake", "attachment_intake:" in _chat_js)
         check("chat.js: the payload carries the attachment and keeps the hidden-control line",
               "attachment: attachment ?" in _chat_js and "_hiddenControls.has(key)) payload[flag] = null" in _chat_js)

@@ -143,6 +143,95 @@ check("_describe_error keeps a non-empty message",
       ap._describe_error(ValueError("bad")))
 
 
+# --- 3. The 60-minute run timer ------------------------------------------------------
+# The generator turns itself off DEFAULT_DURATION_S after it is switched on. The
+# session itself is stubbed (no HTTP); a short duration stands in for the hour.
+check("default run timer is 60 minutes", ap.AutoPrompterService.DEFAULT_DURATION_S == 3600,
+      str(ap.AutoPrompterService.DEFAULT_DURATION_S))
+
+
+def _stub_sessions(svc):
+    async def one_session():
+        await asyncio.sleep(0.01)
+    svc._create_and_run_session = one_session
+
+
+async def _timer_scenarios():
+    out = {}
+    real_sleep = asyncio.sleep
+
+    # A real start() with the default duration reports the hour counting down.
+    svc = ap.AutoPrompterService()
+    _stub_sessions(svc)
+    await svc.start()
+    out["default_running"] = dict(svc.stats)
+    await svc.stop()
+    out["default_stopped"] = dict(svc.stats)
+
+    # A short duration auto-stops on its own, mid-loop (the 60 s gap between
+    # sessions is shortened so the loop is busy when the timer fires).
+    async def short_sleep(delay, *a, **k):
+        return await real_sleep(min(delay, 0.02), *a, **k)
+
+    ap.asyncio.sleep = short_sleep
+    try:
+        svc2 = ap.AutoPrompterService()
+        _stub_sessions(svc2)
+        await svc2.start(duration_s=0.2)
+        await real_sleep(0.05)
+        out["short_running"] = dict(svc2.stats)
+        await real_sleep(0.4)
+        out["short_expired"] = dict(svc2.stats)
+        out["short_task_done"] = svc2._task.done()
+
+        # Switching it back on after an auto-stop starts a fresh run.
+        await svc2.start(duration_s=0.2)
+        out["restart_running"] = dict(svc2.stats)
+        await real_sleep(0.4)
+        out["restart_expired"] = dict(svc2.stats)
+
+        # A manual stop is not reported as an auto-stop.
+        svc3 = ap.AutoPrompterService()
+        _stub_sessions(svc3)
+        await svc3.start(duration_s=5)
+        await real_sleep(0.05)
+        await svc3.stop()
+        out["manual_stopped"] = dict(svc3.stats)
+    finally:
+        ap.asyncio.sleep = real_sleep
+    return out
+
+
+t = asyncio.run(_timer_scenarios())
+d = t["default_running"]
+check("a running generator reports duration_s 3600", d["duration_s"] == 3600, str(d))
+check("a running generator reports remaining_s close to the full hour",
+      isinstance(d["remaining_s"], int) and 3590 <= d["remaining_s"] <= 3600, str(d))
+check("a running generator reports expires_at", bool(d["expires_at"]), str(d))
+check("a fresh run is not marked auto-stopped", d["auto_stopped"] is False, str(d))
+ds = t["default_stopped"]
+check("a stopped generator reports remaining_s None and no expires_at",
+      ds["remaining_s"] is None and ds["expires_at"] is None, str(ds))
+
+check("short run is running before its timer fires",
+      t["short_running"]["running"] is True and t["short_running"]["sessions_created"] >= 1,
+      str(t["short_running"]))
+se = t["short_expired"]
+check("the timer turns the generator off on its own", se["running"] is False, str(se))
+check("an expired run is reported as auto-stopped", se["auto_stopped"] is True, str(se))
+check("an expired run reports remaining_s None", se["remaining_s"] is None, str(se))
+check("the loop task has finished after the timer fires", t["short_task_done"] is True)
+check("switching it back on after an auto-stop runs again",
+      t["restart_running"]["running"] is True and t["restart_running"]["auto_stopped"] is False,
+      str(t["restart_running"]))
+check("the restarted run also auto-stops",
+      t["restart_expired"]["running"] is False and t["restart_expired"]["auto_stopped"] is True,
+      str(t["restart_expired"]))
+ms = t["manual_stopped"]
+check("a manual stop is not reported as auto-stopped",
+      ms["running"] is False and ms["auto_stopped"] is False, str(ms))
+
+
 if _failures:
     print(f"\n{len(_failures)} FAILED: {_failures}")
     sys.exit(1)
