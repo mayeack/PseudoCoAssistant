@@ -1125,6 +1125,27 @@ def test_status_victim_check() -> None:
              {"sources": {"duo": "ok", "cii": "unavailable"}, "errors": {"cii": "token_http_401"}, "available": False,
               "verdict": "block", "reasons": ["duo_disabled"]},
              "OK", ["blocks avery.kim: duo_disabled (contained", "cii token_http_401", "pseudoco-lab5-cii-"]),
+            ("locked out in Duo while CII refuses the API client: FAIL, Duo unlocks it on its own and the gate then "
+             "lets the victim chat",
+             {"sources": {"duo": "ok", "cii": "unavailable"}, "errors": {"cii": "token_http_401"}, "available": False,
+              "verdict": "block", "reasons": ["duo_locked_out"], "duo_status": "locked_out"},
+             "FAIL", ["cannot verify avery.kim (cii token_http_401)", "only while Duo's lockout lasts",
+                      "about 15 minutes", "IDENTITY_FAIL_OPEN", "pseudoco-lab5-cii-"], ["blocks avery.kim:"]),
+            ("locked out in Duo while the box cannot reach CII: FAIL too",
+             {"sources": {"duo": "ok", "cii": "unavailable"}, "errors": {"cii": "token_connect_error"},
+              "available": False, "verdict": "block", "reasons": ["duo_locked_out"], "duo_status": "locked_out"},
+             "FAIL", ["cannot verify avery.kim (cii token_connect_error)", "only while Duo's lockout lasts"]),
+            ("locked out, both sources answer, nothing in CII yet: WARN, the lockout reverts",
+             {"sources": {"duo": "ok", "cii": "ok"}, "errors": {}, "available": True, "verdict": "block",
+              "reasons": ["duo_locked_out"], "duo_status": "locked_out", "trust_level": "NEUTRAL",
+              "failing_checks": []},
+             "WARN", ["blocks avery.kim (duo_locked_out) only while Duo's lockout lasts", "then it would let it chat",
+                      "trust NEUTRAL", "T-0"]),
+            ("locked out and failing MFA Flood in a partial CII answer: OK, the CII block holds",
+             {"sources": {"duo": "ok", "cii": "unavailable"}, "errors": {"cii": "graphql_error"}, "available": False,
+              "verdict": "block", "reasons": ["duo_locked_out", "mfa_flood"], "duo_status": "locked_out",
+              "trust_level": "QUESTIONABLE", "failing_checks": ["MFA Flood"]},
+             "OK", ["blocks avery.kim: duo_locked_out, mfa_flood", "cii graphql_error did not answer in full"]),
         )
         for name, answer, status, needles, *absent in cases:
             box.victim_answer = answer

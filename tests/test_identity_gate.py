@@ -466,37 +466,41 @@ def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
     lookup.clear_cache()
 
 
-def test_victim_self_check_on_a_partial_answer() -> None:
-    print("lab5-setup status: the box's own victim check (VICTIM_CHECK_SCRIPT) blocks on what a partial answer said")
+def _box_victim_row(fake, body=None):
+    """lab5-setup status's victim row for avery.kim, from the box's own
+    VICTIM_CHECK_SCRIPT run here against the fakes (``body``: a CII answer to
+    send instead of the user's record)."""
     import contextlib
     import io
     from types import SimpleNamespace
 
-    sys.path.insert(0, str(ROOT / "deploy" / "lab5"))
+    if str(ROOT / "deploy" / "lab5") not in sys.path:
+        sys.path.insert(0, str(ROOT / "deploy" / "lab5"))
     import lab5_setup  # noqa: E402  (imports cleanly without paramiko / PyYAML / duo_client)
 
+    fake.cii_body = body
+    lookup.clear_cache()
+    cwd, argv = os.getcwd(), list(sys.argv)
+    out = io.StringIO()
+    sys.argv = ["-", str(ROOT), "avery.kim"]
+    try:
+        with contextlib.redirect_stdout(out):
+            exec(compile(lab5_setup.VICTIM_CHECK_SCRIPT, "<victim-check>", "exec"), {"__name__": "__main__"})
+    finally:
+        sys.argv = argv
+        os.chdir(cwd)
+    printed = out.getvalue()
+    rem = SimpleNamespace(run=lambda argv, stdin=None, timeout=60.0: SimpleNamespace(rc=0, out=printed, err=""))
+    return lab5_setup.victim_blocked(SimpleNamespace(ws=SimpleNamespace(victim="avery.kim")),
+                                     SimpleNamespace(checkout=str(ROOT)), rem)
+
+
+def test_victim_self_check_on_a_partial_answer() -> None:
+    print("lab5-setup status: the box's own victim check (VICTIM_CHECK_SCRIPT) blocks on what a partial answer said")
     _configure(True)
     fake = _fresh_fake()
     fake.set_user("avery.kim", trust="NEUTRAL")
     table = json.loads((ROOT / "tests" / "fixtures" / "cii_end_user_answers.json").read_text())
-    cwd, argv = os.getcwd(), list(sys.argv)
-
-    def box_says(body):
-        """The script's own output on the box, here against the fakes."""
-        fake.cii_body = body
-        lookup.clear_cache()
-        out = io.StringIO()
-        sys.argv = ["-", str(ROOT), "avery.kim"]
-        try:
-            with contextlib.redirect_stdout(out):
-                exec(compile(lab5_setup.VICTIM_CHECK_SCRIPT, "<victim-check>", "exec"), {"__name__": "__main__"})
-        finally:
-            sys.argv = argv
-            os.chdir(cwd)
-        return out.getvalue()
-
-    ctx = SimpleNamespace(ws=SimpleNamespace(victim="avery.kim"))
-    box = SimpleNamespace(checkout=str(ROOT))
     for name, verdict, needles in (
             ("details present, but failingChecks failed and came back null (an untrusted user)", "OK",
              ["blocks avery.kim: trust_untrusted", "cii graphql_error"]),
@@ -505,13 +509,46 @@ def test_victim_self_check_on_a_partial_answer() -> None:
             ("details present, a neutral user whose failingChecks failed (never a clean check)", "FAIL",
              ["cannot verify avery.kim (cii graphql_error)", "spikes S5/S6"])):
         body = next(c["body"] for c in table["cases"] if c["name"] == name)
-        printed = box_says(body)
-        rem = SimpleNamespace(run=lambda argv, stdin=None, timeout=60.0: SimpleNamespace(rc=0, out=printed, err=""))
-        status, detail = lab5_setup.victim_blocked(ctx, box, rem)
+        status, detail = _box_victim_row(fake, body)
         check(f"{name}: the box's victim row is {verdict}, and never sends the facilitator to the Keychain",
               status == verdict and all(n in detail for n in needles) and "pseudoco-lab5-cii-" not in detail,
               f"{status}: {detail}")
     fake.cii_body = None
+    lookup.clear_cache()
+
+
+def test_victim_self_check_on_a_lockout() -> None:
+    print("lab5-setup status: a Duo lockout alone never makes the box's victim row OK (Duo unlocks it on its own)")
+    _configure(True)
+    fake = _fresh_fake()
+    fake.set_user("avery.kim", status="locked out", trust="NEUTRAL")
+    settings.cii_client_secret = "a-secret-cii-refuses"
+    try:
+        status, detail = _box_victim_row(fake)
+        check("locked out while CII refuses the box's API client: FAIL, the block lasts only as long as the lockout",
+              status == "FAIL" and all(n in detail for n in (
+                  "cannot verify avery.kim (cii token_http_401)", "only while Duo's lockout lasts",
+                  "about 15 minutes", "IDENTITY_FAIL_OPEN", "pseudoco-lab5-cii-")), f"{status}: {detail}")
+        fake.set_user("avery.kim", status="active", trust="NEUTRAL")
+        status, detail = _box_victim_row(fake)
+        check("the same box once Duo unlocks the account: FAIL, and the gate lets the victim chat",
+              status == "FAIL" and "cannot verify avery.kim (cii token_http_401)" in detail
+              and "lockout" not in detail
+              and gate.decide(lookup.lookup("avery.kim"), fail_open=True)["verdict"] == "allow",
+              f"{status}: {detail}")
+    finally:
+        _configure(True)
+    fake.set_user("avery.kim", status="locked out", trust="NEUTRAL")
+    status, detail = _box_victim_row(fake)
+    check("locked out, both sources answer, nothing against it in CII yet: WARN, not OK (the lockout reverts)",
+          status == "WARN" and all(n in detail for n in (
+              "blocks avery.kim (duo_locked_out) only while Duo's lockout lasts", "; then it would let it chat",
+              "trust NEUTRAL", "T-0")), f"{status}: {detail}")
+    fake.set_user("avery.kim", status="locked out", trust="UNTRUSTED", failing=["MFA Flood"])
+    status, detail = _box_victim_row(fake)
+    check("locked out after the takeover, CII failing MFA Flood: OK, the CII block holds when Duo unlocks it",
+          status == "OK" and "blocks avery.kim: duo_locked_out, trust_untrusted, mfa_flood" in detail,
+          f"{status}: {detail}")
     lookup.clear_cache()
 
 
@@ -1105,6 +1142,7 @@ def main() -> int:
         test_lookup()
         test_cii_not_found_is_an_answer_only_by_its_shape()
         test_victim_self_check_on_a_partial_answer()
+        test_victim_self_check_on_a_lockout()
         test_decide()
         test_engines()
         test_store_generation()

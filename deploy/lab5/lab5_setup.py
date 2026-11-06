@@ -477,6 +477,13 @@ def _source_fix(source: str, error: Optional[str]) -> str:
     return _CII_ANSWER_FIX if source == "cii" and error in _CII_ANSWER_ERRORS else _SOURCE_FIX[source]
 
 
+# Block reasons that do not hold: Duo unlocks a locked-out account on its own
+# in about 15 minutes (lockout auto-revert, plan 4.4), and the gate then
+# decides without the lockout.
+_TEMPORARY_REASONS = frozenset({"duo_locked_out"})
+_WHILE_LOCKED = "only while Duo's lockout lasts (Duo unlocks the account on its own in about 15 minutes)"
+
+
 def victim_check_command(box: BoxSpec, victim: str) -> Tuple[List[str], bytes]:
     """The box's own interpreter, isolated, with the script on stdin."""
     return [f"{box.checkout}/venv/bin/python", "-I", "-", box.checkout, victim], VICTIM_CHECK_SCRIPT
@@ -489,11 +496,14 @@ def victim_blocked(ctx: "Ctx", box: BoxSpec, rem: Any) -> Tuple[str, str]:
     caught here instead of on lab day: with IDENTITY_FAIL_OPEN (the default)
     a lookup that cannot answer lets the victim chat, and nothing else says
     so. FAIL when Duo has no such user, or when the box cannot ask Duo or CII
-    about the victim and its gate would let it chat; WARN while CII does not
-    show it failing yet (before the takeover); OK when the gate blocks it
-    (contained included), even on a lookup that did not answer in full: a
-    block resting on what was learned holds (the row names what did not
-    answer)."""
+    about the victim and its gate would let it chat, now or once a lockout
+    reverts; WARN while CII does not show it failing yet (before the
+    takeover), a lockout or not; OK when the gate blocks it on something that
+    holds (contained included), even on a lookup that did not answer in full:
+    such a block rests on what was learned (the row names what did not
+    answer). A Duo lockout alone never makes the row OK: Duo unlocks the
+    account on its own in about 15 minutes, and the gate then decides
+    without it."""
     victim = ctx.ws.victim
     argv, script = victim_check_command(box, victim)
     try:
@@ -521,17 +531,22 @@ def victim_blocked(ctx: "Ctx", box: BoxSpec, rem: Any) -> Tuple[str, str]:
     said = ", ".join(f"{k} {errors.get(k) or sources.get(k) or 'no answer'}" for k in down)
     fixes = "; ".join(_source_fix(k, errors.get(k)) for k in down if not (k == "cii" and errors.get("cii") == "no_login"))
     reasons = list(answer.get("reasons") or [])
-    if answer.get("verdict") == "block":
+    blocked = answer.get("verdict") == "block"
+    if blocked and any(r not in _TEMPORARY_REASONS for r in reasons):
         contained = " (contained: its Duo account is disabled)" if "duo_disabled" in reasons else ""
         partial = (f"; {said} did not answer in full, so the block rests on what was learned "
                    f"(check {fixes or _SOURCE_FIX['duo']})" if down else "")
         return "OK", f"the box's Identity Risk Gate blocks {victim}: {', '.join(reasons)}{contained}{partial}"
     if down:
-        return "FAIL", (f"the box cannot verify {victim} ({said}): with IDENTITY_FAIL_OPEN on, its gate would let "
-                        f"the victim chat. Check {fixes or _SOURCE_FIX['duo']}")
+        now = f"its gate blocks the victim {_WHILE_LOCKED}; then, " if blocked else ""
+        return "FAIL", (f"the box cannot verify {victim} ({said}): {now}with IDENTITY_FAIL_OPEN on, "
+                        f"{'it' if blocked else 'its gate'} would let the victim chat. "
+                        f"Check {fixes or _SOURCE_FIX['duo']}")
     trust = answer.get("trust_level") or ("no record in CII yet" if sources.get("cii") == "not_found" else "unknown")
     checks = ", ".join(answer.get("failing_checks") or []) or "none"
-    return "WARN", (f"the box's Identity Risk Gate would let {victim} chat now (trust {trust}, failing checks: "
+    now = (f"blocks {victim} ({', '.join(reasons)}) {_WHILE_LOCKED}; then it would let it chat"
+           if blocked else f"would let {victim} chat now")
+    return "WARN", (f"the box's Identity Risk Gate {now} (trust {trust}, failing checks: "
                     f"{checks}). Expected before the takeover; by lab day (T-0) it must block: MFA Flood and "
                     "Impossible Travel")
 
