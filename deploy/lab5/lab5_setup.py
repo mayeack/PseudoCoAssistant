@@ -34,6 +34,7 @@ Rules it keeps (I4, I5 and the secrets rule):
 from __future__ import annotations
 
 import argparse
+import csv
 import getpass
 import http.client
 import json
@@ -1442,8 +1443,11 @@ def connect_cloudflare(ctx: Ctx, transport: Callable[..., Tuple[int, bytes]]) ->
     if not ctx.account_id:
         raise Lab5Error("could not tell the Cloudflare account from the zone; set cloudflare.account_id")
     saved = ctx.state.load_workshop()
+    # What the file says now (victim_clashes reads it for another workshop's
+    # refusal); a box's own record says what it serves.
     saved.update(workshop=ws.name, zone=ws.zone, zone_id=ctx.zone_id, account_id=ctx.account_id,
-                 victim=ws.victim)        # what the file names now; a box's own record says what it serves
+                 victim=ws.victim, participants_enabled=ws.participants_enabled,
+                 bypass_codes_enabled=ws.bypass_codes.enabled)
     ctx.state.save_workshop(saved)
     ctx.out.line(f"Cloudflare: zone {ws.zone} ({ctx.zone_id}), token {last4(token)}")
 
@@ -1487,13 +1491,55 @@ def _box_admits(rec: Optional[Dict[str, Any]], user: str, legacy_victim: Optiona
     return user in serves
 
 
-def _box_reachable(rec: Optional[Dict[str, Any]]) -> Optional[bool]:
-    """Whether attendees can still reach this box of another workshop at all,
-    whoever its gate admits: a tunnel or DNS record recorded and not deleted.
-    None when its record cannot tell (unreadable, or a field of the wrong type)."""
-    if rec is None or any(rec.get(key) is not None and not isinstance(rec.get(key), dict) for key in ("tunnel", "dns")):
-        return None
-    return any((rec.get(key) or {}).get("id") and not (rec.get(key) or {}).get("deleted") for key in ("tunnel", "dns"))
+def _box_running(rec: Optional[Dict[str, Any]]) -> bool:
+    """Whether this box of another workshop still runs its room, whoever its
+    gate admits: attendees can still reach it (a tunnel or DNS record
+    recorded and not deleted) and `down` has not started on it (no .env it
+    reverted, no revert it left pending). A box whose .env `down` reverted
+    but whose tunnel or DNS delete then failed does not: that room was ended,
+    and a re-run of `down` finishes it. False when the record cannot tell
+    (such a box holds the victim anyway, and only `down` is offered)."""
+    if rec is None or any(rec.get(key) is not None and not isinstance(rec.get(key), dict)
+                          for key in ("tunnel", "dns", "env")):
+        return False
+    if not any((rec.get(key) or {}).get("id") and not (rec.get(key) or {}).get("deleted") for key in ("tunnel", "dns")):
+        return False
+    return not (rec.get("env") or {}).get("reverted") and not rec.get("revert_pending")
+
+
+def _handouts_blocker(other: Path, saved: Optional[Dict[str, Any]], victim: str,
+                      cards: Sequence[str]) -> Optional[str]:
+    """Why `handouts --revoke` with that workshop's file would not delete its
+    cards' codes for ``victim`` (the cards of instances ``cards``), or None
+    when it would. It puts a fresh batch for the room personas that file
+    names on each card of its handout, and only then deletes the card's
+    earlier batches. So it clears those codes only when that file names
+    another victim and turns participant accounts and bypass codes on (what
+    workshop.json kept at that workshop's last check, up, status or down),
+    and when its handout has a card for each of those instances."""
+    saved = saved or {}
+    names = str(saved.get("victim") or "").strip().lower()
+    if not names:
+        return (f"nothing on this Mac says which victim its workshop file names, so its fresh cards may carry codes "
+                f"for {victim} again")
+    if names == victim.strip().lower():
+        return (f"its workshop file names {victim} (as of its last check, up, status or down), so its fresh cards "
+                f"would carry codes for {victim} again")
+    if saved.get("participants_enabled") is False or saved.get("bypass_codes_enabled") is False:
+        return ("its workshop file turns participant accounts or bypass codes off (as of its last check, up, status "
+                "or down), so `handouts` puts no codes on its cards")
+    handout = participants.Handout(other, other.name)
+    if not handout.csv_path.exists():
+        return "its handout is gone, and `handouts` puts codes only on a card its handout holds"
+    try:
+        rows = handout.load()
+    except (OSError, ValueError, KeyError, csv.Error):
+        return f"its handout ({handout.csv_path}) cannot be read"
+    missing = [nn for nn in cards if participants.username(other.name, nn) not in rows]
+    if missing:
+        return (f"its handout has no card for instance(s) {', '.join(missing)}, and `handouts` puts codes only on a "
+                "card its handout holds")
+    return None
 
 
 def victim_clashes(root: Path, ws: Workshop, now: float) -> List[str]:
@@ -1538,10 +1584,11 @@ def victim_clashes(root: Path, ws: Workshop, now: float) -> List[str]:
                 unknown_boxes.append(path.stem)
             elif verdict:
                 admits.append(path.stem)
-            if _box_reachable(rec):
+            if _box_running(rec):
                 running.append(path.stem)
         deletable: List[float] = []
         undeletable: List[float] = []
+        code_cards: List[str] = []          # the cards whose codes for the victim `down` or --revoke can delete
         unread_cards: List[str] = []
         unread_until: List[Optional[float]] = []
         for path in sorted((other / "participants").glob("*.json")):
@@ -1549,10 +1596,14 @@ def victim_clashes(root: Path, ws: Workshop, now: float) -> List[str]:
             try:
                 if rec is None or bypass.record_problem(rec):
                     raise ValueError(path.name)
+                holds = False
                 for batch in rec.get("bypass_batches") or []:
                     can, cannot = bypass.live_codes(batch, victim, now)
                     deletable += [can] if can is not None else []
                     undeletable += [cannot] if cannot is not None else []
+                    holds = holds or can is not None
+                if holds:
+                    code_cards.append(path.stem)
             except ValueError:
                 bound = bypass.unreadable_until(path)
                 if bound is None or bound > now:          # any code it can hold has expired otherwise
@@ -1581,30 +1632,38 @@ def victim_clashes(root: Path, ws: Workshop, now: float) -> List[str]:
                           if len(known) == len(unread_until) else ""))
         if not why:
             continue
+        no_handouts = (_handouts_blocker(other, saved, victim, sorted(set(code_cards) | set(unread_cards)))
+                       if running and (deletable or unread_cards) and not (admits or unknown_boxes) else None)
         out.append(f"room.victim {victim} is still in use by workshop {other.name}: {'; and '.join(why)}. Every "
                    f"room needs its own victim (plan 4.3): one room's containment would end the other's victim "
                    f"sessions and codes. Use another victim (room.fallback, say), or "
                    + _clash_advice(other, admits, unknown_boxes, deletable, undeletable, unread_cards, unread_until,
-                                   running))
+                                   running, no_handouts))
     return out
 
 
 def _clash_advice(other: Path, admits: Sequence[str], unknown_boxes: Sequence[str], deletable: Sequence[float],
                   undeletable: Sequence[float], unread_cards: Sequence[str],
-                  unread_until: Sequence[Optional[float]], running: Sequence[str] = ()) -> str:
+                  unread_until: Sequence[Optional[float]], running: Sequence[str] = (),
+                  no_handouts: Optional[str] = None) -> str:
     """The steps that clear every reason of a clash, together. A box that
     admits the victim is cleared only by `down`, and a record that cannot be
     read only once it is restored; codes whose ids were recorded by `down` or
     by their own expiry; codes whose ids this tool never learned only by
     their expiry. Waiting alone is offered only when it clears everything.
 
-    When only codes hold the victim and the other room is still running on
-    another victim (a swap to its fallback leaves the old victim's codes on
-    its cards), `down` would end that room: `handouts --revoke` deletes its
-    cards' earlier codes and touches no box, so that is the step offered.
-    Its cost follows the steps, in a sentence of its own: it deletes the
-    codes on the cards that room's teams hold now too, so their persona
-    sign-ins fail until the new cards are printed and handed out."""
+    When only codes hold the victim and the other room is still running
+    (``running``: a box attendees can reach that `down` has not started on;
+    a swap to its fallback leaves the old victim's codes on its cards),
+    `down` would end that room. `handouts --revoke` deletes its cards'
+    earlier codes and touches no box, so it is the step offered wherever it
+    would clear them (``no_handouts`` is None: ``_handouts_blocker``). Its
+    cost follows the steps, in a sentence of its own: it deletes the codes on
+    the cards that room's teams hold now too, so their persona sign-ins fail
+    until the new cards are printed and handed out. Where it would not clear
+    them, `down` is offered, and that sentence says why. A room `down` has
+    started on is offered `down` again: a re-run retries the delete that
+    failed, and ends nothing that still runs."""
     acts: List[str] = []
     note = ""
     restore = ([f"the box record(s) of instance(s) {', '.join(unknown_boxes)}"] if unknown_boxes else []) + \
@@ -1613,7 +1672,7 @@ def _clash_advice(other: Path, admits: Sequence[str], unknown_boxes: Sequence[st
         acts.append(f"restore {' and '.join(restore)} under {other}")
     if admits or unknown_boxes:
         acts.append(f"run `lab5-setup down` with {other.name}'s workshop file")
-    elif (deletable or unread_cards) and running:
+    elif (deletable or unread_cards) and running and no_handouts is None:
         acts.append(f"run `lab5-setup handouts --revoke` with {other.name}'s workshop file")
         note = (f". Workshop {other.name} is still running (instance(s) {', '.join(running)}), and `down` would end "
                 f"it: `handouts --revoke` touches no box, but it deletes every earlier code on the cards its workshop "
@@ -1621,6 +1680,9 @@ def _clash_advice(other: Path, admits: Sequence[str], unknown_boxes: Sequence[st
                 f"persona sign-ins fail until the new cards are printed and handed out")
     elif deletable or unread_cards:
         acts.append(f"run `lab5-setup down` with {other.name}'s workshop file")
+        if running:
+            note = (f". Workshop {other.name} is still running (instance(s) {', '.join(running)}), so `down` ends "
+                    f"it, but `handouts --revoke` (which touches no box) would not clear these codes: {no_handouts}")
     last_wait = max(undeletable) if undeletable else None
     every = list(deletable) + list(undeletable) + list(unread_until)
     wait_alone = (max(every) if every and not admits and not unknown_boxes and None not in every else None)

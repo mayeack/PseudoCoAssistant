@@ -2049,6 +2049,110 @@ def test_victim_clash_codes_and_handouts() -> None:
               "is still in use by workshop" not in out, out)
 
 
+def test_victim_clash_advice_clears_it() -> None:
+    print("== the clash refusal's step clears it: down again after a down that failed partway, and down where "
+          "handouts --revoke would not clear the codes ==")
+    import json
+    swap = YAML.replace("  victim: avery.kim\n", "  victim: jordan.reyes\n").replace(
+        "  fallback: jordan.reyes\n", "  fallback: casey.wong\n")
+
+    def rooms(tmp: str) -> Tuple[Harness, Callable[[str], Tuple[int, str]]]:
+        h = Harness(Path(tmp))
+        other = Path(tmp) / "globex"
+        other.mkdir()
+        (other / "workshop.yaml").write_text(YAML.replace("workshop: acme", "workshop: globex")
+                                             .replace("198.51.100.", "203.0.113."))
+
+        def globex(command: str) -> Tuple[int, str]:
+            out_io = io.StringIO()
+            h.world.prompts.clear()
+            return ls.main([command, str(other / "workshop.yaml")], deps=h.deps(out_io)), out_io.getvalue()
+        return h, globex
+
+    with tempfile.TemporaryDirectory() as tmp:
+        h, globex = rooms(tmp)
+        rc, out = h.run("up")
+        real_route = h.world.cf.route
+        h.world.cf.route = lambda method, path, q, data: (
+            (503, "service unavailable") if method == "DELETE" and "/dns_records/" in path
+            else real_route(method, path, q, data))
+        h.duo.fail[("DELETE", "/admin/v1/bypass_codes/")] = DuoFailure(503, 50301, "Service unavailable")
+        rc, out = h.run("down")             # one network drop after the boxes were reverted
+        h.world.cf.route = real_route
+        h.duo.fail.clear()
+        recs = [json.loads((h.root / "workshops" / "acme" / "boxes" / f"{nn}.json").read_text()) for nn in ("01", "02")]
+        check("acme's down reverted both boxes, then deleted no DNS record, tunnel or bypass code (exit 1)",
+              rc == 1 and all(r["env"].get("reverted") and r["env"].get("serves") == []
+                              and not r["dns"].get("deleted") and not r["tunnel"].get("deleted") for r in recs), out)
+        rc, out = globex("check")
+        check("...globex is refused avery.kim (acme's cards' codes are still in Duo) and told to run down again, "
+              "which retries every delete, never handouts --revoke, which would put fresh avery.kim codes on the "
+              "cards of a room that has ended",
+              rc == 2 and "Duo still holds bypass codes for avery.kim from its cards" in out
+              and "run `lab5-setup down` with acme's workshop file first" in out
+              and "handouts --revoke" not in out and "still running" not in out, out)
+        rc, out = h.run("down")
+        check("...acme follows that advice: the re-run of down finishes", rc == 0, out)
+        rc, out = globex("check")
+        check("...and globex may take avery.kim", "is still in use by workshop" not in out, out)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        h, globex = rooms(tmp)
+        h.run("up")
+        (h.tmp / "workshop.yaml").write_text(swap)
+        rc, out = h.run("up")
+        for name in ("handout.csv", "handout.html"):
+            (h.root / "workshops" / "acme" / name).unlink()     # deleted once printed
+        rc, out = globex("check")
+        check("a room still running on its fallback whose handout was deleted: down (which ends it), and the "
+              "refusal says why handouts --revoke would not clear the old victim's codes",
+              rc == 2 and "run `lab5-setup down` with acme's workshop file first" in out
+              and "Workshop acme is still running (instance(s) 01, 02), so `down` ends it" in out
+              and "its handout is gone" in out and "run `lab5-setup handouts --revoke`" not in out, out)
+        start = len(h.duo.calls)
+        rc, out = h.run("handouts", "--revoke")
+        check("...as it says: handouts --revoke fails every card and deletes nothing",
+              rc == 1 and "no handout card for l5-acme-01" in out
+              and not [c for c in h.duo.calls[start:] if c[1] == "DELETE"], out)
+        rc, out = h.run("down")
+        rc, out = globex("check")
+        check("...and down clears it", "is still in use by workshop" not in out, out)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        h, globex = rooms(tmp)
+        h.run("up")
+        (h.tmp / "workshop.yaml").write_text(swap)
+        h.run("up")
+        (h.tmp / "workshop.yaml").write_text(YAML)                 # back to avery.kim, which check only previews
+        rc, out = h.run("check")
+        rc, out = globex("check")
+        check("a swap back to avery.kim that acme's check previewed (its boxes still admit jordan.reyes): down, and "
+              "the refusal says why not handouts --revoke: acme's next cards would carry avery.kim again",
+              rc == 2 and "run `lab5-setup down` with acme's workshop file first" in out
+              and "its workshop file names avery.kim" in out and "run `lab5-setup handouts --revoke`" not in out
+              and "still admit" not in out, out)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        h, globex = rooms(tmp)
+        h.run("up")
+        (h.tmp / "workshop.yaml").write_text(swap)
+        h.run("up")
+        (h.tmp / "workshop.yaml").write_text(swap + "bypass_codes:\n  enabled: false\n")
+        rc, out = h.run("check")
+        saved = json.loads((h.root / "workshops" / "acme" / "workshop.json").read_text())
+        check("acme's check records what its file says: its victim, participant accounts on, bypass codes off",
+              saved.get("victim") == "jordan.reyes" and saved.get("participants_enabled") is True
+              and saved.get("bypass_codes_enabled") is False, str(saved))
+        rc, out = globex("check")
+        check("...so globex is told down, and why not handouts --revoke (it puts no codes on acme's cards)",
+              rc == 2 and "run `lab5-setup down` with acme's workshop file first" in out
+              and "turns participant accounts or bypass codes off" in out
+              and "run `lab5-setup handouts --revoke`" not in out, out)
+        rc, out = h.run("handouts", "--revoke")
+        check("...as it says: handouts with that file refuses before any card",
+              rc == 2 and "bypass_codes.enabled is false" in out, out)
+
+
 def test_bypass_valid_until_after_creates() -> None:
     print("== a card's time is taken after its last create: never earlier than a code's own expiry ==")
     with tempfile.TemporaryDirectory() as tmp:
@@ -2221,7 +2325,8 @@ def main() -> int:
                  test_handouts_revoke_waits_for_the_new_batch, test_duo_transport_errors, test_contained_victim,
                  test_bypass_locked_out_is_temporary, test_bypass_lost_create_answer, test_signin_policy_docs,
                  test_bypass_down_then_up, test_bypass_unreadable_record, test_bypass_odd_record,
-                 test_victim_clash_codes_and_handouts, test_bypass_valid_until_after_creates,
+                 test_victim_clash_codes_and_handouts, test_victim_clash_advice_clears_it,
+                 test_bypass_valid_until_after_creates,
                  test_half_made_participant, test_expire_crash_notifies, test_docs_define_their_terms):
         try:
             test()

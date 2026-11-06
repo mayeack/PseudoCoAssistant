@@ -1229,16 +1229,22 @@ def test_victim_clash_after_down() -> None:
         .replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
     ws = SimpleNamespace(name="globex", victim="avery.kim")
 
-    def world(boxes, batches, saved_victim="avery.kim"):
+    def world(boxes, batches, saved_victim="avery.kim", saved=None, handout=("01",)):
+        """acme's state: its box records, card 01's participant record, its
+        workshop.json (``saved``, else just ``saved_victim``) and a handout
+        with a card for each instance in ``handout`` (None: no handout)."""
         tmp = Path(tempfile.mkdtemp())
         other = tmp / "workshops" / "acme"
         (other / "boxes").mkdir(parents=True)
         (other / "participants").mkdir()
-        (other / "workshop.json").write_text(json.dumps({"victim": saved_victim}))
+        (other / "workshop.json").write_text(json.dumps({"victim": saved_victim} if saved is None else saved))
         for nn, rec in boxes.items():
             (other / "boxes" / f"{nn}.json").write_text(rec if isinstance(rec, str) else json.dumps(rec))
         (other / "participants" / "01.json").write_text(batches if isinstance(batches, str)
                                                          else json.dumps({"bypass_batches": batches}))
+        if handout is not None:
+            (other / "handout.csv").write_text("username,instance\n"
+                                               + "".join(f"l5-acme-{nn},{nn}\n" for nn in handout))
         return tmp
 
     gone = {"tunnel": {"id": "t1", "deleted": True}, "dns": {"id": "d1", "deleted": True}}
@@ -1304,6 +1310,62 @@ def test_victim_clash_after_down() -> None:
     root = world({"01": gone}, [failed], saved_victim="jordan.reyes")
     check("...once that room has run down, a re-run of down retries the delete",
           "run `lab5-setup down` with acme's workshop file first" in ls.victim_clashes(root, ws, now)[0])
+
+    # A room `down` has started on is not running, even where a delete failed:
+    # down again (a re-run retries it), never handouts --revoke, which would
+    # put fresh codes on the cards of a room that has ended.
+    started = dict(swapped, env=dict(swapped["env"], reverted=True, serves=[]))
+    for name, boxes, saved_victim in (
+            ("down reverted the box, then its Cloudflare and Duo deletes failed (one network drop); its file still "
+             "names avery.kim", {"01": started, "02": gone}, "avery.kim"),
+            ("...the same on a room that had swapped to its fallback", {"01": started, "02": gone}, "jordan.reyes"),
+            ("down deleted the DNS record, then its tunnel delete failed", {"01": dict(started, dns=gone["dns"])},
+             "jordan.reyes"),
+            ("down could not reach the box (its revert pending) and its deletes failed",
+             {"01": dict(swapped, revert_pending={"since": iso(now - 60)})}, "jordan.reyes")):
+        out = ls.victim_clashes(world(boxes, [failed], saved_victim=saved_victim), ws, now)
+        check(f"{name}: not running, so down again (it retries every delete), never handouts --revoke",
+              len(out) == 1 and f"run `lab5-setup down` with acme's workshop file first, or wait until "
+                                f"{lp_minute(now + 7200)}" in out[0]
+              and "handouts --revoke" not in out[0] and "still running" not in out[0], str(out))
+
+    # A room still running is offered handouts --revoke only where it clears
+    # the codes; elsewhere down, and the refusal says why.
+    unreadable = world({"01": swapped}, [failed], saved_victim="jordan.reyes", handout=None)
+    (unreadable / "workshops" / "acme" / "handout.csv").write_text("instance\n01\n")
+    for name, root, why in (
+            ("its workshop file names avery.kim again (a swap back that check previewed)",
+             world({"01": swapped}, [failed], saved_victim="avery.kim"),
+             "its workshop file names avery.kim (as of its last check, up, status or down), so its fresh cards "
+             "would carry codes for avery.kim again"),
+            ("its workshop.json names no victim", world({"01": swapped}, [failed], saved={}),
+             "nothing on this Mac says which victim its workshop file names"),
+            ("its file turns bypass codes off",
+             world({"01": swapped}, [failed], saved={"victim": "jordan.reyes", "bypass_codes_enabled": False}),
+             "turns participant accounts or bypass codes off"),
+            ("its file turns participant accounts off",
+             world({"01": swapped}, [failed], saved={"victim": "jordan.reyes", "participants_enabled": False}),
+             "turns participant accounts or bypass codes off"),
+            ("its handout is gone (deleted after printing)",
+             world({"01": swapped}, [failed], saved_victim="jordan.reyes", handout=None), "its handout is gone"),
+            ("its handout has no card for the instance whose card holds the codes",
+             world({"01": swapped}, [failed], saved_victim="jordan.reyes", handout=("02",)),
+             "its handout has no card for instance(s) 01"),
+            ("its handout cannot be read", unreadable, "cannot be read")):
+        out = ls.victim_clashes(root, ws, now)
+        check(f"a room still running, but {name}: down (which ends it), and the refusal says why handouts --revoke "
+              "would not clear the codes",
+              len(out) == 1 and f"run `lab5-setup down` with acme's workshop file first, or wait until "
+                                f"{lp_minute(now + 7200)}. Workshop acme is still running (instance(s) 01), so "
+                                "`down` ends it, but `handouts --revoke` (which touches no box) would not clear these "
+                                "codes: " in out[0]
+              and why in out[0] and "run `lab5-setup handouts --revoke`" not in out[0], str(out))
+    out = ls.victim_clashes(world({"01": swapped}, [failed], saved={"victim": "jordan.reyes",
+                                                                       "participants_enabled": True,
+                                                                       "bypass_codes_enabled": True}), ws, now)
+    check("...and where it clears them (another victim, accounts and codes on, a card for the instance): "
+          "handouts --revoke", len(out) == 1 and "run `lab5-setup handouts --revoke` with acme's workshop file first"
+          in out[0], str(out))
 
     other_persona = batch(codes=[{"persona": "nina.osei", "user_id": "U2", "ids": ["DU2"]}])
     root = world({"01": gone}, [other_persona])
