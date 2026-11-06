@@ -37,13 +37,15 @@ ul,ol{padding-left:1.4rem}
 <h1>lab5-setup: Show boxes in, Lab 5 out</h1>
 <p><code>lab5-setup</code> turns the Splunk Show boxes of one workshop into Lab 5 (&quot;Verify: Cisco Identity Intelligence&quot;) instances, and puts them back afterwards. It runs on the facilitator's Mac. The design is section 12.3 of <code>docs/identity-intelligence-lab-plan.md</code>; section 12.1 lists the keys it writes.</p>
 <p>There is no broker and no AWS. Secrets come from the Mac's Keychain. What <code>up</code> created is recorded under <code>~/.pseudoco-lab5/</code>. Everything else lives on the boxes, in Duo and in Cloudflare.</p>
+<p>The same Mac runs the persona scripts (<code>scripts/identity/</code>, below) and two daily launchd jobs (<code>deploy/launchd/install-lab5.sh</code>). The lab-day runbook is <code>docs/identity-lab-facilitator.md</code>.</p>
 <h2>Commands</h2>
 <pre><code>deploy/lab5/lab5-setup check  workshop.yaml   # read-only: what up would change
 deploy/lab5/lab5-setup up     workshop.yaml   # make every box a Lab 5 instance
 deploy/lab5/lab5-setup status workshop.yaml   # per-box preflight + Cloudflare state
 deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the keys
+deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at day 7, delete at day 14
 </code></pre>
-<p><code>--only 1,3</code> limits a run to some instance numbers. <code>--restart</code> makes <code>up</code> or <code>down</code> restart the app even when <code>.env</code> did not change.</p>
+<p><code>--only 1,3</code> limits a run to some instance numbers. <code>--restart</code> makes <code>up</code> or <code>down</code> restart the app even when <code>.env</code> did not change. <code>--reissue-passcodes</code> makes <code>up</code> replace each participant's HOTP token and print new passcodes. <code>--dry-run</code> makes <code>expire</code> list what it would do.</p>
 <table>
 <thead>
 <tr>
@@ -54,15 +56,15 @@ deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the
 <tbody>
 <tr>
 <td><code>check</code></td>
-<td>Connects to each box and reads its version, <code>.env</code> and HEC destinations. Prints the exact <code>.env</code> diff, the HEC host change, the tunnel and DNS plan, and a verdict per box. A box that <code>up</code> would accept says <strong>ready, nothing to upgrade</strong>. It changes nothing on the boxes or in Cloudflare.</td>
+<td>Connects to each box and reads its version, <code>.env</code> and HEC destinations. Prints the exact <code>.env</code> diff, the HEC host change, the tunnel and DNS plan, and a verdict per box. A box that <code>up</code> would accept says <strong>ready, nothing to upgrade</strong>. It also says what <code>up</code> would do for each participant account. It changes nothing on the boxes, in Cloudflare or in Duo.</td>
 </tr>
 <tr>
 <td><code>up</code></td>
-<td>Runs each box in parallel, in this order: version check, backup, Lab 5 <code>.env</code> keys, tunnel and DNS, HEC host, restart, preflight. Any refusal happens before the first change.</td>
+<td>Runs each box in parallel, in this order: version check, backup, Lab 5 <code>.env</code> keys, tunnel and DNS, HEC host, restart, preflight. Any refusal happens before the first change. Then it creates a participant account for each box that came up and writes the handout.</td>
 </tr>
 <tr>
 <td><code>status</code></td>
-<td>Checks each box's tunnel health, DNS record, connector unit and <code>.env</code> drift, then runs the preflight. It also lists <code>l5-&lt;workshop&gt;-*</code> tunnels and DNS records that no box record owns.</td>
+<td>Checks each box's tunnel health, DNS record, connector unit and <code>.env</code> drift, then runs the preflight. It also lists <code>l5-&lt;workshop&gt;-*</code> tunnels and DNS records that no box record owns, and each participant account's state and age.</td>
 </tr>
 <tr>
 <td><code>down</code></td>
@@ -70,15 +72,15 @@ deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the
 </tr>
 <tr>
 <td><code>expire</code></td>
-<td>Not built yet. It comes with the participant accounts (12.2).</td>
+<td>Day 7: disables each participant account. Day 14: deletes it and its HOTP token, which frees the Duo seat. Without a workshop file it covers every workshop, which is how the daily launchd job runs it. It is idempotent and never touches a persona.</td>
 </tr>
 </tbody>
 </table>
-<p>Exit codes: <code>0</code> means every box is fine. <code>1</code> means at least one box failed or was refused; its report says why. <code>2</code> means a usage, configuration or Keychain error.</p>
+<p>Exit codes: <code>0</code> means every box and participant account is fine. <code>1</code> means at least one box or account failed or was refused; its report says why. <code>2</code> means a usage, configuration or Keychain error, or a Duo prerequisite such as the CII Read-Only group is missing.</p>
 <h2>One-time setup on the Mac</h2>
 <ol>
 <li>
-<p>Install the tool's two dependencies (paramiko and PyYAML) into their own venv. The wrapper finds that venv by itself. Keep them out of the app's venv: paramiko pulls in <code>cryptography</code>, and <code>tests/test_attachments.py</code> relies on the app's venv lacking it.</p>
+<p>Install the tool's dependencies (paramiko, PyYAML and duo_client) into their own venv. The wrapper, the persona scripts' launchd job and <code>install-lab5.sh</code> all use that venv. Keep them out of the app's venv: paramiko pulls in <code>cryptography</code>, and <code>tests/test_attachments.py</code> relies on the app's venv lacking it.</p>
 <pre><code>python3 -m venv ~/.pseudoco-lab5/venv
 ~/.pseudoco-lab5/venv/bin/pip install -r deploy/lab5/requirements.txt
 </code></pre>
@@ -153,15 +155,47 @@ deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the
 <td>(none)</td>
 <td>the room stack's HEC token. Optional: only its last 4 characters are compared with the box's destination.</td>
 </tr>
+<tr>
+<td><code>pseudoco-lab5-duo-provisioner-ikey</code></td>
+<td>(none, Mac only)</td>
+<td>Admin API app <strong>PseudoCo Provisioner</strong> (Grant resource read + write): participant accounts and the persona cast. It never leaves the Mac.</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-provisioner-skey</code></td>
+<td>(none, Mac only)</td>
+<td>same app</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-api-host</code></td>
+<td>(none, Mac only)</td>
+<td>the tenant's API hostname, the same on every Duo application page. If it is missing, <code>pseudoco-lab5-duo-websdk-api-host</code> is used.</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-vpn-ikey</code></td>
+<td>(none, Mac only)</td>
+<td>Auth API app <strong>PseudoCo VPN</strong>: the persona sign-ins (<code>persona_activity.py</code>)</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-vpn-skey</code></td>
+<td>(none, Mac only)</td>
+<td>same app</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-hotp-&lt;persona&gt;</code></td>
+<td>(none, Mac only)</td>
+<td>written by <code>provision_personas.py</code>, one per persona. You never add these by hand.</td>
+</tr>
 </tbody>
 </table>
-<p>The names are defaults. A workshop file can rename any of them under <code>keychain:</code>.</p>
+<p>The names of the first table's items are defaults. A workshop file can rename any of them under <code>keychain:</code>. The Mac-only items have fixed names.</p>
 <h2>The workshop file</h2>
 <p>Copy <code>deploy/lab5/workshop.example.yaml</code>, one per delivery. It holds no secrets: only names, addresses and Keychain item names.</p>
 <ul>
 <li><code>workshop</code> names the delivery. Box <em>nn</em> becomes tunnel <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code> and host <code>l5-&lt;workshop&gt;-&lt;nn&gt;.pseudocoassistant.com</code>. Use a new name each time, because the tool refuses to take over a tunnel or record it did not create.</li>
 <li><code>stack.hec_url</code> is the room's Splunk stack. <code>up</code> looks for the box's existing destination with that URL.</li>
-<li><code>room.victim</code> goes on every box's <code>IDENTITY_ALLOWED_USERS</code>, together with the trusted personas. To swap to <code>room.fallback</code>, change <code>victim</code> and re-run <code>up</code>.</li>
+<li><code>room.victim</code> goes on every box's <code>IDENTITY_ALLOWED_USERS</code>, together with the trusted personas and that box's participant account. To swap to <code>room.fallback</code>, change <code>victim</code> and re-run <code>up</code>.</li>
+<li><code>participants:</code> is optional. <code>enabled</code> (default <code>true</code>) creates one participant account per box. <code>cii_url</code> is the Identity Intelligence sign-in link printed on the handout. <code>email_domain</code> defaults to <code>zone</code>. Turn the accounts off for a dry run that should use no Duo seats.</li>
+<li><code>personas_file</code> is the persona cast that <code>up</code> and <code>expire</code> never touch. It defaults to <code>scripts/identity/personas.yaml</code>.</li>
 <li><code>boxes</code> has one row per Show box: <code>instance</code> and <code>host</code>. Port <code>2222</code>, user <code>splunk</code>, checkout <code>/home/splunk/DemoBot</code>, unit <code>demobot-app</code> and app port <code>8001</code> come from <code>defaults:</code>.</li>
 <li><code>identity:</code> is optional and overrides the 12.1 defaults. The app reads these values as numbers and a boolean when it starts, so a value like <code>12h</code> would stop it from starting. The tool therefore checks them before it connects to anything, and refuses the file otherwise:
 <ul>
@@ -206,7 +240,7 @@ deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the
 </li>
 </ol>
 <p>The app's API is reached through an SSH-forwarded connection to the box's <code>127.0.0.1:8001</code>, so the access key never crosses the Show box's plain-http port.</p>
-<p>Participant accounts and the handout sheet are the next stage (12.2). <code>up</code> already has the hook for them, and <code>IDENTITY_ALLOWED_USERS</code> will gain each box's participant account then.</p>
+<p>After the boxes, <code>up</code> creates a <strong>participant account</strong> for each box that came up (see &quot;Participant accounts&quot; below). Step 3 already put that account's username on the box's <code>IDENTITY_ALLOWED_USERS</code>, because the name is fixed.</p>
 <h2>What <code>down</code> puts back</h2>
 <ul>
 <li>The connector unit and its token file are stopped and removed. The tool only removes a unit that carries its own marker comment.</li>
@@ -228,7 +262,106 @@ deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the
 </ul>
 </li>
 </ul>
-<p>Participant accounts stay until <code>expire</code> disables them (next stage). Rotate the Duo and CII credentials after the workshop (I1).</p>
+<p>Participant accounts stay until <code>expire</code> disables them at day 7 and deletes them at day 14. Rotate the Duo and CII credentials after the workshop (I1).</p>
+<h2>Participant accounts (plan 12.2)</h2>
+<p><code>up</code> creates one Duo account per box that came up, with the Admin API app PseudoCo Provisioner:</p>
+<ul>
+<li><strong>Username</strong> <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code>, <strong>email</strong> <code>l5-&lt;workshop&gt;-&lt;nn&gt;@pseudocoassistant.com</code> (the zone, or <code>participants.email_domain</code>). Identity Intelligence matches users by email.</li>
+<li><strong>Notes</strong>: <code>lab5-setup participant; workshop=&lt;workshop&gt;; instance=&lt;nn&gt;; created=&lt;UTC time&gt;</code>.</li>
+<li><strong>Groups</strong>: <strong>CII Read-Only</strong>, which gives Duo SSO into Identity Intelligence as read-only, and <strong><code>l5-&lt;workshop&gt;</code></strong>, created on the first <code>up</code>. <code>up</code> refuses to start if Duo has no CII Read-Only group.</li>
+<li><strong>Its own HOTP token</strong> (type h6, serial = the username), created through the API and attached. <code>up</code> computes the token's first 10 passcodes for the handout and then discards the secret, so the passcodes cannot be printed again. <code>--reissue-passcodes</code> replaces the token, and the old passcodes stop working.</li>
+<li>The account stays <strong>active</strong> and MFA-required. It never gets bypass status or bypass codes.</li>
+</ul>
+<p>An account with the participant's name that <code>up</code> did not create (its notes lack the marker, or name another workshop) is left alone, and that box's participant fails the run. A re-run keeps existing accounts and their handout cards, and finishes an account that an earlier run left half made.</p>
+<p><strong>The handout</strong> is <code>~/.pseudoco-lab5/workshops/&lt;workshop&gt;/handout.html</code>, a printable card per instance, plus <code>handout.csv</code> with the same rows. Both are 0600. A card holds the instance URL, the box's access key, the username, the email, a blank for the temporary password, the 10 passcodes in order and the sign-in steps. It also tells the participant that other read-only users can see their sign-ins and IP address. A card leaves the handout once its account is disabled. Delete the files after the workshop. They are the only place the tool writes a participant's sign-in details.</p>
+<p><strong>The password is a console step.</strong> The Admin API cannot set a Duo Directory password. <code>up</code> prints each account's Admin Panel link. Open each one and click <strong>Create temporary password</strong> (valid 30 days), then write it on that participant's card. The token is attached first, because that flow expects an enrolled device. The participant signs in with the temporary password and a passcode, then sets their own password. <code>status</code> shows who has done so (<code>has_password</code>).</p>
+<p><strong><code>status</code></strong> prints one row per account: its Duo status, whether its token is attached and whether it has a password, plus its age and the dates it is disabled and deleted. A missing or locked-out account fails the run. For a locked-out account, unlock it in the Admin Panel and turn on lockout auto-revert.</p>
+<p><strong><code>expire</code></strong> lists every Duo user whose name starts with <code>l5-</code> and acts only when all three markers match: the <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code> username, the notes marker naming that same workshop and instance, and membership of <code>l5-&lt;workshop&gt;</code>. It never acts on a user in the persona group, on a user whose notes carry the persona marker, or on a username in <code>scripts/identity/personas.yaml</code>. Age is counted from Duo's own <code>created</code> time, or from the notes if that is missing.</p>
+<ul>
+<li>At day 7 it sets <code>status=disabled</code>. That denies sign-in and invalidates remembered devices, though an open CII tab may last until CII's idle timeout.</li>
+<li>At day 14 it deletes the account's HOTP token, then the account. Deleting through the API is immediate and permanent and skips Duo's Trash. That is why it needs all three markers, and why <code>--dry-run</code> exists. If the token cannot be deleted, the account is kept for the next run.</li>
+<li>Everything else, such as a user without the markers, is listed as left alone.</li>
+<li>It writes a run log to <code>~/.pseudoco-lab5/runs/</code>. A failed run raises a macOS notification and exits 1.</li>
+</ul>
+<p><strong>Seats.</strong> Disabled users still hold a Duo seat. Only deletion frees one. You need seats for your own account, the persona cast and every participant account from the last 14 days. Each seat also covers up to 5 CII identities.</p>
+<p><strong>What this relies on.</strong> These facts come from the research in plan section 12.4 (Duo Admin API docs of 2026-11-04 and CII docs, checked 2026-11-05). This stage also checked the Admin and Auth API pages read-only.</p>
+<ul>
+<li><code>POST /admin/v1/users</code> takes <code>username</code>, <code>email</code>, <code>realname</code>, <code>notes</code> and <code>status</code>.</li>
+<li>The user object carries <code>created</code>, <code>groups</code>, <code>tokens</code> and <code>has_password</code>. <code>has_password</code> is true when the user has a Duo Directory password.</li>
+<li><code>POST /admin/v1/users/{id}/groups</code> takes <code>group_id</code>. <code>POST /admin/v1/groups</code> returns error 40003 when the name is already taken.</li>
+<li><code>POST /admin/v1/tokens</code> takes <code>type=h6</code>, <code>serial</code> (up to 128 characters), <code>secret</code> and <code>counter</code>. The page does not say how the secret is encoded. The tools send hex, and spike S7 settles it (personas.yaml <code>hotp.secret_encoding</code>).</li>
+<li><code>DELETE /admin/v1/tokens/{id}</code> returns 200 whether or not the token existed. <code>DELETE /admin/v1/users/{id}</code> is immediate and permanent, and the page does not say that it removes the user's tokens. That is why <code>expire</code> deletes the token first.</li>
+<li>Spike S15 (group membership grants CII Read-Only; a password plus an HOTP passcode reaches CII; what disabling does to a live CII session) has not run yet.</li>
+</ul>
+<h2>Persona scripts (<code>scripts/identity/</code>)</h2>
+<p>The cast is <code>scripts/identity/personas.yaml</code>: 3 trusted personas, the victims (an active victim plus an untouched fallback per concurrent room), and the spike persona, which becomes the dry-run victim. A test pins every name as disjoint from the app's synthetic end users and from the synthetic-PII name pools and records of all 8 themes. Run both scripts with the tool's venv: <code>~/.pseudoco-lab5/venv/bin/python scripts/identity/&lt;script&gt; ...</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>provision_personas.py [--dry-run]</code></td>
+<td>Creates what is missing: the <strong>PseudoCo Workforce</strong> group, each user (API-created, email on <code>pseudocoassistant.com</code>, a persona notes marker), and one HOTP token each. The token's secret goes into the Keychain first, through <code>security -i</code> on stdin and never in argv. Its counter starts at 0 in <code>~/.pseudoco-lab5/personas/hotp/</code>.</td>
+</tr>
+<tr>
+<td><code>provision_personas.py --status</code></td>
+<td>Read-only: each persona's Duo status, its token, its Keychain secret (present or missing, never the value), its counter and its last baseline success.</td>
+</tr>
+<tr>
+<td><code>provision_personas.py --reset [--only U,...]</code></td>
+<td>Re-enables and unlocks (<code>status=active</code>), then resyncs each HOTP token to the Mac's counter with three codes. Afterwards, clear all step-ups in the Admin Panel and run CII Reset Feedback, which have no API.</td>
+</tr>
+<tr>
+<td><code>provision_personas.py --teardown --yes</code></td>
+<td>Deletes the cast's users and tokens, their Keychain secrets and their counters. Without <code>--yes</code> it only lists what it would delete. It keeps the group, because every lab app is limited to it.</td>
+</tr>
+<tr>
+<td><code>persona_activity.py baseline</code></td>
+<td>One successful passcode sign-in per persona from its home address and device, at random points in <code>baseline.jitter_minutes</code>, then the self-check. It does nothing while <code>baseline.enabled</code> is false. It refuses documentation addresses, so set real ones once spike S1 says how Duo geolocates them. A rejected passcode is never retried.</td>
+</tr>
+<tr>
+<td><code>persona_activity.py takeover --victim U</code></td>
+<td>A home sign-in, then 5 to 9 wrong passcodes from the next foreign address within MFA Flood's 2 minutes (under the lockout limit of 10), then a success from that address with the attacker's device. It refuses a trusted persona, a victim that preauth does not accept, and a victim taken over in the last 8 days unless you pass <code>--force</code>. Its record in <code>personas/takeovers/</code> is the takeover time. When to run it depends on the S1 decision.</td>
+</tr>
+<tr>
+<td><code>persona_activity.py replay --victim U</code></td>
+<td>A short push flood, 5 pushes by default and never more than 9, to the one victim with <code>replay_device: true</code> (Duo Mobile on a facilitator phone). The facilitator denies each push. An approved push fails the run.</td>
+</tr>
+<tr>
+<td><code>persona_activity.py selfcheck [--gate]</code></td>
+<td>For each persona: the last sign-in and its age, the Keychain secret and counter, Duo preauth, and CII trust and failing checks (<code>getEndUser</code> on the email). A trusted persona that fails a check or drops below Neutral is a failure. <code>--gate</code> is the T-18 gate, where Unknown trust also fails. Any failure raises a macOS notification and exits 1.</td>
+</tr>
+</tbody>
+</table>
+<p>Every sign-in sends <code>ipaddr</code> and <code>hostname</code> and never <code>client_supports_verified_push</code>. Each HOTP code is reserved under a file lock before it is sent, so two runs never use the same counter value. Nothing else may use these codes: HOTP accepts only codes ahead of Duo's counter.</p>
+<h2>Daily jobs (launchd)</h2>
+<p><code>deploy/launchd/install-lab5.sh</code> installs two user agents with this checkout's paths. It never touches the app's own agents.</p>
+<table>
+<thead>
+<tr>
+<th>Agent</th>
+<th>When</th>
+<th>Runs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>com.yeack.pseudoco-assistant-lab5-expire</code></td>
+<td>daily 08:15</td>
+<td><code>deploy/lab5/lab5-setup expire</code></td>
+</tr>
+<tr>
+<td><code>com.yeack.pseudoco-assistant-lab5-baseline</code></td>
+<td>daily 09:20</td>
+<td><code>scripts/identity/persona_activity.py baseline</code>, then the self-check</td>
+</tr>
+</tbody>
+</table>
+<p>Use <code>--only expire|baseline</code> to install one, <code>--uninstall</code> to remove them and <code>--print</code> to see the rendered plists. A run missed while the Mac sleeps happens when it wakes. Nothing runs while the Mac is shut down, so a week away before a delivery shows up as a self-check failure. Logs go to <code>logs/launchd-lab5-*.log</code> and to the run logs under <code>~/.pseudoco-lab5/</code>. Install from the main checkout, not a worktree.</p>
 <h2>Secrets</h2>
 <ul>
 <li>SSH passwords are asked once per box per run with <code>getpass</code>. Pressing Enter reuses the previous box's password. They are never stored.</li>
@@ -247,7 +380,15 @@ deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the
 </ul>
 <p>An <code>APP_VERSION</code> line left in the template's <code>.env</code> overrides what <code>/health</code> reports. Keep it equal to the tag, or remove it. <code>check</code> names it when it explains a version refusal.</p>
 <h2>Tests</h2>
-<p><code>tests/test_lab5_setup.py</code> runs every command against fakes only: in-memory Show boxes, an in-memory Cloudflare API behind the real client, and a fake <code>security</code>. It pins the following:</p>
+<p><code>tests/test_lab5_participants.py</code> and <code>tests/test_identity_personas.py</code> cover the participant accounts, <code>expire</code>, the persona scripts and the launchd templates. They run against an in-memory Duo, CII and Keychain (<code>tests/lab5_fakes.py</code>), and pin the following:</p>
+<ul>
+<li><code>up</code> creates the accounts with all three markers and a handout whose passcodes Duo accepts;</li>
+<li><code>expire</code> acts only on fully marked accounts, at day 7 and day 14, and never on a persona;</li>
+<li>each secret reaches Duo once, in a POST body, and the Keychain only on stdin;</li>
+<li>the cast is disjoint from the app's synthetic users and synthetic PII;</li>
+<li>the takeover stays within MFA Flood's window and under the lockout limit.</li>
+</ul>
+<p><code>tests/test_lab5_setup.py</code> runs every box command against fakes only: in-memory Show boxes, an in-memory Cloudflare API behind the real client, and a fake <code>security</code>. It pins the following:</p>
 <ul>
 <li><code>up</code> on a box with Labs 0–4 settings keeps every other <code>.env</code> line and every other destination field;</li>
 <li><code>check</code> changes nothing;</li>

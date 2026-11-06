@@ -1,6 +1,7 @@
-# lab5-setup (deploy/lab5/lab5_setup.py) runs on the facilitator's Mac, never on
-# a box, so these stay out of the app's requirements.txt. The tool imports them
-# lazily: the app's test suite loads lab5_setup.py without them.
+# lab5-setup (deploy/lab5/lab5_setup.py) and the persona scripts
+# (scripts/identity/) run on the facilitator's Mac, never on a box, so these stay
+# out of the app's requirements.txt. The tools import them lazily: the app's
+# test suite loads every module without them.
 #
 # Keep them out of the app's venv too: paramiko pulls in `cryptography`, and
 # tests/test_attachments.py relies on that venv lacking it (an AES-encrypted PDF
@@ -10,3 +11,4 @@
 #   ~/.pseudoco-lab5/venv/bin/pip install -r deploy/lab5/requirements.txt
 paramiko==5.1.0   # SSH with a password to the Show boxes (port 2222), SFTP, port forwarding
 PyYAML==6.0.3     # workshop.yaml
+duo_client==5.7.0 # Duo Admin API (participant accounts, persona cast) and Auth API (persona sign-ins)

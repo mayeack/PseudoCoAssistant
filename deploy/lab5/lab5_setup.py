@@ -7,6 +7,8 @@
     lab5-setup status workshop.yaml   per-box preflight and Cloudflare state
     lab5-setup down   workshop.yaml   delete the workshop's tunnels and DNS
                                       records, revert the Lab 5 keys
+    lab5-setup expire [workshop.yaml] participant accounts: disable at day 7,
+                                      delete at day 14 (daily from launchd)
 
 Design: docs/identity-intelligence-lab-plan.md section 12.3 (and 12.1 for the
 keys); operator guide: deploy/lab5/README.md. Runs on the facilitator's Mac.
@@ -41,8 +43,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import lab5_envfile as envfile  # noqa: E402
 from lab5_cloudflare import CloudflareAPI, urllib_transport  # noqa: E402
-from lab5_common import (Keychain, Lab5Error, Redactor, Reporter, StateStore, last4,  # noqa: E402
-                         parse_version, utc_now, utc_stamp, version_at_least)
+from lab5_common import (Keychain, Lab5Error, Redactor, Reporter, StateStore, desktop_notify,  # noqa: E402
+                         last4, parse_version, private_dir, utc_now, utc_stamp, version_at_least)
+import lab5_duo as duo  # noqa: E402
+import lab5_participants as participants  # noqa: E402
+from lab5_personas import DEFAULT_CAST, load_cast  # noqa: E402
 import lab5_remote as remote  # noqa: E402
 
 DEFAULT_ZONE = "pseudocoassistant.com"
@@ -148,6 +153,10 @@ class Workshop:
     zone_id: str = ""
     tunnel_protocol: str = ""
     concurrency: int = 4
+    participants_enabled: bool = True  # 12.2: one Duo account per instance
+    cii_url: str = ""                  # printed on the handout
+    email_domain: str = ""             # participant emails; the zone when empty
+    personas_file: str = ""            # the cast that expire and up never touch
 
     def tunnel_name(self, box: BoxSpec) -> str:
         return f"l5-{self.name}-{box.nn}"
@@ -208,6 +217,17 @@ def workshop_from_dict(doc: Dict[str, Any]) -> Workshop:
                                          "(it becomes PUBLIC_BASE_URL and HEC_HOST)")
 
     cloudflare = doc.get("cloudflare") or {}
+    part = doc.get("participants")
+    part = {} if part is None else part
+    _require(isinstance(part, dict), "`participants` must be a mapping")
+    unknown = sorted(str(k) for k in part if k not in ("enabled", "cii_url", "email_domain"))
+    _require(not unknown, f"`participants.{unknown[0] if unknown else ''}` is not a setting (enabled, cii_url, email_domain)")
+    enabled = part.get("enabled", True)
+    _require(isinstance(enabled, bool), "`participants.enabled` must be true or false")
+    cii_url = str(part.get("cii_url") or "")
+    _require(not cii_url or cii_url.lower().startswith("https://"), "`participants.cii_url` must be an https URL")
+    email_domain = str(part.get("email_domain") or zone)
+    _require(bool(_ZONE_RE.match(email_domain)), "`participants.email_domain` must be a domain")
     required = str(doc.get("required_version") or DEFAULT_REQUIRED_VERSION)
     _require(parse_version(required) is not None, "`required_version` must look like 4.22.0")
     protocol = str(cloudflare.get("tunnel_protocol") or "")
@@ -220,6 +240,8 @@ def workshop_from_dict(doc: Dict[str, Any]) -> Workshop:
         account_id=str(cloudflare.get("account_id") or ""), zone_id=str(cloudflare.get("zone_id") or ""),
         tunnel_protocol="" if protocol == "auto" else protocol,
         concurrency=max(1, int(doc.get("concurrency") or 4)),
+        participants_enabled=enabled, cii_url=cii_url, email_domain=email_domain,
+        personas_file=str(doc.get("personas_file") or ""),
     )
 
 
@@ -251,12 +273,11 @@ def normalize_hec_url(url: str) -> str:
     return f"{parts.scheme.lower()}://{netloc}{path}"
 
 
-# =========================================================================== hooks
-# Participant accounts (12.2) and `expire` land in the next stage. These are
-# the seams they plug into; today they add nothing and say so.
+# =========================================================================== participants
 def participant_username(ws: Workshop, box: BoxSpec) -> Optional[str]:
-    """This instance's participant account, once 12.2 creates them."""
-    return None
+    """This instance's participant account (12.2). The name is fixed, so it
+    goes on the allowlist before `up` creates the account right after."""
+    return participants.username(ws.name, box.nn) if ws.participants_enabled else None
 
 
 def allowed_users(ws: Workshop, box: BoxSpec) -> List[str]:
@@ -270,16 +291,50 @@ def allowed_users(ws: Workshop, box: BoxSpec) -> List[str]:
     return list(dict.fromkeys(users))
 
 
-def create_participants(ctx: "Ctx", reports: List["BoxReport"]) -> None:
-    ctx.out.line("participant accounts + handout: not built yet (next stage, 12.2); nothing created")
+def create_participants(ctx: "Ctx", reports: List["BoxReport"]) -> List[str]:
+    """After the boxes: one account per box that came up, then the handout.
+    Returns the usernames that failed."""
+    env, failed, links = ctx.accounts, [], []
+    ctx.out.line(f"== participant accounts (12.2): {len(reports)} instance(s) ==")
+    if not reports:
+        ctx.out.line("  SKIP     no box came up, so no participant account was created")
+        return failed
+    try:
+        if participants.group_name(ctx.ws.name) not in env.groups:
+            participants.preflight(env, create_missing=True)
+    except Lab5Error as exc:
+        ctx.out.line(f"  FAIL     groups       {exc}")
+        return [participants.username(ctx.ws.name, r.box.nn) for r in reports]
+    for rep in reports:
+        name = participants.username(ctx.ws.name, rep.box.nn)
+        try:
+            (status, _, detail), link = participants.ensure(env, rep.box.nn, f"https://{rep.hostname}",
+                                                             rep.access_key, reissue=ctx.reissue)
+        except Lab5Error as exc:
+            status, detail, link = "FAIL", str(exc), None
+        ctx.out.line(f"  {status:<8} {name:<24} {detail}")
+        if status == "FAIL":
+            failed.append(name)
+        if link:
+            links.append(f"{name}: {link}")
+    handout = env.handout()
+    if handout.csv_path.exists():
+        ctx.out.line(f"handout: {handout.html_path} (and .csv), mode 0600. It holds each participant's access key "
+                     "and passcodes: print it, then delete it after the workshop")
+    if links:
+        ctx.out.line("NEXT: the Admin API cannot set a password. In the Duo Admin Panel, open each account and click "
+                     "Create temporary password (valid 30 days); write it on that participant's card:")
+        for link in links:
+            ctx.out.line(f"  {link}")
+    return failed
 
 
 def victim_blocked(ctx: "Ctx", box: BoxSpec, app: Optional[remote.AppClient]) -> Tuple[str, str]:
-    return "SKIP", "victim-blocked self-check arrives with the identity gate (next stage)"
+    return "SKIP", "victim-blocked self-check arrives with the identity gate (12.1, app branch)"
 
 
 def room_checks(ctx: "Ctx") -> List[Tuple[str, str, str]]:
-    return [("SKIP", "room", "victim failing in CII / its events in the stack: next stage")]
+    return [("SKIP", "room", "victim failing in CII / its events in the stack: waits on the S1 decision (12.4)")]
 
 
 # =========================================================================== runtime
@@ -290,6 +345,7 @@ class BoxReport:
     steps: List[Tuple[str, str, str]] = field(default_factory=list)
     blockers: List[str] = field(default_factory=list)
     extra: List[str] = field(default_factory=list)
+    access_key: str = ""     # for the handout; never rendered or stored
 
     def add(self, status: str, name: str, detail: str = "") -> None:
         self.steps.append((status, name, detail))
@@ -345,6 +401,8 @@ class Ctx:
     app_wait_s: float = 120.0
     preflight_wait_s: float = 150.0
     force_restart: bool = False
+    accounts: Optional[participants.Env] = None   # the participant-account plumbing (12.2)
+    reissue: bool = False
 
 
 def lab5_values(ws: Workshop, box: BoxSpec, creds: Dict[str, str]) -> Dict[str, str]:
@@ -758,6 +816,7 @@ def up_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
         for note in getattr(rem, "notes", []):
             rep.add("OK", "host key", note)
         facts = inspect_box(ctx, rem, box, rep)
+        rep.access_key = facts.access_key
         env_rec = record.get("env") or {}
         if facts.env_text is not None and facts.health_version is None and env_rec and not env_rec.get("reverted"):
             rep.add("WARN", "hint", f"this box's .env holds the Lab 5 keys from an earlier up: "
@@ -1052,6 +1111,9 @@ class Deps:
     sleep: Callable[[float], None] = time.sleep
     app_wait_s: float = 120.0
     preflight_wait_s: float = 150.0
+    duo_transport: Callable[..., Any] = duo.duo_transport      # (kind, ikey, skey, host) -> client
+    now: Callable[[], float] = time.time
+    notify: Callable[[str, str], None] = desktop_notify
 
 
 def _resolve(host: str) -> List[str]:
@@ -1082,6 +1144,24 @@ def load_creds(ctx: Ctx) -> None:
         ctx.creds[key] = ctx.keychain.require(item, key, secret=key in envfile.MASKED_KEYS)
     shown = ", ".join(f"{key} {last4(ctx.creds[key])}" for key in sorted(envfile.MASKED_KEYS))
     ctx.out.line(f"Keychain: {len(ctx.creds)} Lab 5 values read ({shown})")
+
+
+def _cast_file(ws: Optional[Workshop]) -> Path:
+    return Path(ws.personas_file).expanduser() if ws and ws.personas_file else DEFAULT_CAST
+
+
+def participant_env(ctx: Ctx, deps: Deps) -> participants.Env:
+    """The Provisioner app and the persona cast. Local reads only: the
+    Keychain and personas.yaml (whose users these commands never touch)."""
+    ws = ctx.ws
+    cast = load_cast(_cast_file(ws))
+    admin = duo.admin_api(ctx.keychain, deps.duo_transport)
+    ctx.out.line(f"Duo: Admin API app PseudoCo Provisioner on {admin.host}; persona cast of {len(cast.personas)} "
+                 f"({_cast_file(ws).name}) is never touched")
+    return participants.Env(admin=admin, line=ctx.out.line, root=ctx.state.root, workshop=ws.name,
+                            email_domain=ws.email_domain or ws.zone, personas=set(cast.usernames),
+                            persona_group=cast.group, cii_url=ws.cii_url, secret_encoding=cast.secret_encoding,
+                            now=deps.now)
 
 
 def connect_cloudflare(ctx: Ctx, transport: Callable[..., Tuple[int, bytes]]) -> None:
@@ -1122,22 +1202,79 @@ def run_parallel(ctx: Ctx, boxes: Sequence[BoxSpec], fn: Callable[[Ctx, BoxSpec]
     return [reports[b.nn] for b in boxes]
 
 
+def _print_rows(ctx: Ctx, title: str, rows: List[Tuple[str, str, str]]) -> int:
+    ctx.out.line(title)
+    for status, name, detail in rows:
+        ctx.out.line(f"  {status:<8} {name:<24} {detail}")
+    return sum(1 for status, _, _ in rows if status == "FAIL")
+
+
+def run_expire(args: argparse.Namespace, deps: Deps) -> int:
+    """`lab5-setup expire [workshop.yaml] [--dry-run]`: every participant
+    account lab5-setup created (or one workshop's), day 7 and day 14 (12.3).
+    Safe to run any time; launchd runs it daily."""
+    out = deps.out or sys.stdout
+    root = Path(deps.state_root or StateStore.default_root())
+    ws: Optional[Workshop] = None
+    redactor = Redactor()
+    try:
+        if args.workshop_yaml:
+            ws = load_workshop(args.workshop_yaml)
+    except Lab5Error as exc:
+        print(f"lab5-setup: {exc}", file=out)
+        return 2
+    private_dir(root)
+    reporter = Reporter(redactor, out=out, log_path=root / "runs" / f"{utc_stamp()}-expire.log")
+    keychain = Keychain(redactor, deps.keychain_runner) if deps.keychain_runner else Keychain(redactor)
+    try:
+        cast = load_cast(_cast_file(ws))
+        admin = duo.admin_api(keychain, deps.duo_transport)
+        scope = f"workshop {ws.name}" if ws else "every workshop"
+        reporter.line(f"lab5-setup expire{' --dry-run' if args.dry_run else ''}: {scope}; disable at day "
+                      f"{participants.DISABLE_DAYS}, delete at day {participants.DELETE_DAYS}; "
+                      f"{len(cast.personas)} personas and group {cast.group!r} are never touched")
+        counts, failed = participants.expire(admin, root, set(cast.usernames), cast.group, deps.now(),
+                                             reporter.line, workshop=ws.name if ws else "", dry_run=args.dry_run)
+        reporter.line(f"RESULT: expire: {counts['disabled']} disabled, {counts['deleted']} deleted, "
+                      f"{counts['unchanged']} unchanged, {counts['skipped']} left alone, {len(failed)} failed"
+                      + (" (dry run: nothing changed)" if args.dry_run else ""))
+        if failed:
+            deps.notify("lab5-setup expire", f"{len(failed)} participant account(s) could not be expired; "
+                                             f"see {root}/runs/")
+        return 1 if failed else 0
+    except Lab5Error as exc:
+        reporter.line(f"lab5-setup expire: {exc}")
+        deps.notify("lab5-setup expire", "did not run: " + redactor.scrub(str(exc))[:150])
+        return 2
+    finally:
+        reporter.close()
+
+
 COMMANDS = {"check": check_box, "up": up_box, "status": status_box, "down": down_box}
-NEXT_STAGE = {"expire": "disables participant accounts older than 7 days (12.2, 12.3)"}
 
 
 def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> int:
     deps = deps or Deps()
     ap = argparse.ArgumentParser(prog="lab5-setup", description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    ap.add_argument("command", choices=sorted(list(COMMANDS) + list(NEXT_STAGE)))
-    ap.add_argument("workshop_yaml", type=Path)
+    ap.add_argument("command", choices=sorted(list(COMMANDS) + ["expire"]))
+    ap.add_argument("workshop_yaml", type=Path, nargs="?",
+                    help="the workshop file (optional for expire: without it, every workshop)")
     ap.add_argument("--only", default="", help="comma list of instance numbers, e.g. 1,3")
     ap.add_argument("--restart", action="store_true", help="up/down: restart the app even if .env is unchanged")
+    ap.add_argument("--dry-run", action="store_true", help="expire: list what it would do, change nothing")
+    ap.add_argument("--reissue-passcodes", action="store_true",
+                    help="up: replace each participant's HOTP token and print new passcodes on the handout "
+                         "(the old ones stop working)")
     args = ap.parse_args(argv)
     out = deps.out or sys.stdout
-    if args.command in NEXT_STAGE:
-        print(f"lab5-setup {args.command}: not built yet (next stage): {NEXT_STAGE[args.command]}", file=out)
+    if args.command == "expire":
+        return run_expire(args, deps)
+    if args.workshop_yaml is None:
+        print(f"lab5-setup {args.command}: the workshop file is required", file=out)
+        return 2
+    if args.dry_run:
+        print("lab5-setup: --dry-run is for expire; check is the dry run of up", file=out)
         return 2
 
     redactor = Redactor()
@@ -1165,31 +1302,48 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
               connect=lambda box, pw: (deps.connect(box, pw, ctx) if deps.connect else remote.ParamikoBox(
                   box.host, box.port, box.user, pw, remote.KnownHosts(state.known_hosts), redactor)),
               https=deps.https or _https, resolve=deps.resolve or _resolve, sleep=deps.sleep,
-              app_wait_s=deps.app_wait_s, preflight_wait_s=deps.preflight_wait_s, force_restart=args.restart)
+              app_wait_s=deps.app_wait_s, preflight_wait_s=deps.preflight_wait_s, force_restart=args.restart,
+              reissue=args.reissue_passcodes)
+    with_participants = ws.participants_enabled and args.command in ("check", "up", "status")
     try:
         reporter.line(f"lab5-setup {args.command}: workshop {ws.name}, {len(boxes)} box(es), "
                       f"required release {ws.required_version}, state {state.dir}")
         if args.command in ("check", "up", "status"):
             load_creds(ctx)                 # local first: a missing item fails before any network call
+        if with_participants:
+            ctx.accounts = participant_env(ctx, deps)
         connect_cloudflare(ctx, deps.cloudflare_transport)
+        if with_participants and args.command in ("check", "up"):
+            participants.preflight(ctx.accounts, create_missing=False)   # before any box changes
         ctx.passwords = ask_passwords(boxes, deps.prompt, redactor)
         reports = run_parallel(ctx, boxes, COMMANDS[args.command])
-        if args.command == "up" and not any(r.failed for r in reports):
-            create_participants(ctx, reports)
+        failed = [r.box.nn for r in reports if r.failed]
+        bad_accounts = 0
+        if with_participants and args.command == "up":
+            bad_accounts = len(create_participants(ctx, [r for r in reports if not r.failed]))
+        if with_participants and args.command == "check":
+            bad_accounts = _print_rows(ctx, "== participant accounts (12.2): what up would do ==",
+                                       participants.plan_rows(ctx.accounts, [b.nn for b in boxes]))
         if args.command == "status":
             for status, name, detail in room_checks(ctx):
                 reporter.line(f"  {status:<8} {name:<12} {detail}")
+            if with_participants:
+                bad_accounts = _print_rows(ctx, "== participant accounts (12.2) ==",
+                                           participants.status_rows(ctx.accounts, [b.nn for b in boxes]))
         if args.command in ("status", "down"):
             for row in workshop_orphans(ctx):
                 reporter.line(f"  WARN     orphan       {row}")
-        failed = [r.box.nn for r in reports if r.failed]
         reporter.line(f"RESULT: {args.command}: {len(reports) - len(failed)} ok, {len(failed)} failed"
-                      + (f" (box {', '.join(failed)})" if failed else ""))
+                      + (f" (box {', '.join(failed)})" if failed else "")
+                      + (f"; {bad_accounts} participant account(s) failed" if bad_accounts else ""))
         if args.command == "down" and failed:
             only = ",".join(str(r.box.instance) for r in reports if r.failed)
             reporter.line(f"NEXT: re-run `lab5-setup down {args.workshop_yaml} --only {only}` once those boxes "
                           "are reachable; until then they keep the Lab 5 keys and credentials")
-        return 1 if failed else 0
+        if args.command == "down" and ws.participants_enabled:
+            reporter.line("Participant accounts stay until `lab5-setup expire` disables them at day "
+                          f"{participants.DISABLE_DAYS} and deletes them at day {participants.DELETE_DAYS}")
+        return 1 if failed or bad_accounts else 0
     except Lab5Error as exc:
         reporter.line(f"lab5-setup: {exc}")
         return 2

@@ -24,6 +24,17 @@ room:
   fallback: jordan.reyes     # untouched; to swap, set victim: jordan.reyes and re-run up
   trusted: [marcus.bell, elena.sousa, grace.lin]
 
+# Participant accounts (plan 12.2): `up` creates Duo user l5-<workshop>-<nn> for
+# each box (CII Read-Only + group l5-<workshop>, one HOTP token, 10 passcodes on
+# the handout) and puts it on that box's IDENTITY_ALLOWED_USERS. `expire`
+# disables them at day 7 and deletes them at day 14. Each uses a Duo seat.
+participants:
+  enabled: true
+  # cii_url: https://...      # the Identity Intelligence sign-in link printed on the handout
+  # email_domain: pseudocoassistant.com   # defaults to `zone`
+
+# personas_file: scripts/identity/personas.yaml   # the cast up and expire never touch (default)
+
 # Optional 12.1 settings. Leave a key out to keep the app default. Checked
 # before anything connects: the app cannot start with a value like "12h".
 # identity:
@@ -44,6 +55,9 @@ room:
 #   CII_CLIENT_SECRET: pseudoco-lab5-cii-client-secret
 #   CII_TOKEN_URL: pseudoco-lab5-cii-token-url
 #   CII_API_URL: pseudoco-lab5-cii-api-url
+# The participant accounts use the Admin API app PseudoCo Provisioner, whose keys
+# stay on this Mac (pseudoco-lab5-duo-provisioner-ikey / -skey, and the tenant's
+# API host in pseudoco-lab5-duo-api-host); they are not workshop settings.
 
 # cloudflare:
 #   account_id: ""          # found from the zone when empty

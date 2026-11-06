@@ -22,6 +22,8 @@ SUITES=(
   tests/test_ec2_scripts.py
   tests/test_box_identity.py
   tests/test_lab5_setup.py
+  tests/test_lab5_participants.py
+  tests/test_identity_personas.py
   tests/test_tracestate_guard.py
   tests/test_spray_sources.py
   tests/test_set_ao_api_token.py

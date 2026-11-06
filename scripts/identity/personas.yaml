@@ -1,0 +1,82 @@
+# Lab 5 persona cast (docs/identity-intelligence-lab-plan.md 4.3, 4.5, 12.4).
+#
+# The single source for scripts/identity/provision_personas.py,
+# scripts/identity/persona_activity.py and `lab5-setup expire` (which never
+# touches anyone listed here). It holds no secrets: each persona's HOTP secret
+# is a Keychain item (<hotp.keychain_prefix><username>), its counter is under
+# ~/.pseudoco-lab5/personas/.
+#
+# tests/test_identity_personas.py pins every name here as disjoint from the
+# app's synthetic end users (ENDUSER_IDS, t.nguyen) and from the synthetic-PII
+# name pools and records of all 8 themes. Check a new name against it before
+# adding it (priya.raman and omar.haddad were dropped for colliding).
+
+email_domain: pseudocoassistant.com   # CII's login is the email
+group: PseudoCo Workforce             # every lab app is limited to this group (4.2)
+
+hotp:
+  # How the secret is sent to Duo and kept in the Keychain. Spike S7 settles it.
+  secret_encoding: hex
+  keychain_prefix: pseudoco-lab5-hotp-
+
+baseline:
+  # Turn on only after spikes S1, S2 and S7 pass, at least 4 weeks before the
+  # first delivery (4.5). While off, the launchd job does nothing and says so.
+  enabled: false
+  jitter_minutes: 40                  # personas sign in at random points in this window
+
+takeover:
+  attempts: [5, 9]                    # bad passcodes: MFA Flood needs 5 in 2 min, lockout is at 10
+  spacing_seconds: 10
+  reuse_days: 8                       # a victim's failures last 7 days; refuse a second takeover before this
+  # Rotated per takeover (the next unused one for that victim). Documentation
+  # addresses until spike S1: the scripts refuse them for real sign-ins.
+  foreign:
+    - {ipaddr: 203.0.113.61, hostname: DESKTOP-7Q2M4KX}
+    - {ipaddr: 203.0.113.62, hostname: LAPTOP-R8W1ZJ3}
+    - {ipaddr: 203.0.113.63, hostname: WIN-K3D9PQ2}
+
+replay:
+  pushes: 5                           # a short flood the facilitator denies on stage (1-9)
+
+# cii:
+#   end_user_query: >-                # spikes S5/S6 pin the shape; the default is in deploy/lab5/lab5_cii.py
+#     query Lab5EndUser($login: String!) { getEndUser(login: $login) { levelOfTrust failingChecks } }
+
+# home: where the persona signs in from every day (a residential address near
+# the delivery region; spike S1 shows how Duo geolocates it) and its device.
+personas:
+  # Trusted: each shared by a few teams on lab day. CII exclusions protect them (4.3).
+  - username: marcus.bell
+    name: Marcus Bell
+    role: trusted
+    home: {ipaddr: 198.51.100.21, hostname: MBELL-MBP}
+  - username: elena.sousa
+    name: Elena Sousa
+    role: trusted
+    home: {ipaddr: 198.51.100.22, hostname: ESOUSA-MBA}
+  - username: grace.lin
+    name: Grace Lin
+    role: trusted
+    home: {ipaddr: 198.51.100.23, hostname: GLIN-THINKPAD}
+  # Victims: an active victim plus an untouched fallback per concurrent room.
+  # Add more (each with its own 4-week baseline) for back-to-back deliveries.
+  - username: avery.kim
+    name: Avery Kim
+    role: victim
+    home: {ipaddr: 198.51.100.31, hostname: AKIM-MBP}
+    replay_device: false              # true for the one victim with Duo Mobile on a facilitator phone
+  - username: jordan.reyes
+    name: Jordan Reyes
+    role: victim
+    home: {ipaddr: 198.51.100.32, hostname: JREYES-XPS}
+  - username: casey.wong
+    name: Casey Wong
+    role: victim
+    home: {ipaddr: 198.51.100.33, hostname: CWONG-MBA}
+  # Spike persona (section 8); once its failures expire it is the dry-run
+  # victim on a test stack. Never a lab-day fallback.
+  - username: nina.osei
+    name: Nina Osei
+    role: spike
+    home: {ipaddr: 198.51.100.41, hostname: NOSEI-SURFACE}

@@ -1,10 +1,13 @@
-"""Shared plumbing for lab5-setup: output that never carries a secret, the
-Keychain reader, version compare and the Mac-side state directory.
+"""Shared plumbing for lab5-setup and the persona scripts: output that never
+carries a secret, the Keychain, version compare, the Mac-side state
+directory, a file lock and a desktop notification.
 
 Stdlib only. Nothing here talks to a box, Duo, CII or Cloudflare.
 """
 from __future__ import annotations
 
+import fcntl
+import getpass
 import json
 import os
 import re
@@ -14,7 +17,8 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, TextIO, Tuple
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, TextIO, Tuple
 
 STATE_ENV = "PSEUDOCO_LAB5_STATE_DIR"
 DEFAULT_STATE_DIR = Path.home() / ".pseudoco-lab5"
@@ -114,16 +118,33 @@ def _run_security(argv: Sequence[str]) -> "subprocess.CompletedProcess":
     return subprocess.run(list(argv), capture_output=True, text=True, timeout=60)
 
 
+StdinRunner = Callable[[Sequence[str], str], "subprocess.CompletedProcess"]
+
+
+def _run_security_stdin(argv: Sequence[str], stdin: str) -> "subprocess.CompletedProcess":
+    return subprocess.run(list(argv), input=stdin, capture_output=True, text=True, timeout=60)
+
+
+# What `security -i` accepts as one bare word: no quoting is ever needed, so a
+# value can never break out of its argument.
+_KEYCHAIN_WORD = re.compile(r"^[A-Za-z0-9._@+=-]{1,256}$")
+
+
 class Keychain:
-    """Reads generic passwords from the macOS login Keychain.
+    """Reads (and, for the persona HOTP secrets, writes) generic passwords in
+    the macOS login Keychain.
 
     ``security find-generic-password -s ITEM -w`` puts only the item NAME on
-    the command line; the value comes back on stdout through a pipe. Values
-    are registered with the redactor as soon as they are read."""
+    the command line; the value comes back on stdout through a pipe. A write
+    goes through ``security -i``, which reads its command from stdin, so the
+    value never appears in argv either. Values are registered with the
+    redactor as soon as they are read or written."""
 
-    def __init__(self, redactor: Redactor, runner: Runner = _run_security, account: str = "") -> None:
+    def __init__(self, redactor: Redactor, runner: Runner = _run_security, account: str = "",
+                 stdin_runner: StdinRunner = _run_security_stdin) -> None:
         self.redactor = redactor
         self._runner = runner
+        self._stdin_runner = stdin_runner
         self._account = account
         self._cache: Dict[str, Optional[str]] = {}
         self._lock = threading.Lock()
@@ -160,6 +181,38 @@ class Keychain:
                             f"security add-generic-password -s {item} -a \"$USER\" -w   "
                             "(no value after -w: security prompts for it, so it stays out of your shell history)")
         return value
+
+    def store(self, item: str, value: str) -> None:
+        """Create or replace ITEM with VALUE, then read it back. Only words
+        that need no quoting are accepted (the HOTP secrets are hex or base32)."""
+        account = self._account or getpass.getuser()
+        for word, what in ((item, "item name"), (account, "account"), (value, "value")):
+            if not _KEYCHAIN_WORD.match(word or ""):
+                raise Lab5Error(f"refusing to write Keychain {what} that needs quoting ({item})")
+        self.redactor.add(value)
+        command = f"add-generic-password -U -s {item} -a {account} -w {value}\n"
+        try:
+            proc = self._stdin_runner(["security", "-i"], command)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise Lab5Error(f"could not write Keychain item '{item}': {type(exc).__name__}")
+        with self._lock:
+            self._cache.pop(item, None)
+        if proc.returncode != 0 or self.get(item) != value:
+            # Never echo security's output: it may repeat the command line.
+            raise Lab5Error(f"writing Keychain item '{item}' did not take (security exited {proc.returncode})")
+
+    def delete(self, item: str) -> bool:
+        """Remove ITEM. True if it existed."""
+        argv = ["security", "delete-generic-password", "-s", item]
+        if self._account:
+            argv += ["-a", self._account]
+        try:
+            proc = self._runner(argv)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        with self._lock:
+            self._cache.pop(item, None)
+        return proc.returncode == 0
 
 
 # --------------------------------------------------------------------------- state
@@ -238,3 +291,64 @@ class StateStore:
 
 def any_in(haystack: str, needles: Iterable[str]) -> bool:
     return any(n and n in haystack for n in needles)
+
+
+def write_json_private(path: Path, data: Dict[str, Any]) -> None:
+    """Atomic 0600 JSON write in a 0700 directory (no secrets go in these)."""
+    _write_json_atomic(Path(path), data)
+
+
+def read_json(path: Path) -> Dict[str, Any]:
+    path = Path(path)
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def private_dir(path: Path) -> Path:
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path, 0o700)
+    return path
+
+
+@contextmanager
+def file_lock(path: Path, timeout_s: float = 30.0) -> Iterator[None]:
+    """An exclusive ``flock`` on PATH (created 0600), so two runs (a launchd
+    job and a manual one) never use the same HOTP counter value."""
+    import time
+    path = Path(path)
+    private_dir(path.parent)
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise Lab5Error(f"{path} is locked by another run; try again when it finishes")
+                time.sleep(0.2)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+Notifier = Callable[[str, str], None]
+
+
+def _applescript_text(text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def desktop_notify(title: str, message: str) -> None:
+    """A macOS notification for the launchd jobs (there is no one watching
+    their output). Best effort: a failure here never fails the job. The text
+    is a summary and never carries a secret."""
+    script = f"display notification {_applescript_text(message[:200])} with title {_applescript_text(title[:80])}"
+    try:
+        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        pass

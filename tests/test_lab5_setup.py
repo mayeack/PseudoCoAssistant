@@ -487,6 +487,9 @@ boxes:
     host: 198.51.100.1
   - instance: 2
     host: 198.51.100.2
+# The box side only: tests/test_lab5_participants.py drives the accounts (12.2).
+participants:
+  enabled: false
 """
 
 
@@ -770,7 +773,8 @@ def test_wrong_password_and_cli() -> None:
         check("the wrong password is not echoed", "wrong-password-123" not in out)
         out_io = io.StringIO()
         rc = ls.main(["expire", str(Path(tmp) / "workshop.yaml")], deps=world.deps(Path(tmp) / "state", out_io))
-        check("expire is a clean next-stage hook", rc == 2 and "next stage" in out_io.getvalue())
+        check("expire without the Provisioner keys exits 2 and names the Keychain item",
+              rc == 2 and "pseudoco-lab5-duo-provisioner-ikey" in out_io.getvalue(), out_io.getvalue())
     for bad, why in ((WORKSHOP_YAML.replace("workshop: acme", "workshop: Acme_1"), "bad workshop name"),
                      (WORKSHOP_YAML.replace("https://http-inputs", "http://http-inputs"), "http HEC URL"),
                      (WORKSHOP_YAML.replace("instance: 2", "instance: 1"), "duplicate instance")):
