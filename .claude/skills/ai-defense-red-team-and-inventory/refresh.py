@@ -67,15 +67,18 @@ AIBOM_PYTHONS = ("/opt/homebrew/bin/python3.11", "python3.11", "python3.12", "py
 LLM_MODEL = "claude-sonnet-5-5"    # no --agentic-fast-model: claude-haiku-5-5 rejects temperature
 
 # Red-team targets in the PseudoCo SCC org. The order is the run order.
+# "theme" is the app's theme label (ThemeConfig.label) the target's template
+# pins; "needs_ai_defense" is its ai_defense_review. Together they name the run
+# (run_name).
 TARGETS = {
     "protected": {
         "id": "465aecb9-2367-4f70-95fb-7b110dd3234a",
-        "label": "MedAdvice with AI Defense",
+        "theme": "MedAdvice",
         "needs_ai_defense": True,
     },
     "baseline": {
         "id": "536c17ae-23b3-4ffb-b05c-c4d01ead7878",
-        "label": "MedAdvice baseline, AI Defense off",
+        "theme": "MedAdvice",
         "needs_ai_defense": False,
     },
 }
@@ -547,9 +550,19 @@ def get_job(task_id):
     return api("GET", f"/ai-validation/job/{task_id}")
 
 
+def run_name(name):
+    """The run's name in SCC: "PseudoCo <theme> <Protected|Unprotected>".
+
+    The same every time, so a target's runs line up in the AI Red Teaming list;
+    the start time tells them apart. Names reject "+", and no theme label has one.
+    """
+    t = TARGETS[name]
+    return f"PseudoCo {t['theme']} {'Protected' if t['needs_ai_defense'] else 'Unprotected'}"
+
+
 def start_run(name):
     t = TARGETS[name]
-    scan_name = f"Monthly refresh {today()} - {t['label']}".replace("+", " and ")
+    scan_name = run_name(name)
     body = {"validation_scan_name": scan_name, "target_id": t["id"], "profile_id": PROFILE_ID}
     task_id = api("POST", "/ai-validation/start", body).get("task_id")
     if not task_id:
@@ -701,7 +714,7 @@ def redteam_report(task_id):
 
 
 def redteam_markdown(s):
-    lines = [f"### Red team: {TARGETS.get(s['target'], {}).get('label', s['target'])}", "",
+    lines = [f"### Red team: {run_name(s['target']) if s['target'] in TARGETS else s['target']}", "",
              f"Task `{s['task_id']}`, {s['status']}, {s['created_at'][:16].replace('T', ' ')} UTC"
              f" to {(s.get('completed_at') or '?')[:16].replace('T', ' ')} UTC.", ""]
     if not s["attacks_scored"]:

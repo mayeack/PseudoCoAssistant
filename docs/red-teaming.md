@@ -106,7 +106,11 @@ AI Red Teaming → **Add component → Add target**:
 3. **Advanced settings** and **Summary**, then save. Run **Test connection**
    before a full run.
 
-Then **Start red teaming**, pick the target and a profile.
+Then **Start red teaming**, pick the target and a profile, and name the run
+`PseudoCo <theme> <Protected|Unprotected>`: `PseudoCo MedAdvice Protected`
+when the template sends `ai_defense_review: true`, `PseudoCo MedAdvice
+Unprotected` when it does not. Every run against a target carries the same
+name, and the start time tells the runs apart.
 
 ## What a run costs and where it lands
 
@@ -134,7 +138,8 @@ Management key. A desktop scheduled task runs its `refresh.py refresh` at
 2. It runs Quick Start (1,998 prompts) against both targets, one after the
    other. The "with AI Defense" target goes first and takes about 2 h. The
    unprotected baseline follows and takes over 10 h, because every prompt
-   reaches the local model.
+   reaches the local model. The runs are named `PseudoCo MedAdvice
+   Protected` and `PseudoCo MedAdvice Unprotected`.
 3. It compares each run with the previous run on the same target.
 4. It writes a summary to `~/.ai-defense-refresh/reports/<date>/`.
 

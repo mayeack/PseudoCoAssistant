@@ -148,14 +148,23 @@ Each one goes to a child process environment or a request header only.
 
 ## AI Red Teaming: targets, profile and results
 
-| Key in `TARGETS` | target_id | Template constants | In the monthly run |
-|---|---|---|---|
-| `protected` | `465aecb9-2367-4f70-95fb-7b110dd3234a` "PseudoCo Assistant - MedAdvice with AI Defense (pseudocoassistant.com)" | `ai_defense_review: true`, all `force_*_injection: false`, `theme: medadvice` | yes, first |
-| `baseline` | `536c17ae-23b3-4ffb-b05c-c4d01ead7878` "PseudoCo Assistant - MedAdvice (pseudocoassistant.com)" | `ai_defense_review: false` | yes, second |
+| Key in `TARGETS` | target_id | Template constants | Run name | In the monthly run |
+|---|---|---|---|---|
+| `protected` | `465aecb9-2367-4f70-95fb-7b110dd3234a` "PseudoCo Assistant - MedAdvice with AI Defense (pseudocoassistant.com)" | `ai_defense_review: true`, all `force_*_injection: false`, `theme: medadvice` | `PseudoCo MedAdvice Protected` | yes, first |
+| `baseline` | `536c17ae-23b3-4ffb-b05c-c4d01ead7878` "PseudoCo Assistant - MedAdvice (pseudocoassistant.com)" | `ai_defense_review: false` | `PseudoCo MedAdvice Unprotected` | yes, second |
 
 Both run every month: the protected-vs-unprotected pair is the comparison the
 demo needs. `--targets protected` or `--targets baseline` runs just one, for a
 manual run.
+
+**Run names.** Every run is named `PseudoCo <theme> <Protected|Unprotected>`
+(`run_name()` in `refresh.py`), monthly and manual runs alike, and the summary's
+headings use the same name. `<theme>` is the theme label the app uses
+(`ThemeConfig.label`: `MedAdvice`, `TelecomChatbot`, …) from the target's
+`theme` field. `Protected` means the target's template sends
+`ai_defense_review: true` (`needs_ai_defense`). There is no date in the name, so
+each target's runs line up under one name in the SCC list, and the start time
+tells them apart. Name a run started from the console the same way.
 
 Both targets are Custom Endpoint, OpenAI API provider, with no streaming, URL
 `https://pseudocoassistant.com/api/chat/completions`, response path
@@ -235,6 +244,8 @@ Across 456 paired attacks, the protected run cut what got through from 98 to 6.
   `summary.component_types` with the last one before you upload. The catalog
   asset name follows the version.
 - **Another target or profile.** Add it to `TARGETS`, or change `PROFILE_ID`.
+  A new target sets `theme` to the label of the theme its template pins and
+  `needs_ai_defense` to its `ai_defense_review`, which together name its runs.
   Keep the targets in run order, because only one can use the local model at a
   time.
 - **The schedule.** Use the desktop app's scheduled tasks

@@ -131,7 +131,11 @@ setting, which is a header name plus a value.</p>
 <li><strong>Advanced settings</strong> and <strong>Summary</strong>, then save. Run <strong>Test connection</strong>
    before a full run.</li>
 </ol>
-<p>Then <strong>Start red teaming</strong>, pick the target and a profile.</p>
+<p>Then <strong>Start red teaming</strong>, pick the target and a profile, and name the run
+<code>PseudoCo &lt;theme&gt; &lt;Protected|Unprotected&gt;</code>: <code>PseudoCo MedAdvice Protected</code>
+when the template sends <code>ai_defense_review: true</code>, <code>PseudoCo MedAdvice
+Unprotected</code> when it does not. Every run against a target carries the same
+name, and the start time tells the runs apart.</p>
 <h2>What a run costs and where it lands</h2>
 <ul>
 <li>Every attack is a real governed turn. It writes a conversation row and a
@@ -157,7 +161,8 @@ Management key. A desktop scheduled task runs its <code>refresh.py refresh</code
 <li>It runs Quick Start (1,998 prompts) against both targets, one after the
    other. The &ldquo;with AI Defense&rdquo; target goes first and takes about 2 h. The
    unprotected baseline follows and takes over 10 h, because every prompt
-   reaches the local model.</li>
+   reaches the local model. The runs are named <code>PseudoCo MedAdvice
+   Protected</code> and <code>PseudoCo MedAdvice Unprotected</code>.</li>
 <li>It compares each run with the previous run on the same target.</li>
 <li>It writes a summary to <code>~/.ai-defense-refresh/reports/&lt;date&gt;/</code>.</li>
 </ol>
