@@ -478,10 +478,14 @@ def _cii_not_found(body: Any) -> bool:
     tests/test_identity_personas.py pins the two copies' code together, and
     ``tests/fixtures/cii_end_user_answers.json`` holds the answers both must
     read the same way. Since no table lists every message or code a rule
-    could key on, that suite also pins this function's first statement,
-    which turns away every answer that carries an error before anything
-    reads it, and that ``_cii_parse``'s first statement, under this rule, is
-    the only place a CII answer becomes ``NOT_FOUND``."""
+    could key on, that suite also pins the path to it: this function's first
+    statement turns away every answer that carries an error before anything
+    reads it, ``_cii_parse`` makes ``NOT_FOUND`` only under this rule and
+    answers nothing but a failure until its errors guard, and ``_cii_fetch``
+    hands it CII's answer untouched. tests/test_identity_gate.py sends every
+    error the table holds and every failed request (a status, a token
+    failure, a transport error, a stale cache) through the whole lookup and
+    the gate's decision."""
     if not isinstance(body, Mapping) or body.get("errors") not in (None, []) or "data" not in body:
         return False
     data = body.get("data")

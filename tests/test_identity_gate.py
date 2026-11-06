@@ -21,6 +21,7 @@ import base64
 import copy
 import inspect
 import json
+import logging
 import os
 import shutil
 import sys
@@ -162,6 +163,9 @@ class FakeServices:
         self.fail = None       # None | "duo_500" | "duo_connect" | "duo_timeout" | "cii_500" | "cii_401_once"
         self.bad_signatures = 0
         self.cii_body = None   # a GraphQL answer to send (HTTP 200) instead of the user's record
+        self.cii_http = None   # (status, body) the GraphQL endpoint sends instead (a dict goes as JSON)
+        self.token_http = None  # (status, body) the token endpoint sends instead
+        self.raise_on = None   # ("token" | "graphql", exception class) to raise for that request
 
     def set_user(self, username, status="active", trust="TRUSTED", failing=()):
         email = f"{username}@pseudocoassistant.com"
@@ -197,7 +201,17 @@ class FakeServices:
                                           "status": user["status"], "email": user["email"]}]
         return httpx.Response(200, json={"stat": "OK", "response": users})
 
+    @staticmethod
+    def _send(status, body):
+        if isinstance(body, (dict, list)):
+            return httpx.Response(status, json=body)
+        return httpx.Response(status, text=body or "")
+
     def _token(self, request):
+        if self.raise_on and self.raise_on[0] == "token":
+            raise self.raise_on[1]("injected", request=request)
+        if self.token_http is not None:
+            return self._send(*self.token_http)
         body = json.loads(request.content or b"{}")
         if body != {"client_id": "cii-client", "client_secret": CII_SECRET, "grant_type": "client_credentials"}:
             return httpx.Response(401, json={"error": "invalid_client"})
@@ -207,6 +221,10 @@ class FakeServices:
         return httpx.Response(200, json={"access_token": token, "token_type": "Bearer", "expires_in": 36000})
 
     def _graphql(self, request):
+        if self.raise_on and self.raise_on[0] == "graphql":
+            raise self.raise_on[1]("injected", request=request)
+        if self.cii_http is not None:
+            return self._send(*self.cii_http)
         if self.fail == "cii_500":
             return httpx.Response(500, text="boom")
         token = request.headers.get("authorization", "").removeprefix("Bearer ")
@@ -496,43 +514,174 @@ def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
     check("every code of the shared table is tried in each of those places alone and in all of them at once, on "
           "each of its messages, and each is an error with a message and no path of its own (the shape gives it)",
           *covers(coded, section["messages"]))
-    # The full lookups below put the codes on the section's messages. The
-    # parser, the only code that reads an error's words or code, tries every
-    # code in every place on every message of the table, the code-less ones
-    # too: a rule on a code plus words the table holds cannot pass because
-    # the table never put the two on one error.
+    # The cross that test_no_cii_failure_is_no_such_user runs through the whole
+    # lookup: every code in every place on every message the table holds.
+    # Checked here against this suite's own walk of the table, so a builder
+    # that drops a message, a place or a code fails, whatever it returns.
+    walked = set()
+
+    def collect(node, key=None):
+        """Every error's message and every string listed under a "messages"
+        key, anywhere in the table."""
+        if isinstance(node, dict):
+            for name, value in node.items():
+                if name == "message" and isinstance(value, str):
+                    walked.add(value)
+                collect(value, name)
+        elif isinstance(node, list):
+            for value in node:
+                if key == "messages" and isinstance(value, str):
+                    walked.add(value)
+                collect(value, key)
+
+    collect(table)
     every_message = cii_answers.all_messages(table)
-    crossed = cii_answers.coded_errors(table, every_message)
+    check(f"all_messages holds every message the table holds ({len(walked)}: the coded errors', the code-less "
+          "ones and those of its cases), each once", set(every_message) == walked
+          and len(every_message) == len(walked), f"missing {sorted(walked - set(every_message))[:5]}")
     check(f"the cross puts every code of the shared table in each place alone and in all of them at once, on every "
-          f"message the table holds ({len(every_message)}: the coded errors' and the code-less ones)",
-          *covers(crossed, every_message))
-    misparsed = []
-    for name, error in crossed:
-        for shape in shapes:
-            got = lookup._cii_parse(_error_answer(shape, error))
-            if (got.get("state"), got.get("error"), got.get("trust_level"), got.get("failing_checks")) != (
-                    "unavailable", "graphql_error", None, []):
-                misparsed.append(f"{name} {shape['where']}: {got}")
-    check(f"every code in every place, alone and all at once, on every message of the shared table ({len(crossed)} "
-          f"errors), in each of its {len(shapes)} shapes: the gate's parser (_cii_parse) reads it unavailable "
-          "(graphql_error) with nothing learned, never 'no such user'", not misparsed, "; ".join(misparsed)[:2000])
-    for what, errors in (("code-less error message", [(m, m) for m in table["error_messages"]["messages"]]),
-                         ("error that carries a code", coded)):
-        misread = []
-        for name, error in errors:
-            for shape in shapes:
-                fake.cii_body = _error_answer(shape, error)
-                lookup.clear_cache()
-                st = lookup.lookup("avery.kim")
-                wrong = _misread_error(st, gate.decide(st, fail_open=False), gate.decide(st, fail_open=True))
-                if wrong:
-                    misread.append(f"{name!r} {shape['where']}: {wrong}")
-        check(f"every {what} of the shared table ({len(errors)}), in each of its {len(shapes)} shapes (on "
-              "getEndUser, on endUserDetails, on getEndUser with data null, with no path): unavailable with nothing "
-              "learned, never 'no such user' (fail-closed blocks it as not verifiable, fail-open allows it as "
-              "unavailable)", not misread, "; ".join(misread)[:2000])
+          f"one of those messages", *covers(cii_answers.coded_errors(table, every_message), sorted(walked)))
     fake.cii_body = None
     lookup.clear_cache()
+
+
+def test_no_cii_failure_is_no_such_user() -> None:
+    print("No CII failure is ever 'no such user': every error the shared table holds and every failed request, "
+          "through the whole lookup (_cii_fetch, cii_user, the cache, lookup), the gate's decision and the box's "
+          "victim row")
+    _configure(True)
+    fake = _fresh_fake()
+    fake.set_user("avery.kim", trust="NEUTRAL")
+    table = json.loads((ROOT / "tests" / "fixtures" / "cii_end_user_answers.json").read_text())
+    shapes = table["error_shapes"]["shapes"]
+    no_record = {"data": {"getEndUser": {"endUserDetails": None, "providerEndUserDetails": []}}}
+    record = {"data": {"getEndUser": {"endUserDetails": {
+        "login": "avery.kim@pseudocoassistant.com", "failingChecks": [],
+        "endUserTrustScore": {"levelOfTrust": "NEUTRAL"}}}}}
+    # One warning per unavailable lookup and one line per request would flood the log.
+    quiet = [logging.getLogger(name) for name in ("backend.services.identity_lookup", "httpx")]
+    levels = [logger.level for logger in quiet]
+    for logger in quiet:
+        logger.setLevel(logging.ERROR)
+
+    def reset():
+        fake.cii_body = fake.cii_http = fake.token_http = fake.raise_on = None
+        fake.fail = None
+        lookup.clear_cache()
+
+    def misread(code=None):
+        st = lookup.lookup("avery.kim")
+        wrong = _misread_error(st, gate.decide(st, fail_open=False), gate.decide(st, fail_open=True))
+        if not wrong and code is not None and st["errors"].get("cii") != code:
+            wrong = f"error {st['errors'].get('cii')!r}, not {code!r}"
+        return wrong
+
+    try:
+        # Every error the table can build, code-less and coded, in each shape,
+        # through the whole lookup: a rule anywhere on the path (in _cii_fetch
+        # before the parser, in cii_user, in lookup or in decide) that reads
+        # the words or a code of any of them as "no such user" fails here.
+        every_message = cii_answers.all_messages(table)
+        errors = [(m, m) for m in every_message] + cii_answers.coded_errors(table, every_message)
+        wrong = []
+        for name, error in errors:
+            for shape in shapes:
+                reset()
+                fake.cii_body = _error_answer(shape, error)
+                what = misread("graphql_error")
+                if what:
+                    wrong.append(f"{name!r} {shape['where']}: {what}")
+        check(f"every error the shared table holds ({len(errors)}: each message code-less, and each code in each "
+              f"place, alone and all at once, on each message), in each of its {len(shapes)} shapes, through the "
+              "whole lookup and the gate's decision: unavailable (graphql_error) with nothing learned, never "
+              "'no such user' (fail-closed blocks it as not verifiable, fail-open allows it as unavailable)",
+              not wrong, "; ".join(wrong)[:2000])
+
+        # Every failed request: whatever the body says (CII's own no-record
+        # answer, an error, the user's record), an answer that is not HTTP 200
+        # is the request's failure, never an answer about the user.
+        bodies = (("no body", ""), ("CII's no-record answer", no_record),
+                  ("an error answer", {"errors": [{"message": "User not found"}]}), ("the user's record", record))
+        failures = []
+        for status in (201, 204, 301, 302, 307, 400, 401, 403, 404, 405, 408, 409, 410, 422, 429, 500, 502, 503, 504):
+            for label, body in bodies:
+                failures.append((f"getEndUser answered HTTP {status} with {label}", "cii_http", (status, body),
+                                 f"http_{status}"))
+        for status in (201, 204, 301, 400, 401, 403, 404, 429, 500, 502, 503):
+            for label, body in (("no body", ""), ("a token", {"access_token": "tok-x", "expires_in": 36000})):
+                failures.append((f"the token endpoint answered HTTP {status} with {label}", "token_http",
+                                 (status, body), f"token_http_{status}"))
+        failures += [
+            ("getEndUser answered 200 with a body that is not JSON", "cii_http", (200, "<html>"), "bad_response"),
+            ("getEndUser answered 200 with JSON that is a list", "cii_http", (200, ["no such user"]), "bad_response"),
+            ("getEndUser answered 200 with an empty object", "cii_http", (200, {}), "bad_response"),
+            ("the token endpoint answered 200 with no token", "token_http", (200, {"expires_in": 36000}),
+             "token_bad_response"),
+            ("the token endpoint answered 200 with a body that is not JSON", "token_http", (200, "<html>"),
+             "token_bad_response"),
+            ("getEndUser could not be reached", "raise_on", ("graphql", httpx.ConnectError), "connect_error"),
+            ("getEndUser timed out", "raise_on", ("graphql", httpx.ReadTimeout), "timeout"),
+            ("getEndUser's connection broke", "raise_on", ("graphql", httpx.RemoteProtocolError),
+             "RemoteProtocolError"),
+            ("the token endpoint could not be reached", "raise_on", ("token", httpx.ConnectError),
+             "token_connect_error"),
+            ("the token endpoint timed out", "raise_on", ("token", httpx.ReadTimeout), "token_timeout"),
+        ]
+        wrong = []
+        for name, attr, value, code in failures:
+            reset()
+            setattr(fake, attr, value)
+            what = misread(code)
+            if what:
+                wrong.append(f"{name}: {what}")
+        check(f"every failed request ({len(failures)}: getEndUser's and the token endpoint's statuses with each "
+              "body, a 200 the gate cannot read, transport errors), through the whole lookup and the gate's "
+              "decision: unavailable with its own error code, nothing learned, never 'no such user'",
+              not wrong, "; ".join(wrong)[:2000])
+
+        # The cache never answers for a lookup that failed: once an answer is
+        # stale, a failed refetch is the failure, never the last answer.
+        real_ttl = lookup.ttl_seconds
+        lookup.ttl_seconds = lambda: 0.0  # every cached answer is stale at once
+        try:
+            wrong = []
+            for before, body, state in (("CII's no-record answer", no_record, "not_found"),
+                                        ("the user's record", None, "ok")):
+                for name, attr, value, code in failures + [
+                        ("an error on getEndUser", "cii_body",
+                         {"data": None, "errors": [{"message": "No such user", "path": ["getEndUser"]}]},
+                         "graphql_error")]:
+                    reset()
+                    fake.cii_body = body
+                    first = lookup.lookup("avery.kim")["sources"]["cii"]
+                    fake.cii_body = None
+                    lookup._token = None  # so a token failure is asked again, as when the token expires
+                    setattr(fake, attr, value)
+                    what = misread(code) if first == state else f"the first lookup read {first}, not {state}"
+                    if what:
+                        wrong.append(f"{before}, then {name}: {what}")
+            check("a cached answer gone stale, then a failed refetch (after CII's no-record answer and after the "
+                  "user's record): the failure, never the last answer", not wrong, "; ".join(wrong)[:2000])
+        finally:
+            lookup.ttl_seconds = real_ttl
+
+        # The box's victim row: every kind of failure is FAIL (cannot
+        # verify), never WARN "no record in CII".
+        wrong = []
+        rows = [f for f in failures if f[1] != "cii_http" or "no-record" in f[0] or f[3] == "bad_response"]
+        for name, attr, value, code in rows:
+            reset()
+            setattr(fake, attr, value)
+            status, detail = _box_victim_row(fake)
+            if status != "FAIL" or f"cannot verify avery.kim (cii {code})" not in detail or "no record in CII" in detail:
+                wrong.append(f"{name}: {status}: {detail}")
+        check(f"every failed request ({len(rows)}: each getEndUser status with CII's no-record answer as its body, "
+              "the token endpoint's, a 200 the gate cannot read, transport errors): the box's victim row is FAIL "
+              "(cannot verify, naming the error), never WARN 'no record in CII'", not wrong, "; ".join(wrong)[:2000])
+    finally:
+        for logger, level in zip(quiet, levels):
+            logger.setLevel(level)
+        reset()
 
 
 def _misread_error(st, closed, opened):
@@ -1305,6 +1454,7 @@ def main() -> int:
         test_signer()
         test_lookup()
         test_cii_not_found_is_an_answer_only_by_its_shape()
+        test_no_cii_failure_is_no_such_user()
         test_victim_self_check_on_a_partial_answer()
         test_victim_self_check_on_a_refused_client()
         test_victim_self_check_on_a_lockout()

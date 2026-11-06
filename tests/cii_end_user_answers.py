@@ -11,10 +11,9 @@ tests/fixtures/cii_end_user_answers.json here, so the two try the same ones.
 on each of its ``messages``, then the ``errors`` it lists (two different codes
 on one error). A code the table holds is so tried in every place it covers,
 never only where an entry happened to put it. Given ``all_messages`` it puts
-them on every message of the table instead, the code-less ``error_messages``
-too, so no code the table holds and no message it holds go untried together
-(the parsers' own checks run that cross; the full lookups keep the section's
-messages).
+them on every message the table holds instead (the code-less
+``error_messages`` and the messages of its ``cases`` too), so no code the
+table holds and no message it holds go untried together.
 """
 from __future__ import annotations
 
@@ -35,12 +34,29 @@ def with_code(error: Dict[str, Any], place: str, code: Any) -> Dict[str, Any]:
 
 
 def all_messages(table: Dict[str, Any]) -> List[str]:
-    """Every message of the table, once each: the ``coded_errors`` section's
-    and the code-less ``error_messages``."""
+    """Every message the table holds, once each: the ``coded_errors``
+    section's, the code-less ``error_messages``, then every error message in
+    its ``cases`` and listed coded ``errors`` (tests/test_identity_gate.py
+    checks this against its own walk of the table)."""
     out: List[str] = []
-    for message in list(table["coded_errors"]["messages"]) + list(table["error_messages"]["messages"]):
-        if message not in out:
+
+    def add(message: Any) -> None:
+        if isinstance(message, str) and message not in out:
             out.append(message)
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            add(node.get("message"))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    for message in list(table["coded_errors"]["messages"]) + list(table["error_messages"]["messages"]):
+        add(message)
+    walk(table["cases"])
+    walk(table["coded_errors"]["errors"])
     return out
 
 

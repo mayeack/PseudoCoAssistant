@@ -457,12 +457,22 @@ class FakeCII:
         self.token_requests = 0
         self.shape = "strings"        # or "objects"
         self.graphql_error = ""
+        self.answer: Any = None        # (status, body) getEndUser sends instead, or an exception it raises
+        self.token_answer: Any = None  # (status, body) the token endpoint sends instead, or an exception
+
+    @staticmethod
+    def _bytes(body: Any) -> bytes:
+        return body if isinstance(body, bytes) else json.dumps(body).encode() if body is not None else b""
 
     def __call__(self, method, url, headers, body, timeout):
         doc = json.loads(body or b"{}")
         self.calls.append((method, url, dict(headers), doc))
         if url == CII["token_url"]:
             self.token_requests += 1
+            if isinstance(self.token_answer, BaseException):
+                raise self.token_answer
+            if self.token_answer is not None:
+                return self.token_answer[0], self._bytes(self.token_answer[1])
             if doc != {"client_id": CII["client_id"], "client_secret": CII["client_secret"],
                        "grant_type": "client_credentials"}:
                 return 401, b'{"error":"invalid_client"}'
@@ -470,6 +480,10 @@ class FakeCII:
         assert url == CII["api_url"], url
         if headers.get("Authorization") != "Bearer cii-access-token-abcdef123456":
             return 401, b"{}"
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        if self.answer is not None:
+            return self.answer[0], self._bytes(self.answer[1])
         if self.graphql_error:
             return 200, json.dumps({"errors": [{"message": self.graphql_error}]}).encode()
         query = " ".join(str(doc.get("query") or "").split())

@@ -69,10 +69,13 @@ def not_found(doc: Any) -> bool:
     No error at all is ``errors`` absent, null or an empty list; any other
     value carries one, a falsy one (``{}``, ``""``, 0, false) included, here
     and in ``parse_end_user``. tests/test_identity_personas.py pins this code
-    to the gate's copy, its first statement (every answer that carries an
-    error is turned away before anything reads it), and that
-    ``parse_end_user``'s first statement, under this rule, is the only
-    ``found: False`` the Mac's tools write."""
+    to the gate's copy and pins the path to it: its first statement turns
+    away every answer that carries an error before anything reads it,
+    ``parse_end_user``'s first statement (under this rule) is the only
+    ``found: False`` the Mac's tools write and nothing else returns before
+    its errors guard, and CIIClient hands it the transport's answer
+    untouched. It also sends every error the table holds and every failed
+    request through CIIClient.end_user and the self-check's row."""
     if not isinstance(doc, dict) or doc.get("errors") not in (None, []) or "data" not in doc:
         return False
     data = doc.get("data")
