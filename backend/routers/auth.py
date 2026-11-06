@@ -59,15 +59,27 @@ async def login_submit(
     )
 
 
+#: ``Sec-Fetch-Site`` values of a navigation this origin (or the user, from the
+#: address bar or a bookmark) started. Empty: a browser that sends no
+#: Fetch Metadata.
+_OWN_NAVIGATION = frozenset({"", "same-origin", "none"})
+
+
 @router.get("/logout")
 async def logout(request: Request):
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie(COOKIE_NAME, path="/")
     # Lab 5: signing out of the room also ends the Duo identity session, if
-    # this browser has one (a revoked tombstone included). The store call is
-    # blocking database work, so it runs in the threadpool.
+    # this browser has one (a revoked tombstone included), but only on a
+    # navigation the browser says this origin or the user started. A link on
+    # another site (another lab instance included: same-site, not
+    # same-origin) still signs the browser out of the room key, as it always
+    # did, and leaves the identity session and any tombstone alone: POST
+    # /auth/identity/logout refuses a cross-site sign-out for the same reason.
+    # The store call is blocking database work, so it runs in the threadpool.
     token = request.cookies.get(identity_mw.COOKIE_NAME)
-    if token:
+    own = request.headers.get("sec-fetch-site", "").strip().lower() in _OWN_NAVIGATION
+    if token and own:
         try:
             await run_in_threadpool(identity_store.end, token)
         except Exception:  # noqa: BLE001 - sign-out never fails; the cookie goes regardless

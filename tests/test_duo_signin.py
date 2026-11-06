@@ -394,6 +394,15 @@ def test_login_page() -> None:
         _configure()
 
     page = (ROOT / "frontend" / "login-duo.html").read_text()
+    # Under no-referrer a browser sends "Origin: null" on the page's own form
+    # posts (Fetch: append a request Origin header), so every one of them was
+    # refused as cross-site: Continue, Sign out and Unblock me all failed.
+    served = c.get("/login/duo", headers=H)
+    check("the sign-in page's referrer policy is same-origin (header and meta), never no-referrer",
+          served.headers.get("referrer-policy") == "same-origin"
+          and re.search(r'<meta name="referrer" content="same-origin">', page) is not None
+          and 'content="no-referrer"' not in page and identity_auth.REFERRER_POLICY == "same-origin",
+          str(served.headers.get("referrer-policy")))
     check("login-duo.html is self-contained (no external stylesheet, script, font or image)",
           re.search(r'(src|href)="https?://', page) is None and "@import" not in page
           and "url(" not in page and "<link" not in page)
@@ -456,9 +465,10 @@ def test_start() -> None:
           r.status_code == 303 and location(r) == "/login/duo?error=not_allowed", location(r))
     check("...no Duo prompt URL built and no state cookie",
           len(FakeDuo.issued) == n_issued and not cookie_header(r, STATE_COOKIE))
-    check("...one identity_signin_failure event (user, src, reason only)",
-          len(fails) == n_fail + 1 and fails[-1].get("user") == "mallory" and fails[-1].get("src") == "testclient"
-          and fails[-1].get("details") == {"reason": "not_allowed"}, str(fails[-1:])[:300])
+    check("...one identity_signin_failure event (src and reason; no user: the name is not on the allowlist)",
+          len(fails) == n_fail + 1 and "user" not in fails[-1] and fails[-1].get("enduser_id") is None
+          and fails[-1].get("src") == "testclient" and fails[-1].get("details") == {"reason": "not_allowed"},
+          str(fails[-1:])[:300])
     r = start(c, "bad name!")
     check("a malformed username -> error=invalid_username", location(r) == "/login/duo?error=invalid_username")
     r = start(c, "")
@@ -479,8 +489,8 @@ def test_start() -> None:
     check("state and nonce are fresh random values Duo accepts (16..1024 characters)",
           16 <= len(issued["state"]) <= 1024 and 16 < len(issued["nonce"] or "") < 1024
           and issued["state"] != issued["nonce"])
-    check("the redirect is no-store / no-referrer",
-          r.headers.get("cache-control") == "no-store" and r.headers.get("referrer-policy") == "no-referrer")
+    check("the redirect is no-store, referrer policy same-origin (no Referer to Duo)",
+          r.headers.get("cache-control") == "no-store" and r.headers.get("referrer-policy") == "same-origin")
     r2 = start(client(), "avery.kim", headers={"Host": "testserver", "X-Forwarded-Host": "evil.example"})
     check("the redirect URI never follows the request (X-Forwarded-Host ignored)",
           FakeDuo.instances[-1].redirect_uri == "https://testserver/auth/duo/callback"
@@ -493,6 +503,13 @@ def test_start() -> None:
     r = start(client(), "nina.osei", headers={"Origin": "https://testserver"})
     check("same-origin POST (Origin = PUBLIC_BASE_URL) goes through",
           location(r).startswith(f"https://{API_HOST}/"))
+    r = start(client(), "nina.osei", headers={"Origin": "null", "Sec-Fetch-Site": "same-origin"})
+    check("Origin null that the browser says came from this origin (Sec-Fetch-Site: same-origin) goes through",
+          location(r).startswith(f"https://{API_HOST}/"), location(r))
+    for site in ("cross-site", "same-site", "none"):
+        r = start(client(), "nina.osei", headers={"Origin": "null", "Sec-Fetch-Site": site})
+        check(f"Origin null with Sec-Fetch-Site {site} -> error=bad_origin",
+              location(r) == "/login/duo?error=bad_origin" and not cookie_header(r, STATE_COOKIE), location(r))
 
     def _bad_url(**kw):
         fake = FakeDuo(**kw)
@@ -523,6 +540,71 @@ def test_start() -> None:
               location(r) == "/login/duo?error=unavailable" and len(FakeDuo.instances) == n_inst)
     finally:
         _configure()
+
+
+def test_start_refusal_audit() -> None:
+    print("POST /auth/duo/start refusals: never raw input on an event, the gate first, bounded per window")
+    signin.reset()
+    _open_gate()
+    events = lambda: _audits("identity_signin_failure")  # noqa: E731
+    secrets_typed = ("482913", "123456789", "Tmp-Pa55word!x9")       # a passcode, a bypass code, a password
+    n = len(events())
+    for typed in secrets_typed:
+        start(client(), typed)
+    new = events()[n:]
+    blob = json.dumps(new)
+    audit_dir = Path(_TMP) / "logs"
+    on_disk = "".join(f.read_text(errors="replace") for f in audit_dir.rglob("*") if f.is_file())
+    db = dbmod.SessionLocal()
+    try:
+        from backend.models.db_models import AuditLog
+        db_users = [r.enduser_id for r in db.query(AuditLog).filter(AuditLog.action == "identity_signin_failure")]
+    finally:
+        db.close()
+    check("a passcode, a bypass code or a password typed as the username: refused, and written nowhere",
+          new and all("user" not in e and e.get("enduser_id") is None for e in new)
+          and not any(t.lower() in blob.lower() or t.lower() in on_disk.lower() for t in secrets_typed)
+          and not any(u and u.lower() in {t.lower() for t in secrets_typed} for u in db_users),
+          blob[:300])
+    check("...as not_allowed (digits) and invalid_username (a password), once each in the window",
+          sorted(e["details"]["reason"] for e in new) == ["invalid_username", "not_allowed"], blob[:300])
+
+    signin.reset()
+    n = len(events())
+    for _ in range(5):
+        start(client(), "victim.user\u200b")             # an allowlisted name plus an invisible character
+    new = events()[n:]
+    check("a malformed variant of an allowlisted name is never attributed to it, and audited once per window",
+          len(new) == 1 and new[0]["details"] == {"reason": "invalid_username"} and "user" not in new[0],
+          str(new)[:300])
+
+    signin.reset()
+    n = len(events())
+    for _ in range(6):
+        r = start(client(), "victim.user", headers={"Origin": "https://evil.example"})
+    new = events()[n:]
+    check("cross-site posts naming an allowlisted persona: refused every time, one event per window (no flood)",
+          location(r) == "/login/duo?error=bad_origin" and len(new) == 1 and new[0].get("user") == "victim.user"
+          and new[0]["details"] == {"reason": "bad_origin"}, str(new)[:300])
+    for _ in range(3):
+        start(client(), "not.a.persona", headers={"Origin": "https://evil.example"})
+    new = events()[n + 1:]
+    check("...one naming no persona: one event without a user", len(new) == 1 and "user" not in new[0], str(new))
+    check("...and a refusal that takes no rate slot never spends the persona's sign-in budget",
+          "victim.user" not in signin._starts)
+
+    signin.reset()
+    _configure(duo_enabled=False)
+    try:
+        n = len(events())
+        r = start(client(), "victim.user", headers={"Origin": "https://evil.example"})
+        r2 = start(client(), "482913")
+        check("DUO_ENABLED off: a cross-site or junk post is refused as unavailable and writes no identity event",
+              location(r) == location(r2) == "/login/duo?error=unavailable" and len(events()) == n,
+              f"{location(r)} {location(r2)}")
+    finally:
+        _configure()
+        signin.reset()
 
 
 def test_disabled_persona_refused() -> None:
@@ -890,6 +972,25 @@ def test_sign_out() -> None:
     r = client().get("/logout", headers=H, follow_redirects=False)
     check("GET /logout without an identity cookie: unchanged (no identity cookie header)",
           location(r) == "/login" and not cookie_header(r, COOKIE))
+    for site in ("cross-site", "same-site"):
+        c = revoked_browser(f"CODE-OUT-XS-{site}")
+        r = c.get("/logout", headers={**H, "Sec-Fetch-Site": site}, follow_redirects=False)
+        check(f"GET /logout from another site (Sec-Fetch-Site {site}): the room cookie goes as before, the "
+              "identity session and its tombstone stay",
+              location(r) == "/login" and "max-age=0" in attrs(cookie_header(r, "md_access"))
+              and not cookie_header(r, COOKIE) and len(rows("victim.user")) == 1, str(raw_cookies(r)))
+        r = c.get("/logout", headers={**H, "Sec-Fetch-Site": "same-origin"}, follow_redirects=False)
+        check("...while the app's own Sign out link (same-origin) ends it",
+              "max-age=0" in attrs(cookie_header(r, COOKIE)) and rows("victim.user") == [], str(raw_cookies(r)))
+    c = revoked_browser("CODE-OUT-TYPED")
+    r = c.get("/logout", headers={**H, "Sec-Fetch-Site": "none"}, follow_redirects=False)
+    check("GET /logout typed into the address bar (Sec-Fetch-Site none) ends it too",
+          "max-age=0" in attrs(cookie_header(r, COOKIE)) and rows("victim.user") == [])
+    c = revoked_browser("CODE-OUT-NULL")
+    r = c.post("/auth/identity/logout", headers={**H, "Origin": "null", "Sec-Fetch-Site": "same-origin"},
+               data={"next": "/app"}, follow_redirects=False)
+    check("the sign-in page's own Continue form with Origin null but Sec-Fetch-Site same-origin: signed out",
+          r.status_code == 303 and location(r) == "/app" and rows("victim.user") == [], f"{r.status_code}")
 
 
 # --------------------------------------------------------------------------- the code stays out of telemetry and logs
@@ -2171,6 +2272,7 @@ def main() -> int:
         test_login_page()
         test_login_unchanged()
         test_start()
+        test_start_refusal_audit()
         test_disabled_persona_refused()
         test_rate_limit()
         test_callback_success()

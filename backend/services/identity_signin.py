@@ -14,6 +14,15 @@ The flow, and the rules that keep it honest:
   takes a rate slot, and the per-username table (bounded, least recently used
   evicted first) only ever holds allowlisted names: no flood of made-up names
   can push a real user's spent budget out of it.
+  Its refusals, in order: the ``duo_signin`` gate closed (``unavailable``,
+  never audited, so with Duo sign-in off nothing here writes an identity
+  event), a cross-site post (``bad_origin``), a malformed name, a name not on
+  the allowlist, the rate limit. A refusal's audit event names the user only
+  once the name has matched the allowlist: anything else typed into the
+  Username box (a passcode, a bypass code, a password) is never written
+  anywhere. A refusal that takes no rate slot is audited at most once per
+  reason and recorded name in each rate window, so no loop of posts can flood
+  the audit trail or pin forged failures on a persona.
   The state and an OIDC nonce are kept here for 5 minutes, single use, with
   the username they were issued for. The route binds the state to a cookie.
 - ``complete(...)`` requires the callback's state to equal the cookie's
@@ -112,9 +121,11 @@ ERROR_CODES = frozenset({
 
 class SigninError(Exception):
     """A refused sign-in. ``code`` is one of ``ERROR_CODES``; ``username`` is the
-    normalized username the attempt was for, when known (for the audit event).
-    ``audit`` is False when the failure must not write an audit event (the
-    gate is closed, or a rate-limited name was already recorded this window)."""
+    normalized username the attempt was for, for the audit event: only a name
+    that matched ``IDENTITY_ALLOWED_USERS`` (at the start, or for the pending
+    sign-in), never raw input. ``audit`` is False when the failure must not
+    write an audit event (the gate is closed, or the same refusal was already
+    recorded this window)."""
 
     def __init__(self, code: str, username: Optional[str] = None, *, audit: bool = True) -> None:
         super().__init__(code)
@@ -169,6 +180,9 @@ _pending: "OrderedDict[str, PendingSignin]" = OrderedDict()
 # Per-username rate state, least recently used first (evicted one at a time).
 _starts: "OrderedDict[str, Deque[float]]" = OrderedDict()
 _rate_refusal_logged: "OrderedDict[str, float]" = OrderedDict()
+# When each refusal that takes no rate slot was last audited, by "reason:name"
+# (the name only for an allowlisted one): bounded like the tables above.
+_refusals_logged: "OrderedDict[str, float]" = OrderedDict()
 
 
 # --------------------------------------------------------------------------- the Duo client
@@ -519,26 +533,52 @@ def _take_rate_slot(username: str) -> Tuple[bool, bool]:
         return False, first
 
 
+def _first_refusal(code: str, name: Optional[str]) -> bool:
+    """Whether a refusal that takes no rate slot (``bad_origin``,
+    ``invalid_username``, ``not_allowed``) writes an audit event: only the
+    first of its reason and recorded name in each ``RATE_LIMIT_WINDOW_S``."""
+    key = f"{code}:{name or ''}"
+    now = time.monotonic()
+    with _lock:
+        logged = _refusals_logged.get(key)
+        if logged is not None and now - logged <= RATE_LIMIT_WINDOW_S:
+            return False
+        _refusals_logged[key] = now
+        _refusals_logged.move_to_end(key)
+        while len(_refusals_logged) > _RATE_KEYS_MAX:
+            _refusals_logged.popitem(last=False)
+        return True
+
+
 def reset() -> None:
     """Forget pending sign-ins and rate-limit history (tests)."""
     with _lock:
         _pending.clear()
         _starts.clear()
         _rate_refusal_logged.clear()
+        _refusals_logged.clear()
 
 
 # --------------------------------------------------------------------------- the flow
-def begin(username: Any, *, client_address: Optional[str] = None) -> Tuple[str, str]:
+def begin(username: Any, *, client_address: Optional[str] = None,
+          cross_site: bool = False) -> Tuple[str, str]:
     """Start a sign-in. Returns ``(Duo prompt URL, state)``; the caller binds
-    the state to this browser with the state cookie. Raises ``SigninError``."""
+    the state to this browser with the state cookie. Raises ``SigninError``
+    (``cross_site``: the route found the post came from another site's page;
+    the refusals and their audit rules are in the module docstring)."""
     name = identity_store.normalize_username(username)[:_USERNAME_MAX + 1]
     if not gate().get("enabled"):
         raise SigninError(UNAVAILABLE, audit=False)
+    allowed_users = settings.identity_allowed_users_set
+    # The only name a refusal may record: one on the allowlist, never raw input.
+    listed = name if _USERNAME_RE.fullmatch(name) and name in allowed_users else None
+    if cross_site:
+        raise SigninError(BAD_ORIGIN, listed, audit=_first_refusal(BAD_ORIGIN, listed))
     if not _USERNAME_RE.fullmatch(name):
-        raise SigninError(INVALID_USERNAME, name)
+        raise SigninError(INVALID_USERNAME, audit=_first_refusal(INVALID_USERNAME, None))
     # The allowlist first: a name that is not on it never takes a rate slot.
-    if name not in settings.identity_allowed_users_set:
-        raise SigninError(NOT_ALLOWED, name)
+    if listed is None:
+        raise SigninError(NOT_ALLOWED, audit=_first_refusal(NOT_ALLOWED, None))
     allowed, audit = _take_rate_slot(name)
     if not allowed:
         raise SigninError(RATE_LIMITED, name, audit=audit)

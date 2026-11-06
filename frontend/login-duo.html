@@ -3,7 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="referrer" content="no-referrer">
+  <!-- same-origin, never no-referrer: under no-referrer the browser sends
+       "Origin: null" on this page's own form posts, and the server refuses
+       every one as cross-site (identity_auth.REFERRER_POLICY). -->
+  <meta name="referrer" content="same-origin">
   <title>Sign in with Duo · PseudoCo Assistant</title>
   <!-- Self-contained: no external fonts, scripts or images. Served by
        backend/routers/identity_auth.py (_render_login), which fills the gate

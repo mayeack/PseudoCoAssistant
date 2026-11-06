@@ -90,7 +90,13 @@ SIGNED_IN_REDIRECT = "/app?signin=ok"
 SIGNED_OUT_CONTINUE = "/app"
 #: Notices the sign-in page shows besides an error code (?expired=1 etc.).
 NOTICE_FLAGS = ("expired", "revoked", "signed_out")
-_NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+#: ``same-origin``, never ``no-referrer``: under ``no-referrer`` a browser sends
+#: ``Origin: null`` on the page's own form posts (the Fetch standard's origin
+#: rule for a non-CORS POST), and every one of them is then refused as
+#: cross-site. ``same-origin`` still sends no Referer to Duo or any other site.
+#: frontend/login-duo.html's ``<meta name="referrer">`` says the same.
+REFERRER_POLICY = "same-origin"
+_NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": REFERRER_POLICY}
 
 
 # --------------------------------------------------------------------------- helpers
@@ -130,12 +136,18 @@ def _canonical_redirect(request: Request) -> Optional[str]:
 def _cross_site(request: Request) -> bool:
     """True for a POST another site's page sent (an ``Origin`` that is neither
     this instance's canonical host nor the host the request was sent to). A
-    missing ``Origin`` passes: browsers send it on every cross-site POST."""
+    missing ``Origin`` passes: browsers send it on every cross-site POST.
+
+    ``Origin: null`` (an opaque origin: a sandboxed frame, a ``data:`` page,
+    or a page whose referrer policy is ``no-referrer``) is cross-site unless
+    the browser itself says the request came from this origin:
+    ``Sec-Fetch-Site: same-origin``, which no page can set and which an opaque
+    origin never gets."""
     origin = request.headers.get("origin")
     if not origin:
         return False
     if origin.strip().lower() == "null":
-        return True
+        return request.headers.get("sec-fetch-site", "").strip().lower() != "same-origin"
     allowed = {h for h in (_canonical_host(), _host(request.headers.get("host", ""))) if h}
     return _host(urlsplit(origin.strip()).netloc) not in allowed
 
@@ -198,10 +210,9 @@ def duo_start(request: Request, username: str = Form("")):
         return RedirectResponse(target, status_code=303, headers=_NO_STORE)
     client = _client_address(request)
     try:
-        if _cross_site(request):
-            raise SigninError(identity_signin.BAD_ORIGIN,
-                              identity_store.normalize_username(username)[:129] or None)
-        url, state = identity_signin.begin(username, client_address=client)
+        # begin() refuses a closed gate first (unaudited: with Duo sign-in off
+        # this route writes no identity event), then a cross-site post.
+        url, state = identity_signin.begin(username, client_address=client, cross_site=_cross_site(request))
     except SigninError as err:
         identity_signin.record_failure(err, client_address=client)
         return _to_login(error=err.code)

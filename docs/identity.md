@@ -204,6 +204,27 @@ When a block or a revocation happens, the banner explains it and shows an
   enters the rate table, and a full table evicts the least recently used name,
   one at a time and never all at once. A flood of made-up names therefore
   can't reset a real user's spent budget.
+- **What a refused start records.** `POST /auth/duo/start` checks the
+  `duo_signin` gate first, so with Duo sign-in off it writes no identity
+  event at all. An `identity_signin_failure` names the user only once the
+  name has matched `IDENTITY_ALLOWED_USERS`: anything else typed into the
+  Username box (a passcode, a bypass code, a password) is never written to an
+  event, the database or a log. A refusal that takes no rate slot (a
+  cross-site post, a malformed or unlisted name) is audited at most once per
+  reason and name every 5 minutes, so no loop of posts can flood the audit
+  trail or pin forged failures on a persona.
+- **Same-origin posts only.** The sign-in start, sign-out and Unblock me
+  refuse a post that another site's page sent, by its `Origin`. The sign-in
+  page's referrer policy is `same-origin` (header and `<meta>`), never
+  `no-referrer`: under `no-referrer` a browser sends `Origin: null` on the
+  page's own form posts, and every one of them would be refused. `Origin:
+  null` passes only with `Sec-Fetch-Site: same-origin`, which no page can
+  set. `GET /logout` ends the identity session only on a navigation the
+  browser says came from this origin or from the address bar
+  (`Sec-Fetch-Site` `same-origin` or `none`, or no Fetch Metadata at all). A
+  link on another site, another lab instance included, still signs the
+  browser out of the room key, and leaves the identity session and any
+  tombstone alone.
 - **Duo's health, on a timer.** A passing health check opens the
   `duo_signin` gate, and only three failed checks in a row close it again,
   so one failed check on the timer never does. The check runs on a daemon
@@ -310,6 +331,9 @@ with the room access key can rewrite those.
     blanked from later lines, nothing is compiled per record, and a log call
     made while redacting never waits on a lock
   - the allowlist before the rate limit, and least-recently-used eviction
+  - what a refused start records (never the typed text, no event with Duo
+    sign-in off, one per reason and name per window), the sign-in page's
+    `same-origin` referrer policy, and `GET /logout` from another site
   - a hung call giving its slot back, and the health check not stacking
   - the gate closing only after three failed checks in a row, the timer
     reopening it, and a callback finishing while it is closed
