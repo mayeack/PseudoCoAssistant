@@ -20,6 +20,9 @@ sys.path.insert(0, str(ROOT))
 
 import backend.config  # noqa: E402  (sets CA bundle etc.)
 from backend.config import settings  # noqa: E402
+import identity_isolation  # noqa: E402  (no real Duo / CII, whatever .env holds)
+
+identity_isolation.isolate(settings)
 
 # Ensure the access gate is exercised even if .env has no ACCESS_KEY.
 KEY = settings.access_key or "test-access-key"

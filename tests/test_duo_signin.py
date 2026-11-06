@@ -1232,6 +1232,21 @@ class _RootGrab(logging.Handler):
 logging.getLogger().addHandler(_RootGrab(level=logging.DEBUG))
 
 
+def test_every_app_suite_is_isolated() -> None:
+    print("every suite that starts the app keeps it off any real Duo and CII")
+    starts_app = re.compile(r"TestClient\(|from backend\.main import|import backend\.main|from backend import main\b")
+    missing = []
+    for path in sorted((ROOT / "tests").glob("test_*.py")):
+        text = path.read_text(encoding="utf-8")
+        if starts_app.search(text) and "identity_isolation.isolate(settings)" not in text:
+            missing.append(path.name)
+    # Startup runs identity_signin.start_health_check(): with the dev copy's
+    # .env (DUO_ENABLED and the Web SDK keys) a suite that skipped isolate()
+    # would send a signed health check to the live tenant on every run, and
+    # only run_all.sh's exported blanks would stop it.
+    check("each suite that starts the app calls identity_isolation.isolate(settings)", not missing, str(missing))
+
+
 def test_no_leaks() -> None:
     print("no Duo code or Web SDK secret in any log line, log file or built event")
     blob = json.dumps([e for _, e in _built], default=str)
@@ -2335,6 +2350,7 @@ def main() -> int:
         test_health_gate_three_failures()
         test_callback_not_gated()
         test_no_leaks()
+        test_every_app_suite_is_isolated()
         refused = identity_isolation.requests_refused()
         check("no identity request reached a real Duo or CII (each was refused and recorded)", not refused, str(refused))
     finally:
