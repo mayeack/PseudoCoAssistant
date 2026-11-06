@@ -1392,39 +1392,54 @@ def victim_clashes(root: Path, ws: Workshop, now: float) -> List[str]:
     victim. Plan 4.3 refuses a room rather than share a victim: one room's
     containment (claim 4) would end the other room's victim sessions and
     void its cards' victim codes, and lab5-setup would report that as the
-    other room's own containment. A workshop counts while `down` has not run
-    for it (a tunnel recorded and not deleted, a .env not reverted, a revert
-    pending), or while it holds victim bypass codes that have not expired."""
+    other room's own containment.
+
+    A workshop counts while attendees can still reach one of its boxes (a
+    tunnel or DNS record recorded and not deleted: `down` deletes them from
+    this Mac even when the box itself is gone), or while Duo may still hold
+    working victim codes from its cards (``bypass.live_codes``). A revert
+    still pending on a box Show destroyed does not count, and nor do codes
+    `down` deleted: neither can reach a room any more."""
     out: List[str] = []
     folder = Path(root) / "workshops"
     if not folder.is_dir():
         return out
     for other in sorted(d for d in folder.iterdir() if d.is_dir() and d.name != ws.name):
-        why = ""
-        if _read_state(other / "workshop.json").get("victim") == ws.victim:
-            for path in sorted((other / "boxes").glob("*.json")):
-                rec = _read_state(path)
-                tunnel, env = rec.get("tunnel") or {}, rec.get("env") or {}
-                if (tunnel.get("id") and not tunnel.get("deleted")) or (env and not env.get("reverted")) \
-                        or rec.get("revert_pending"):
-                    why = "it is still up (`lab5-setup down` has not run for it)"
-                    break
-        if not why:
-            for path in sorted((other / "participants").glob("*.json")):
-                batches = _read_state(path).get("bypass_batches")
-                for batch in batches if isinstance(batches, list) else []:
-                    until = participants.parse_time(str(batch.get("valid_until") or "")) \
-                        if isinstance(batch, dict) else None
-                    if until is not None and until > now and ws.victim in (batch.get("personas") or []):
-                        why = f"its cards carry bypass codes for {ws.victim} until {participants.minute(until)}"
-                        break
-                if why:
-                    break
+        if _read_state(other / "workshop.json").get("victim") != ws.victim:
+            continue
+        reachable = [path.stem for path in sorted((other / "boxes").glob("*.json"))
+                     if any((rec.get(key) or {}).get("id") and not (rec.get(key) or {}).get("deleted")
+                            for rec in (_read_state(path),) for key in ("tunnel", "dns"))]
+        deletable: List[float] = []
+        undeletable: List[float] = []
+        for path in sorted((other / "participants").glob("*.json")):
+            batches = _read_state(path).get("bypass_batches")
+            for batch in batches if isinstance(batches, list) else []:
+                if isinstance(batch, dict):
+                    can, cannot = bypass.live_codes(batch, ws.victim, now)
+                    deletable += [can] if can is not None else []
+                    undeletable += [cannot] if cannot is not None else []
+        why: List[str] = []
+        if reachable:
+            why.append(f"its boxes are still reachable (the tunnel or DNS record of instance(s) "
+                       f"{', '.join(reachable)} is not deleted)")
+        if deletable:
+            why.append(f"Duo still holds bypass codes for {ws.victim} from its cards, valid until "
+                       f"{participants.minute(max(deletable))}")
+        if not why and not undeletable:
+            continue
+        fixes: List[str] = []
         if why:
-            out.append(f"room.victim {ws.victim} is also the victim of workshop {other.name}, and {why}. Every room "
-                       f"needs its own victim (plan 4.3): one room's containment would end the other's victim "
-                       f"sessions and codes. Use another victim (room.fallback, say), or run `lab5-setup down` with "
-                       f"{other.name}'s workshop file first")
+            fixes.append(f"run `lab5-setup down` with {other.name}'s workshop file first")
+        if undeletable:
+            why.append(f"Duo may still hold bypass codes for {ws.victim} from its cards whose ids this tool "
+                       f"never learned, so nothing can delete them: they expire at "
+                       f"{participants.minute(max(undeletable))}")
+            fixes.append(f"wait until {participants.minute(max(undeletable))}")
+        out.append(f"room.victim {ws.victim} is also the victim of workshop {other.name}, and "
+                   f"{'; and '.join(why)}. Every room needs its own victim (plan 4.3): one room's containment "
+                   f"would end the other's victim sessions and codes. Use another victim (room.fallback, say), "
+                   f"or {', or '.join(fixes)}")
     return out
 
 

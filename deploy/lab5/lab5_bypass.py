@@ -518,6 +518,30 @@ def _unknown_entries(batch: Dict[str, Any]) -> List[Tuple[str, Optional[float]]]
     return out
 
 
+def live_codes(batch: Dict[str, Any], persona: str, now: float) -> Tuple[Optional[float], Optional[float]]:
+    """Whether Duo may still hold working codes for ``persona`` from one
+    recorded batch: ``(deletable_until, undeletable_until)``. The first is the
+    batch's ``valid_until`` while ids recorded for the persona are still
+    there to delete (never deleted, or a delete that failed), or while the
+    batch kept no ids at all; ``down`` can still delete those. The second is
+    the latest expiry of the persona's creates whose ids this tool never
+    learned; nothing deletes those, they only expire. Each is None when it
+    does not apply. Codes ``down`` deleted, and a batch past its time, count
+    for nothing; ``revoked_at`` alone is not the test, since a card whose
+    batch was only partly deleted is already dead on paper while Duo still
+    holds the rest."""
+    until = participants.parse_time(str(batch.get("valid_until") or ""))
+    deletable: Optional[float] = None
+    if until is not None and until > now:
+        if persona in (batch.get("personas") or []) and "codes" not in batch:
+            deletable = until                  # a batch that kept no ids: nothing was deleted
+        elif any(e.get("persona") == persona and e.get("ids") for e in _entries(batch)):
+            deletable = until
+    # A lost create's own expiry can run past the batch's (LOST_MARGIN_S).
+    unknown = [t for name, t in _unknown_entries(batch) if name == persona and t is not None and t > now]
+    return deletable, (max(unknown) if unknown else None)
+
+
 def _why_failed(exc: Lab5Error) -> str:
     text = str(exc)
     if isinstance(exc, DuoError) and exc.status == 400:
