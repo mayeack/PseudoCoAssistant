@@ -22,6 +22,7 @@ Run:  .venv/bin/python tests/test_identity_personas.py
 from __future__ import annotations
 
 import ast
+import copy
 import io
 import json
 import os
@@ -547,6 +548,53 @@ def test_cii_client() -> None:
 
     check("the default query asks what the app's gate asks (getEndUser -> endUserDetails), operation name aside",
           selection(cii.END_USER_QUERY) == selection(app_query), f"{cii.END_USER_QUERY!r} vs {app_query!r}")
+
+    # CII's "no such user" is one rule in two copies (the Mac's tool cannot
+    # import the app). Pin them together: the rule's code, modulo names, and
+    # every constant it reads, so a one-sided edit fails here even where the
+    # shared answers below do not reach it.
+    app_tree, mac_tree = ast.parse(app_src), ast.parse((ROOT / "deploy" / "lab5" / "lab5_cii.py").read_text())
+
+    def assigned(tree, name):
+        return next(node.value for node in ast.walk(tree)
+                    if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == name for t in node.targets))
+
+    def function(tree, name):
+        return next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == name)
+
+    def canonical(fn):
+        """The function's body without its docstring, every name renamed by
+        first use (so Mapping/dict and each side's own names compare equal)."""
+        body = fn.body[1:] if (fn.body and isinstance(fn.body[0], ast.Expr)
+                               and isinstance(fn.body[0].value, ast.Constant)) else fn.body
+        names: Dict[str, str] = {}
+        for a in fn.args.args:
+            names.setdefault(a.arg, f"v{len(names)}")
+
+        class Rename(ast.NodeTransformer):
+            def visit_Name(self, node):
+                return ast.Name(id=names.setdefault(node.id, f"v{len(names)}"), ctx=node.ctx)
+
+        return ast.dump(ast.Module(body=[Rename().visit(copy.deepcopy(s)) for s in body], type_ignores=[]))
+
+    app_re = assigned(app_tree, "_CII_USER_NOT_FOUND_RE")
+    pins = [
+        ("the not-found codes", ast.literal_eval(assigned(app_tree, "CII_NOT_FOUND_CODES").args[0]),
+         set(cii.NOT_FOUND_CODES)),
+        ("the wording pattern", ast.literal_eval(app_re.args[0]), cii._USER_NOT_FOUND_RE.pattern),
+        ("the pattern's flags", [ast.unparse(a) for a in app_re.args[1:]],
+         ["re.IGNORECASE"] if cii._USER_NOT_FOUND_RE.flags & ~re.UNICODE == re.IGNORECASE else ["?"]),
+        ("where the error may sit", ast.literal_eval(assigned(app_tree, "_CII_NOT_FOUND_PATHS")), cii.NOT_FOUND_PATHS),
+        ("how much of a message is read", ast.literal_eval(assigned(app_tree, "CII_MESSAGE_SCAN_MAX")),
+         cii.MESSAGE_SCAN_MAX),
+        ("the rule's code (_cii_not_found / not_found)", canonical(function(app_tree, "_cii_not_found")),
+         canonical(function(mac_tree, "not_found"))),
+        ("how an error's codes are read (_cii_error_codes / _error_codes)",
+         canonical(function(app_tree, "_cii_error_codes")), canonical(function(mac_tree, "_error_codes"))),
+    ]
+    for what, app_value, mac_value in pins:
+        check(f"CII 'no such user', {what}: the self-check's copy is the gate's (identity_lookup)",
+              app_value == mac_value, f"{app_value!r} vs {mac_value!r}"[:400])
     fake.users["q@pseudocoassistant.com"] = {"trust": "QUESTIONABLE", "failing": ["MFA Flood"]}
     info = client.end_user("q@pseudocoassistant.com")
     check("a persona CII rates QUESTIONABLE and failing MFA Flood reads as such (the nested shape)",

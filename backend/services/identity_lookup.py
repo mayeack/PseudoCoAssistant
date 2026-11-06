@@ -101,11 +101,14 @@ TOKEN_REFRESH_MARGIN_S = 300.0
 #: The token's life when the token endpoint does not say (CII documents 10 h).
 TOKEN_DEFAULT_LIFETIME_S = 10 * 3600.0
 
-#: GraphQL error codes (``extensions.code``, or AppSync's ``errorType``) that
-#: may sit on CII's "no such user" error, compared upper-cased with everything
-#: but letters and digits removed (``NOT_FOUND``, ``NotFound``, ``not-found``
-#: all read NOTFOUND). Any other code is not that answer.
+#: GraphQL error codes that may sit on CII's "no such user" error, compared
+#: upper-cased with everything but letters and digits removed (``NOT_FOUND``,
+#: ``NotFound``, ``not-found`` all read NOTFOUND). Every code the error carries
+#: (``extensions.code``, ``extensions.errorType``, AppSync's ``errorType``) must
+#: be one of these: any other code is not that answer.
 CII_NOT_FOUND_CODES = frozenset({"NOTFOUND", "USERNOTFOUND", "ENDUSERNOTFOUND"})
+#: How much of an error's message the wording is looked for in.
+CII_MESSAGE_SCAN_MAX = 1000
 #: The wording of a "no such user" error: a sentence about the user itself (an
 #: end user, or its record, account, profile or details, with its login quoted
 #: or as an address if any) that is not found or does not exist, or "no such
@@ -484,10 +487,13 @@ def _cii_query(login: str, token: str) -> Tuple[Optional[httpx.Response], Option
     return response, None
 
 
-def _error_code_of(error: Mapping[str, Any]) -> str:
+def _cii_error_codes(error: Mapping[str, Any]) -> List[str]:
+    """Every code a GraphQL error carries (``extensions.code``,
+    ``extensions.errorType``, AppSync's ``errorType``), normalized as
+    ``CII_NOT_FOUND_CODES`` is."""
     extensions = error.get("extensions") if isinstance(error.get("extensions"), Mapping) else {}
-    code = extensions.get("code") or extensions.get("errorType") or error.get("errorType") or ""
-    return re.sub(r"[^A-Z0-9]+", "", str(code).upper())
+    codes = (extensions.get("code"), extensions.get("errorType"), error.get("errorType"))
+    return [re.sub(r"[^A-Z0-9]+", "", str(code).upper()) for code in codes if code]
 
 
 #: Where a CII "no such user" error may sit: on ``getEndUser`` itself, or on
@@ -508,15 +514,17 @@ def _cii_not_found(body: Any) -> bool:
     details is the answer; a null ``data`` is not. With errors, every one must
     sit on ``getEndUser`` or its ``endUserDetails`` (``_CII_NOT_FOUND_PATHS``),
     at or below where the details stop, say that the user was not found
-    (``_CII_USER_NOT_FOUND_RE``), and carry no code or one of
-    ``CII_NOT_FOUND_CODES``. Anything else is not an answer: a request-level
+    (``_CII_USER_NOT_FOUND_RE``, on its first ``CII_MESSAGE_SCAN_MAX``
+    characters), and carry no code other than ``CII_NOT_FOUND_CODES``.
+    Anything else is not an answer: a request-level
     error (no ``data``: a query the schema rejects), an error at another path
     or none (a deeper partial failure, a tenant or permission problem), or
     other wording.
 
-    ``deploy/lab5/lab5_cii.py`` applies the same rule on the Mac;
-    ``tests/fixtures/cii_end_user_answers.json`` holds the cases both must
-    read the same way."""
+    ``deploy/lab5/lab5_cii.py`` applies the same rule on the Mac, and
+    tests/test_identity_personas.py pins the two copies (code and constants)
+    together; ``tests/fixtures/cii_end_user_answers.json`` holds the cases
+    both must read the same way."""
     if not isinstance(body, Mapping) or "data" not in body:
         return False
     data, errors = body.get("data"), body.get("errors")
@@ -543,10 +551,9 @@ def _cii_not_found(body: Any) -> bool:
         path = error.get("path")
         if path not in _CII_NOT_FOUND_PATHS or len(path) < stop:
             return False
-        if not _CII_USER_NOT_FOUND_RE.search(str(error.get("message") or "")[:1000]):
+        if not _CII_USER_NOT_FOUND_RE.search(str(error.get("message") or "")[:CII_MESSAGE_SCAN_MAX]):
             return False
-        code = _error_code_of(error)
-        if code and code not in CII_NOT_FOUND_CODES:
+        if any(code not in CII_NOT_FOUND_CODES for code in _cii_error_codes(error)):
             return False
     return True
 

@@ -382,6 +382,197 @@
       }
     },
     {
+      "name": "a USER_NOT_FOUND code (extensions.code)",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ],
+            "extensions": {
+              "code": "USER_NOT_FOUND"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "an END_USER_NOT_FOUND code (extensions.code)",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ],
+            "extensions": {
+              "code": "END_USER_NOT_FOUND"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a not-found code written another way (not-found)",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ],
+            "extensions": {
+              "code": "not-found"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "errorType NotFound in extensions",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ],
+            "extensions": {
+              "errorType": "NotFound"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "AppSync's errorType UserNotFound",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ],
+            "errorType": "UserNotFound"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AppSync's errorType Unauthorized, with the right words",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ],
+            "errorType": "Unauthorized"
+          }
+        ]
+      }
+    },
+    {
+      "name": "errorType Unauthorized in extensions, with the right words",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ],
+            "extensions": {
+              "errorType": "Unauthorized"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a not-found code next to an Unauthorized errorType (every code must say not found)",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ],
+            "extensions": {
+              "code": "NOT_FOUND"
+            },
+            "errorType": "Unauthorized"
+          }
+        ]
+      }
+    },
+    {
+      "name": "the right words within the first 1000 characters of a long message",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found. Details: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "path": [
+              "getEndUser"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "the right words only after the first 1000 characters",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "Lookup failed: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx. End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ]
+          }
+        ]
+      }
+    },
+    {
       "name": "a not-found error on getEndUser while getEndUser is an object",
       "expect": "unavailable",
       "body": {

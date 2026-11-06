@@ -17,8 +17,9 @@ details stop at a present, null ``endUserDetails``, at ``getEndUser`` or at
 ``data``. With no error, a null ``getEndUser`` or null details is the answer
 (a null ``data`` is not). With errors, every one sits on ``getEndUser`` or
 ``endUserDetails``, at or below where the details stop, says the user was not
-found (``_USER_NOT_FOUND_RE``), and carries no code or a not-found one
-(``NOT_FOUND_CODES``). Any other answer with an error is a failed query, never
+found (``_USER_NOT_FOUND_RE``, on its first ``MESSAGE_SCAN_MAX`` characters),
+and carries no code other than ``NOT_FOUND_CODES`` (``extensions.code``,
+``extensions.errorType``, AppSync's ``errorType``). Any other answer with an error is a failed query, never
 "not in CII yet", whatever its details say.
 ``tests/fixtures/cii_end_user_answers.json`` holds the cases the two must read
 the same way. Spikes S5/S6 confirm the shape on the tenant; personas.yaml ``cii.end_user_query``
@@ -48,6 +49,7 @@ GOOD_TRUST = ("TRUSTED", "FAVORABLE", "NEUTRAL")
 # CII's "no such user" (the gate's rule: backend/services/identity_lookup._cii_not_found).
 NOT_FOUND_PATHS = (["getEndUser"], ["getEndUser", "endUserDetails"])
 NOT_FOUND_CODES = frozenset({"NOTFOUND", "USERNOTFOUND", "ENDUSERNOTFOUND"})
+MESSAGE_SCAN_MAX = 1000
 _USER_NOT_FOUND_RE = re.compile(
     # A sentence whose subject is the user itself: "<end> user [record|account|...] [with login] [<login>]
     # [is|was|has] not (been) found / does not exist".
@@ -80,10 +82,12 @@ def _check_name(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _error_code(error: Dict[str, Any]) -> str:
+def _error_codes(error: Dict[str, Any]) -> List[str]:
+    """Every code a GraphQL error carries, normalized (the gate's
+    ``_cii_error_codes``)."""
     extensions = error.get("extensions") if isinstance(error.get("extensions"), dict) else {}
-    code = extensions.get("code") or extensions.get("errorType") or error.get("errorType") or ""
-    return re.sub(r"[^A-Z0-9]+", "", str(code).upper())
+    codes = (extensions.get("code"), extensions.get("errorType"), error.get("errorType"))
+    return [re.sub(r"[^A-Z0-9]+", "", str(code).upper()) for code in codes if code]
 
 
 def not_found(doc: Any) -> bool:
@@ -92,7 +96,7 @@ def not_found(doc: Any) -> bool:
     null ``endUserDetails``; with no error a null ``getEndUser`` or null details
     is the answer; every error sits on ``getEndUser`` or ``endUserDetails``, at or
     below where the details stop, says the user was not found, and carries no
-    code or a not-found one."""
+    code but a not-found one."""
     if not isinstance(doc, dict) or "data" not in doc:
         return False
     data, errors = doc.get("data"), doc.get("errors")
@@ -118,10 +122,9 @@ def not_found(doc: Any) -> bool:
         path = error.get("path")
         if path not in NOT_FOUND_PATHS or len(path) < stop:
             return False
-        if not _USER_NOT_FOUND_RE.search(str(error.get("message") or "")[:1000]):
+        if not _USER_NOT_FOUND_RE.search(str(error.get("message") or "")[:MESSAGE_SCAN_MAX]):
             return False
-        code = _error_code(error)
-        if code and code not in NOT_FOUND_CODES:
+        if any(code not in NOT_FOUND_CODES for code in _error_codes(error)):
             return False
     return True
 
