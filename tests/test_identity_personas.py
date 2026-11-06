@@ -380,6 +380,8 @@ def test_takeover() -> None:
         rc, out = w.pa("takeover", "--victim", "avery.kim", "--dry-run")
         check("--dry-run sends nothing", rc == 0 and len(w.duo.calls) == n, out)
         w.clock.slept.clear()
+        # The counter the wrong passcodes are drawn against: the one after step 1's sign-in.
+        counter = int((lpers.PersonaState(w.root).counter("avery.kim") or {}).get("next", 0)) + 1
         rc, out = w.pa("takeover", "--victim", "avery.kim")
         check("takeover exits 0", rc == 0, out)
         auths = [a for a in w.auth_calls() if a["username"] == "avery.kim"]
@@ -390,8 +392,13 @@ def test_takeover() -> None:
               5 <= len(wrong) <= 9 and all(a["ipaddr"] == foreign.ipaddr and a["hostname"] == foreign.hostname
                                             for a in wrong), str(len(wrong)))
         secret = w.duo.token_secret("pseudoco-persona-avery.kim")
-        valid = {duo.hotp(secret, c) for c in range(0, 300)}
-        check("the wrong passcodes are never valid codes", all(a["passcode"] not in valid for a in wrong))
+        # wrong_passcode keeps clear of every code within 200 counters either side
+        # (wider than Duo's look-ahead); an older code is no risk, since Duo never
+        # accepts a counter it has passed. A fixed 0..299 here matched a code from
+        # outside that window about once in 1500 runs.
+        valid = {duo.hotp(secret, c) for c in range(max(0, counter - 200), counter + 200)}
+        check("the wrong passcodes are never a valid code within 200 counters of the persona's (wider than Duo's "
+              "look-ahead)", all(a["passcode"] not in valid for a in wrong), f"counter {counter}")
         check("they fit in MFA Flood's 2 minutes", sum(w.clock.slept[:len(wrong) - 1]) < 120, str(w.clock.slept))
         steps = lpers.PersonaState(w.root).records("takeovers")[-1]["steps"]
         check("step 3: a success from the same foreign address and device",
