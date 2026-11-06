@@ -2446,6 +2446,7 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                     ),
                     user_demographics=self.clarifying_service.extract_user_info(conversation_history),
                     enduser_id=enduser_id,
+                    **identity_fields,
                 )
 
                 return {
@@ -2842,7 +2843,8 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                 ],
                 symptoms=symptoms,
                 user_demographics=user_info,
-                enduser_id=enduser_id
+                enduser_id=enduser_id,
+                **(governance_overrides or {}),
             )
 
         return {

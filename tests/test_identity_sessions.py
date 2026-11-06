@@ -3,10 +3,12 @@
 middleware, chat threading, the evidence fields and the identity audit events.
 
 Inert unless configured: with DUO_ENABLED off nothing changes (the cookie is not
-even read). With it on, a signed-in turn carries the verified username as
-enduser_id plus identity_verified / identity_source on every governance event,
-the conversation is owned by that user, and identity only ever comes from the
-middleware -- never from a request body or from enduser_id.
+even read, and a conversation recorded with an owner is an ordinary one). With
+it on, a signed-in turn carries the verified username as enduser_id plus
+identity_verified / identity_source on every governance event (its decision and
+escalation events included, in both engines), the conversation is owned by that
+user, and identity only ever comes from the middleware -- never from a request
+body or from enduser_id.
 
 Side-effect-safe: a temp SQLite database and log directory, the LLM boundary
 stubbed, HEC and Agent Observability off, and no Duo / Identity Intelligence
@@ -29,6 +31,7 @@ import uuid
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -569,23 +572,101 @@ def test_app(c: TestClient) -> None:
 
         # ---- ownership: 409 to anyone else, 404 on read ----
         body = {"session_id": sid, "message": "another question", "disclaimer_accepted": True}
-        check("another identity -> 409 (/message)",
-              c.post("/api/chat/message", headers=ck(avery), json=body).status_code == 409)
+        r = c.post("/api/chat/message", headers=ck(avery), json=body)
+        check("another identity -> 409 (/message), 'belongs to another signed-in user'",
+              r.status_code == 409 and r.json().get("detail") == chat_router.OWNER_CONFLICT_DETAIL, r.text[:160])
         check("another identity -> 409 (/message/stream, before any SSE frame)",
               c.post("/api/chat/message/stream", headers=ck(avery), json=body).status_code == 409)
-        check("anonymous -> 409 on an owned conversation", c.post("/api/chat/message", headers=H, json=body).status_code == 409)
+        r = c.post("/api/chat/message", headers=H, json=body)
+        check("anonymous -> 409 on an owned conversation, told to sign in again (not 'another signed-in user')",
+              r.status_code == 409 and r.json().get("detail") == chat_router.SIGNED_OUT_CONFLICT_DETAIL, r.text[:160])
         check("GET session: owner 200", c.get(f"/api/chat/session/{sid}", headers=ck(nina)).status_code == 200)
         check("GET session: another identity 404", c.get(f"/api/chat/session/{sid}", headers=ck(avery)).status_code == 404)
         check("GET session: anonymous 404", c.get(f"/api/chat/session/{sid}", headers=H).status_code == 404)
         chat_router.sessions.pop(sid, None)                      # evicted: the DB owner still rules
         check("after eviction: another identity still 409 (owner read from the database)",
               c.post("/api/chat/message", headers=ck(avery), json=body).status_code == 409)
+        r = c.post("/api/chat/message", headers=H, json=body)
+        check("after eviction: anonymous still 409, told to sign in again",
+              r.status_code == 409 and r.json().get("detail") == chat_router.SIGNED_OUT_CONFLICT_DETAIL, r.text[:160])
         check("after eviction: GET still 404 to another identity",
               c.get(f"/api/chat/session/{sid}", headers=ck(avery)).status_code == 404)
         r = c.post("/api/chat/message", headers=ck(nina), json=body)
         resumed = (_events("governance", session_id=sid) or [{}])[-1]
         check("after eviction: the owner resumes, enduser_id = username",
               r.status_code == 200 and resumed.get("enduser_id") == "nina.osei")
+
+        # ---- DUO_ENABLED off again (Lab 5 over, `lab5-setup down`): Labs 0-4
+        # exactly as before, so an owned conversation is an ordinary one ----
+        settings.duo_enabled = False
+        try:
+            check("off: GET session returns an owned conversation (in memory)",
+                  c.get(f"/api/chat/session/{sid}", headers=H).status_code == 200)
+            chat_router.sessions.pop(sid, None)    # what the restart does (DUO_ENABLED is .env-only)
+            check("off: GET session returns it from the database",
+                  c.get(f"/api/chat/session/{sid}", headers=H).status_code == 200)
+            r = c.post("/api/chat/message", headers=H, json=body)
+            off = (_events("governance", session_id=sid) or [{}])[-1]
+            check("off: an owned conversation continues anonymously (no 409), as a Labs 0-4 turn",
+                  r.status_code == 200 and off.get("enduser_id") in ENDUSER_IDS
+                  and "identity_verified" not in off and "identity_source" not in off,
+                  f"{r.status_code} {r.text[:120]} {str(off)[:200]}")
+            check("off: a signed-in cookie is ignored there too (no 409 for another identity)",
+                  c.post("/api/chat/message", headers=ck(avery), json=body).status_code == 200)
+            db = _db()
+            try:
+                conv = db.query(Conversation).filter(Conversation.session_id == sid).first()
+            finally:
+                db.close()
+            check("off: the owner stays recorded for when Lab 5 is back on",
+                  (conv.conversation_metadata or {}).get("identity_owner") == "nina.osei",
+                  str(conv.conversation_metadata))
+        finally:
+            settings.duo_enabled = True
+        check("back on: the owner rule applies again (another identity 409, anonymous GET 404)",
+              c.post("/api/chat/message", headers=ck(avery), json=body).status_code == 409
+              and c.get(f"/api/chat/session/{sid}", headers=H).status_code == 404)
+
+        # ---- the other events of a signed-in turn (agentic, built) ----
+        # The intake node's clarifying question ends the turn with a DECISION
+        # event as its only event; a policy block and an escalated answer each
+        # follow their response with an ESCALATION event.
+        for who, headers in (("signed-in", ck(nina)), ("anonymous", H)):
+            signed = who == "signed-in"
+            sidq = str(uuid.uuid4())
+            r = c.post("/api/chat/message", headers=headers,
+                       json={"session_id": sidq, "message": "my baby has a fever", "disclaimer_accepted": True})
+            decisions = _events("governance", session_id=sidq, operation_name="decision")
+            dec = decisions[-1] if decisions else {}
+            check(f"{who}: a clarifying question logs one decision event",
+                  r.status_code == 200 and r.json().get("type") == "clarifying_question" and len(decisions) == 1,
+                  f"{r.status_code} {r.text[:120]}")
+            if signed:
+                check("signed-in: the built decision event carries the identity evidence",
+                      dec.get("enduser_id") == "nina.osei" and dec.get("user") == "nina.osei"
+                      and dec.get("identity_verified") is True and dec.get("identity_source") == "duo", str(dec)[:300])
+            else:
+                check("anonymous: the decision event is unchanged (pool enduser_id, no identity keys)",
+                      dec.get("enduser_id") in ENDUSER_IDS
+                      and "identity_verified" not in dec and "identity_source" not in dec, str(dec)[:300])
+            check(f"{who}: the decision event still carries no workflow_name / blueprint",
+                  bool(dec) and "workflow_name" not in dec and "blueprint" not in dec, str(dec)[:300])
+            for message, origin in (("I want to end my life", "policy block"),
+                                    ("I have a mild sore throat and want advice, I am pregnant", "escalated answer")):
+                sid_e = str(uuid.uuid4())
+                r = c.post("/api/chat/message", headers=headers,
+                           json={"session_id": sid_e, "message": message, "disclaimer_accepted": True})
+                esc = _events("escalation", session_id=sid_e)
+                e = esc[-1] if esc else {}
+                if signed:
+                    ok = (e.get("enduser_id") == "nina.osei" and e.get("user") == "nina.osei"
+                          and e.get("identity_verified") is True and e.get("identity_source") == "duo")
+                else:
+                    ok = "identity_verified" not in e and "identity_source" not in e
+                check(f"{who} {origin}: one escalation event, "
+                      + ("carrying the identity evidence" if signed else "with no identity keys"),
+                      r.status_code == 200 and r.json().get("escalated") is True and len(esc) == 1 and ok,
+                      f"{r.status_code} {str(e)[:300]}")
 
         # ---- /message/stream, signed in ----
         sid2 = str(uuid.uuid4())
@@ -762,12 +843,63 @@ def test_legacy_engine() -> None:
     check("legacy: the verified username is the end user, with identity_verified / identity_source",
           last.get("policy_blocked") is True and last.get("enduser_id") == "nina.osei"
           and last.get("identity_verified") is True and last.get("identity_source") == "duo", str(last)[:300])
+    esc = _events("escalation", session_id=sid)
+    check("legacy: the policy block's escalation event carries the identity evidence too",
+          len(esc) == 1 and esc[0].get("enduser_id") == "nina.osei" and esc[0].get("identity_verified") is True
+          and esc[0].get("identity_source") == "duo", str(esc)[:300])
     sid = f"legacy-{uuid.uuid4().hex[:8]}"
     RecommendationEngine().process_message(session_id=sid, user_message="I want to end my life",
                                            conversation_history=[], enduser_id="t.nguyen")
     last = (_events("governance", session_id=sid) or [{}])[-1]
     check("legacy: an anonymous turn is unchanged (no identity keys)",
           last.get("enduser_id") == "t.nguyen" and "identity_verified" not in last)
+    esc = _events("escalation", session_id=sid)
+    check("legacy: an anonymous escalation is unchanged (no identity keys, not even null)",
+          len(esc) == 1 and esc[0].get("enduser_id") == "t.nguyen"
+          and "identity_verified" not in esc[0] and "identity_source" not in esc[0], str(esc)[:300])
+
+    # The model-answered path (_generate_recommendation), with a fake AI client:
+    # an escalated answer's response and escalation events, and the clarifying
+    # question's decision event.
+    class _FakeAIClient:
+        def create_message(self, **_kw):
+            return SimpleNamespace(content=json.dumps({"assessment": "Rest.", "guidance": ["Fluids."],
+                                                       "seek_care_if": ["Fever above 103F"], "severity": "LOW",
+                                                       "confidence": 0.9}),
+                                   id="r", model="fake-model", input_tokens=5, output_tokens=7, stop_reason="end_turn")
+
+    engine = RecommendationEngine()
+    engine._ai_client = _FakeAIClient()
+    sid = f"legacy-{uuid.uuid4().hex[:8]}"
+    out = engine.process_message(session_id=sid, user_message="I have a mild sore throat and want advice, I am pregnant",
+                                 conversation_history=[], enduser_id="victim.user", identity_session=snap.to_state())
+    evs = _events("governance", session_id=sid) + _events("escalation", session_id=sid)
+    check("legacy: an escalated answer's response and escalation events both carry the identity evidence",
+          out.get("escalated") is True and len(_events("escalation", session_id=sid)) == 1
+          and all(e.get("enduser_id") == "nina.osei" and e.get("identity_verified") is True
+                  and e.get("identity_source") == "duo" for e in evs), str(evs)[:300])
+    sid = f"legacy-{uuid.uuid4().hex[:8]}"
+    engine.process_message(session_id=sid, user_message="my baby has a fever", conversation_history=[],
+                           enduser_id="victim.user", identity_session=snap.to_state())
+    dec = _events("governance", session_id=sid, operation_name="decision")
+    check("legacy: the clarifying question's decision event carries the identity evidence",
+          len(dec) == 1 and dec[0].get("enduser_id") == "nina.osei" and dec[0].get("identity_verified") is True
+          and dec[0].get("identity_source") == "duo", str(dec)[:300])
+
+
+def test_escalation_schema() -> None:
+    print("escalation schema: identity evidence only when given")
+    from backend.logging.log_schemas import create_escalation_log
+
+    base = dict(escalation_id="e", session_id="s", request_id="r", reason="x", severity="HIGH",
+                conversation_history=[], symptoms=[])
+    anon = create_escalation_log(**base, enduser_id="t.nguyen")
+    check("an anonymous escalation gains no identity key (this entry keeps its Nones, so not even a null)",
+          not {"identity_verified", "identity_source"} & set(anon), str(sorted(anon)))
+    signed = create_escalation_log(**base, enduser_id="nina.osei", identity_verified=True, identity_source="duo")
+    check("a signed-in escalation keeps identity_verified / identity_source (and user = enduser_id)",
+          signed.get("identity_verified") is True and signed.get("identity_source") == "duo"
+          and signed.get("user") == "nina.osei", str(signed))
 
 
 def main() -> int:
@@ -786,6 +918,7 @@ def main() -> int:
     test_audit_events()
     test_hec_and_ao()
     test_legacy_engine()
+    test_escalation_schema()
     dbmod.engine.dispose()
     shutil.rmtree(_TMP, ignore_errors=True)
     print(f"RESULT: {'ok' if not _fails else str(_fails) + ' failed'}")

@@ -249,6 +249,12 @@ def create_escalation_log(
         "review_timestamp": kwargs.get("review_timestamp"),
         "enduser_id": kwargs.get("enduser_id")
     }
+    # Lab 5: a signed-in turn's identity evidence (identity_verified /
+    # identity_source, as on create_governance_log's events). Added only when
+    # set: this entry keeps its None values, so an unconditional key would add
+    # two nulls to every anonymous (Labs 0-4) escalation.
+    entry.update({k: kwargs[k] for k in ("identity_verified", "identity_source")
+                  if kwargs.get(k) is not None})
     entry.update(cim_identity(user=kwargs.get("enduser_id")))
     return entry
 

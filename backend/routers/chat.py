@@ -47,15 +47,32 @@ sessions: Dict[str, Dict[str, Any]] = {}
 # Conversation.conversation_metadata (and mirrored as "owner" on the in-memory
 # session). Thread integrity, not confidentiality: the room shares one access
 # key, so this only stops one identity's turns landing in another's thread.
+# Enforced only while DUO_ENABLED is on (see _owner_conflict).
 OWNER_KEY = "identity_owner"
 OWNER_CONFLICT_DETAIL = ("This conversation belongs to another signed-in user. "
                          "Start a new conversation.")
+# The 409 for a caller with no identity session: most often the owner, whose
+# session expired or who signed out, so "another signed-in user" would mislead.
+SIGNED_OUT_CONFLICT_DETAIL = ("This conversation belongs to a signed-in user. "
+                              "Sign in again to continue it, or start a new conversation.")
 
 
-def _owner_conflict(owner: Optional[str], identity: Optional[IdentitySnapshot]) -> bool:
-    """True when the conversation is owned and the caller is not its owner
-    (an anonymous caller included)."""
-    return bool(owner) and (identity is None or identity.username != owner)
+def _owner_conflict(owner: Optional[str], identity: Optional[IdentitySnapshot]) -> Optional[str]:
+    """The 409 detail when the caller may not continue this conversation, else None.
+
+    Only while DUO_ENABLED is on. Off, there is no identity at all and Labs 0-4
+    behave exactly as before Lab 5: a conversation recorded with an owner (a
+    Lab 5 run, then ``lab5-setup down``) is an ordinary conversation again, and
+    the owner stays recorded for when Lab 5 is back on. On, an owned
+    conversation is refused to any other identity and to an anonymous caller,
+    each with its own message."""
+    if not owner or not getattr(settings, "duo_enabled", False):
+        return None
+    if identity is None:
+        return SIGNED_OUT_CONFLICT_DETAIL
+    if identity.username != owner:
+        return OWNER_CONFLICT_DETAIL
+    return None
 
 
 def _stored_owner(conversation: Optional[Conversation]) -> Optional[str]:
@@ -197,8 +214,10 @@ def _prepare_session(
     ``identity`` is the request's verified identity (``request.state.identity``,
     Lab 5), never anything from the body. Signed in, the session's
     ``enduser_id`` is the username, new or resumed, and the user owns the
-    conversation (a new one, or an unowned one they resume). A conversation
-    owned by someone else -- or by anyone, for an anonymous caller -- is a 409.
+    conversation (a new one, or an unowned one they resume). While
+    DUO_ENABLED is on, a conversation owned by someone else -- or by anyone,
+    for an anonymous caller -- is a 409 (``_owner_conflict``); off, ownership
+    is not enforced.
     """
     session_id = chat_request.session_id
     username = identity.username if identity is not None else None
@@ -210,8 +229,9 @@ def _prepare_session(
             Conversation.session_id == session_id
         ).first()
 
-        if existing_conversation and _owner_conflict(_stored_owner(existing_conversation), identity):
-            raise HTTPException(status_code=409, detail=OWNER_CONFLICT_DETAIL)
+        conflict = _owner_conflict(_stored_owner(existing_conversation), identity)
+        if conflict:
+            raise HTTPException(status_code=409, detail=conflict)
 
         if existing_conversation:
             # Load existing session from database into memory.
@@ -276,8 +296,9 @@ def _prepare_session(
             )
 
     session = sessions[session_id]
-    if _owner_conflict(session.get("owner"), identity):
-        raise HTTPException(status_code=409, detail=OWNER_CONFLICT_DETAIL)
+    conflict = _owner_conflict(session.get("owner"), identity)
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
     if username:
         if not session.get("owner"):
             _claim(db, session_id, session, username)
@@ -691,9 +712,9 @@ async def send_message_stream(
 async def get_session(session_id: str, request: Request, db: Session = Depends(get_db)):
     """Get session conversation history.
 
-    A conversation owned by a signed-in user (Lab 5) is a 404 to anyone else,
-    an anonymous caller included -- the same answer as a session that does not
-    exist."""
+    While DUO_ENABLED is on, a conversation owned by a signed-in user (Lab 5)
+    is a 404 to anyone else, an anonymous caller included -- the same answer as
+    a session that does not exist. Off, ownership is not enforced."""
     identity = current_identity(request)
 
     # Check in-memory first

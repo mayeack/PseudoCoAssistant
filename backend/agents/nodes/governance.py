@@ -12,7 +12,7 @@ import time
 from typing import Any, Dict
 
 from backend.agents.nodes.shared import clarifying_service, escalation_rules
-from backend.agents.state import governance_identity_overrides
+from backend.agents.state import governance_identity_overrides, identity_governance_fields
 from backend.agents.token_usage import governance_usage_data
 from backend.config import settings
 from backend.logging.governance_logger import governance_logger
@@ -176,6 +176,8 @@ def governance_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 symptoms=symptoms,
                 user_demographics=user_info,
                 enduser_id=enduser_id,
+                # A signed-in turn's identity evidence (Lab 5); {} when anonymous.
+                **identity_governance_fields(state.get("identity_session")),
             )
 
     result: Dict[str, Any] = {

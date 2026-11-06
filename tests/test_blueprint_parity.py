@@ -15,12 +15,14 @@ core differs. This suite is the detector:
     and response blocks, NeMo input/output blocks, Agent Control deny and steer,
     forced PII/toxic/hallucination/authority injection, generation error, Multi-Agent
     Mode accepted, a PDF attachment hiding a prompt injection screened by AI
-    Defense and unscreened, a signed-in turn allowed and blocked) is run through
+    Defense and unscreened, a signed-in turn allowed, blocked, asked a
+    clarifying question, escalated and policy-blocked) is run through
     run_turn and run_turn_stream for EVERY
     blueprint, and the normalized outcome — result type/severity/escalated/
-    policy_blocked, the terminal governance event's guardrail fields, the core
-    state contract, and the guardrail stage frames — must be identical across
-    blueprints. Allowed differences: agent names, core stage names,
+    policy_blocked, the terminal governance event's guardrail fields, the kinds
+    of governance event logged (decisions and built escalations included), the
+    core state contract, and the guardrail stage frames — must be identical
+    across blueprints. Allowed differences: agent names, core stage names,
     workflow_name / blueprint attribution, and the answer text itself.
 
 Add a scenario here in the same change that adds a toggle or guardrail.
@@ -209,6 +211,7 @@ def _restore(saved) -> None:
 @contextmanager
 def _governance_capture():
     from backend.logging import governance_logger as gl
+    from backend.logging.log_schemas import create_escalation_log
 
     events: List[Dict[str, Any]] = []
     g = gl.governance_logger
@@ -221,8 +224,15 @@ def _governance_capture():
         g.log_error = lambda **kw: events.append(dict(kw, _kind="error"))
         # A booking logs a tool_call event BEFORE the turn's response event.
         g.log_tool_call = lambda **kw: events.append(dict(kw, _kind="tool_call"))
-        for n in ("log_request", "log_escalation", "log_decision"):
-            setattr(g, n, lambda **kw: None)
+        # A clarifying question ends the turn at the intake node (shared by both
+        # cores) with a DECISION event, its only event.
+        g.log_decision = lambda **kw: events.append(dict(kw, _kind="decision"))
+        # An escalation follows the turn's response event. Recorded BUILT:
+        # create_escalation_log keeps only the keys it names, so the kwargs alone
+        # would not show what reaches Splunk. Never the turn's terminal event.
+        g.log_escalation = lambda **kw: events.append(
+            dict(create_escalation_log(escalation_id="parity-escalation", **kw), _kind="escalation"))
+        g.log_request = lambda **kw: None
         yield events
     finally:
         for n, fn in orig.items():
@@ -422,6 +432,19 @@ def _scenario(kind: str):
                 def_mod.ai_defense_client = _Stub(is_configured=True, inspect_prompt=lambda *a, **k: bad,
                                                   inspect_response=lambda *a, **k: InspectionResult(is_safe=True))
                 kwargs["ai_defense_review"] = True
+            elif kind == "identity_signed_in_clarify":
+                # MedAdvice's intake node asks a clarifying question: the turn's
+                # only event is the DECISION event. (Telecom is conversational,
+                # so it answers, and the safety rules escalate the "baby".)
+                kwargs["user_message"] = "my baby has a fever"
+            elif kind == "identity_signed_in_escalated":
+                # The safety rules escalate the answer (pregnancy): the governance
+                # node logs the response, then the ESCALATION event.
+                kwargs["user_message"] = "I have a mild sore throat and want advice, I am pregnant"
+            elif kind == "identity_signed_in_policy_block":
+                # The internal policy block logs the block, then an ESCALATION.
+                saved["cpb"] = escalation_rules.check_policy_block
+                escalation_rules.check_policy_block = lambda msg: (True, ["self-harm"])
         elif kind == "generation_error":
             fail_agents = ("*",)
         elif kind == "multi_agent":
@@ -474,8 +497,10 @@ _GOV_KEYS = ("guardrail_ids", "policy_blocked", "safety_violated", "pii_detected
              "hallucination_detected", "authority_violation_detected", "guardrail_triggered")
 
 # Lab 5 identity: the verified session the router would pass, and the evidence
-# every event of such a turn carries.
-_IDENTITY_SCENARIOS = ("identity_signed_in", "identity_signed_in_blocked")
+# every event of such a turn carries -- the response, the clarifying question's
+# decision and the escalations (policy block, escalated answer) included.
+_IDENTITY_SCENARIOS = ("identity_signed_in", "identity_signed_in_blocked", "identity_signed_in_clarify",
+                       "identity_signed_in_escalated", "identity_signed_in_policy_block")
 _IDENTITY_SESSION = {"session_ref": "parity-ref", "username": "nina.osei", "source": "duo",
                      "signed_in_at": "2026-11-05T10:00:00", "expires_at": "2026-11-05T22:00:00"}
 _IDENTITY_KEYS = ("enduser_id", "identity_verified", "identity_source")
@@ -500,7 +525,8 @@ def _run(bp_key: str, theme: str, kind: str) -> Dict[str, Any]:
             stages = [ev["node"] for ev in graph.run_turn_stream(**base) if ev.get("event") == "stage"]
         finally:
             _restore(saved)
-    last = events[-1] if events else {}
+    # The turn's terminal event: an escalation only ever follows it.
+    last = next((e for e in reversed(events) if e.get("_kind") != "escalation"), {})
     sev = result.get("severity")
     # A document turn: what the screens, the answering agent ({theme}_domain_agent,
     # shared by both cores) and the internal agents were each given.
@@ -527,6 +553,8 @@ def _run(bp_key: str, theme: str, kind: str) -> Dict[str, Any]:
         # and whether EVERY event of the turn carries the evidence.
         "identity": {k: last.get(k) for k in _IDENTITY_KEYS},
         "identity_on_every_event": bool(events) and all(e.get("identity_verified") is True for e in events),
+        # Which kinds of event the turn logged (once each; both runs log the same).
+        "event_kinds": sorted({e.get("_kind") for e in events}),
         "tokens": {k: last.get(k) for k in _TOKEN_KEYS},
         "gov_present": bool(events),
         "guardrail_stages": [s for s in stages if s in GUARDRAIL_NODES],
@@ -672,6 +700,12 @@ def test_dynamic_parity() -> None:
                     check(f"[{key}] {sk}: workflow/blueprint attribution", out["blueprint"] == key
                           and out["workflow_name"] == bp_registry.get_blueprint(key).workflow_name,
                           f"{out['workflow_name']}/{out['blueprint']}")
+                elif out["event_kind"] == "decision":
+                    # The intake node's clarifying question; the decision event
+                    # has never carried workflow_name / blueprint.
+                    check(f"[{key}] {sk}: a clarifying question ends the turn with a decision event",
+                          out["result"]["type"] == "clarifying_question" and out["event_kinds"] == ["decision"],
+                          f"{out['result']} {out['event_kinds']}")
                 else:
                     check(f"[{key}] {sk}: a generation failure logs an error event (safe reply)",
                           out["event_kind"] == "error" and out["result"]["type"] == "safety_warning")
@@ -693,6 +727,8 @@ def test_dynamic_parity() -> None:
                       (out["identity"], out["identity_on_every_event"])
                       == (ref["identity"], ref["identity_on_every_event"]),
                       f"{out['identity']} != {ref['identity']}")
+                check(f"[{key} vs {ref_key}] {sk}: same kinds of governance event (escalations and decisions included)",
+                      out["event_kinds"] == ref["event_kinds"], f"{out['event_kinds']} != {ref['event_kinds']}")
                 check(f"[{key} vs {ref_key}] {sk}: same Agent Control steer outcome and delivered PII",
                       (out["steer"], out["answer_has_ssn"], out["answer_has_steer_leftovers"])
                       == (ref["steer"], ref["answer_has_ssn"], ref["answer_has_steer_leftovers"]),
@@ -827,6 +863,22 @@ def test_dynamic_parity() -> None:
             check(f"{theme}: an anonymous turn carries no identity evidence",
                   r[f"{theme}/benign"]["identity"]["identity_verified"] is None
                   and r[f"{theme}/benign"]["identity"]["identity_source"] is None)
+            # The other events of a signed-in turn: the escalation that follows
+            # a policy block or an escalated answer, and (MedAdvice) the
+            # clarifying question's decision event.
+            for kind in ("identity_signed_in_policy_block", "identity_signed_in_escalated"):
+                out = r[f"{theme}/{kind}"]
+                check(f"{theme}/{kind}: the escalation event carries the identity evidence too",
+                      "escalation" in out["event_kinds"] and out["identity"] == verified
+                      and out["identity_on_every_event"] is True, f"{out['event_kinds']} {out['identity']}")
+            check(f"{theme}: the signed-in policy block is the internal policy block",
+                  r[f"{theme}/identity_signed_in_policy_block"]["governance"]["guardrail_ids"] == ["policy_block"],
+                  str(r[f"{theme}/identity_signed_in_policy_block"]["governance"]))
+        clarify = r["medadvice/identity_signed_in_clarify"]
+        check("medadvice: a signed-in clarifying question's decision event carries the identity evidence",
+              clarify["event_kind"] == "decision" and clarify["result"]["type"] == "clarifying_question"
+              and clarify["identity"] == verified and clarify["identity_on_every_event"] is True,
+              f"{clarify['event_kinds']} {clarify['identity']}")
         check("benign turn passes the whole POST chain",
               r["medadvice/benign"]["guardrail_stages"][-1] == "governance")
         # MCP Tool Thrash: the shared chain's launch/join nodes run on every turn,
