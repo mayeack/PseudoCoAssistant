@@ -688,6 +688,11 @@ def test_launchd() -> None:
               plist.get("StandardOutPath", "").endswith(f"/logs/launchd-lab5-{job}.log"))
         check(f"{job}: no workshop file and no secret on its command line",
               not any(a.endswith(".yaml") for a in args) and not any(v in joined for v in KEYCHAIN_SECRETS.values()))
+        for doc in ("deploy/lab5/README.md", "deploy/launchd/README.md"):
+            text = (ROOT / doc).read_text()
+            row = next((line for line in text.splitlines() if line.startswith("|") and f"lab5-{job}" in line), "")
+            check(f"{job}: {doc}'s jobs table says it runs `run-lab5-job.sh {job}`, as the plist does",
+                  f"run-lab5-job.sh {job}" in row, row)
     install = (ROOT / "deploy" / "launchd" / "install.sh").read_text()
     check("install.sh (the app's agents) does not install the Lab 5 jobs", "lab5" not in install)
 

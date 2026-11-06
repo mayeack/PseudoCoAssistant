@@ -419,15 +419,16 @@ deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at
 <tr>
 <td><code>com.yeack.pseudoco-assistant-lab5-expire</code></td>
 <td>daily 08:15</td>
-<td><code>deploy/lab5/lab5-setup expire</code></td>
+<td><code>deploy/launchd/run-lab5-job.sh expire</code> → <code>deploy/lab5/lab5_setup.py expire</code></td>
 </tr>
 <tr>
 <td><code>com.yeack.pseudoco-assistant-lab5-baseline</code></td>
 <td>daily 09:20</td>
-<td><code>scripts/identity/persona_activity.py baseline</code>, then the self-check</td>
+<td><code>deploy/launchd/run-lab5-job.sh baseline</code> → <code>scripts/identity/persona_activity.py baseline</code>, then the self-check</td>
 </tr>
 </tbody>
 </table>
+<p>Both run through <code>run-lab5-job.sh</code>, with <code>LAB5_PYTHON</code> (default <code>~/.pseudoco-lab5/venv/bin/python</code>) and no fallback. To reproduce a failed run by hand, run that same command (<code>deploy/launchd/run-lab5-job.sh expire</code>), not <code>deploy/lab5/lab5-setup expire</code>: <code>lab5-setup</code> falls back to <code>python3</code> on <code>PATH</code> and checks for paramiko, so it can succeed or refuse where the job does not.</p>
 <p>Use <code>--only expire|baseline</code> to install one, <code>--uninstall</code> to remove them and <code>--print</code> to see the rendered plists. A run missed while the Mac sleeps happens when it wakes. Nothing runs while the Mac is shut down, so a week away before a delivery shows up as a self-check failure. Logs go to <code>logs/launchd-lab5-*.log</code> and to the run logs under <code>~/.pseudoco-lab5/</code>. Install from the main checkout, not a worktree.</p>
 <h2>Secrets</h2>
 <ul>

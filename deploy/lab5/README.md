@@ -234,8 +234,10 @@ Every sign-in sends `ipaddr` and `hostname` and never `client_supports_verified_
 
 | Agent | When | Runs |
 |---|---|---|
-| `com.yeack.pseudoco-assistant-lab5-expire` | daily 08:15 | `deploy/lab5/lab5-setup expire` |
-| `com.yeack.pseudoco-assistant-lab5-baseline` | daily 09:20 | `scripts/identity/persona_activity.py baseline`, then the self-check |
+| `com.yeack.pseudoco-assistant-lab5-expire` | daily 08:15 | `deploy/launchd/run-lab5-job.sh expire` → `deploy/lab5/lab5_setup.py expire` |
+| `com.yeack.pseudoco-assistant-lab5-baseline` | daily 09:20 | `deploy/launchd/run-lab5-job.sh baseline` → `scripts/identity/persona_activity.py baseline`, then the self-check |
+
+Both run through `run-lab5-job.sh`, with `LAB5_PYTHON` (default `~/.pseudoco-lab5/venv/bin/python`) and no fallback. To reproduce a failed run by hand, run that same command (`deploy/launchd/run-lab5-job.sh expire`), not `deploy/lab5/lab5-setup expire`: `lab5-setup` falls back to `python3` on `PATH` and checks for paramiko, so it can succeed or refuse where the job does not.
 
 Use `--only expire|baseline` to install one, `--uninstall` to remove them and `--print` to see the rendered plists. A run missed while the Mac sleeps happens when it wakes. Nothing runs while the Mac is shut down, so a week away before a delivery shows up as a self-check failure. Logs go to `logs/launchd-lab5-*.log` and to the run logs under `~/.pseudoco-lab5/`. Install from the main checkout, not a worktree.
 
