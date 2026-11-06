@@ -1746,8 +1746,8 @@ def _clash_advice(other: Path, admits: Sequence[str], unknown_boxes: Sequence[st
     if wait_alone is not None and acts:
         advice += f", or wait until {participants.minute(wait_alone)}"
     if unlisted:
-        note = (f". Its workshop file no longer lists instance(s) {', '.join(unlisted)} ({_RECORDED}), and `down` "
-                f"and `handouts` reach only the instances it lists") + note
+        note = (f". Workshop {other.name}'s file no longer lists instance(s) {', '.join(unlisted)} ({_RECORDED}), "
+                f"and `down` and `handouts` reach only the instances it lists") + note
     return advice + note
 
 

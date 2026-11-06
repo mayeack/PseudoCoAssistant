@@ -1379,8 +1379,8 @@ def test_victim_clash_after_down() -> None:
     lists = lambda *nn: dict(on, instances=list(nn))
     ended = dict(gone, env=dict(swapped["env"], reverted=True, serves=[]))
     wait = lp_minute(now + 7200)
-    dropped_note = ("Its workshop file no longer lists instance(s) 02 (as of its last check, up, status, down or "
-                    "handouts), and `down` and `handouts` reach only the instances it lists")
+    dropped_note = ("Workshop acme's file no longer lists instance(s) 02 (as of its last check, up, status, down "
+                    "or handouts), and `down` and `handouts` reach only the instances it lists")
     for name, root in (
             ("both cards hold the old victim's codes",
              world({"01": swapped, "02": swapped}, [failed], saved=lists("01"), handout=("01", "02"),
