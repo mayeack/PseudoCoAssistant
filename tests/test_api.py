@@ -789,8 +789,9 @@ def main() -> int:
         _saved_host = settings.hec_host
         try:
             settings.hec_host = ""
+            # Built after the blanking, so the check reads this setting, not the one _env was stamped with.
             check("HEC host: empty HEC_HOST keeps the destination's host (default medadvice)",
-                  _env["host"] == "medadvice"
+                  _fwd._build_event("governance", _body)["host"] == "medadvice"
                   and _HECFwd(_HECConfig(id="t", host="custom", url="https://localhost:8088"), "tok")
                   ._build_event("audit", _body)["host"] == "custom")
             settings.hec_host = "l5-ws-3"

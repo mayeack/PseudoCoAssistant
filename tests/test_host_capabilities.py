@@ -234,7 +234,10 @@ def test_duo_signin_rule() -> None:
                      duo_api_host="api-x.duosecurity.com", public_base_url="https://l5-ws-1.pseudocoassistant.com")
         check("1. disabled wins over everything else",
               hc.duo_signin_gate(s) == {"enabled": False, "reason": "Duo sign-in is off (DUO_ENABLED is not true)."})
-        s = Settings(duo_enabled=True, duo_client_secret="s" * 40, public_base_url="http://x")
+        # Both keys passed blank: a Settings() fills what it is not given from the checkout's .env, whose Web
+        # SDK keys (the dev copy's, say) would skip this reason.
+        s = Settings(duo_enabled=True, duo_client_id="", duo_client_secret="s" * 40, duo_api_host="",
+                     public_base_url="http://x")
         r = hc.duo_signin_gate(s)
         check("2. Web SDK keys missing: named, never shown",
               r["enabled"] is False and r["reason"] == "Duo Web SDK keys missing: DUO_CLIENT_ID, DUO_API_HOST."
