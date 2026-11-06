@@ -461,8 +461,9 @@ def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
               "extensions.errorType": lambda e: (e.get("extensions") or {}).get("errorType"),
               "extensions.classification": lambda e: (e.get("extensions") or {}).get("classification"),
               "errorType": lambda e: e.get("errorType"), "type": lambda e: e.get("type")}
-    check("the shared table's coded errors carry a code in each place a GraphQL server puts one, a user-not-found "
-          "code among them, and each is an error with a message and no path of its own (the shape gives it)",
+    check("the shared table's coded errors carry a code in each of these places (extensions.code, "
+          "extensions.errorType, extensions.classification, errorType, type), a user-not-found code among them, "
+          "and each is an error with a message and no path of its own (the shape gives it)",
           all(any(read(c["error"]) for c in coded) for read in places.values())
           and any(places["extensions.code"](c["error"]) == "USER_NOT_FOUND" for c in coded)
           and all(c["error"].get("message") and "path" not in c["error"] for c in coded), str(coded)[:400])

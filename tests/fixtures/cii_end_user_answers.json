@@ -715,7 +715,7 @@
     ]
   },
   "coded_errors": {
-    "_about": "Errors that carry a code, in each place a GraphQL server puts one: extensions.code, extensions.errorType, extensions.classification (graphql-java, Spring for GraphQL), AppSync's errorType and GitHub's type on the error itself. Each is tried, with its path from the shape, in every shape of error_shapes, data null on getEndUser (the published schema's shape) included. Every one is unavailable, whatever its code says: a code that reads 'not found' or 'user not found' is still an error, and no error is ever 'no such user' (a refused API client can carry one, as the USER_NOT_FOUND code on a permission message here does). An answer spikes S5/S6 pin as CII's own goes to cases, matched exactly.",
+    "_about": "Errors that carry a code, in the places GraphQL servers commonly put one: extensions.code, extensions.errorType, extensions.classification (graphql-java, Spring for GraphQL), AppSync's errorType and GitHub's type on the error itself. Each is tried, with its path from the shape, in every shape of error_shapes, data null on getEndUser (the published schema's shape) included. Every one is unavailable, whatever its code says: a code that reads 'not found' or 'user not found' is still an error, and no error is ever 'no such user' (a refused API client can carry one, as the USER_NOT_FOUND code on a permission message here does). An answer spikes S5/S6 pin as CII's own goes to cases, matched exactly.",
     "errors": [
       {
         "name": "a NOT_FOUND code (extensions.code)",
