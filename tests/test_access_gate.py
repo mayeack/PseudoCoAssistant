@@ -214,6 +214,75 @@ for crafted in ("testserver/health?x=", "evil.example/favicon.ico?", "user@box")
               r.status_code == 400 and "protected" not in r.text,
               f"got {r.status_code} {r.text[:80]}")
 
+# --- G6: review fixes in 4.21.1 ------------------------------------------------
+import base64  # noqa: E402
+import logging  # noqa: E402
+
+from starlette.requests import Request as _Req  # noqa: E402
+
+from backend.middleware import settings_gate  # noqa: E402
+from backend.middleware.access_key import _host_is_valid, keys_match  # noqa: E402
+from backend.middleware.request_logging import RequestLoggingMiddleware  # noqa: E402
+
+
+def _host_req(host: bytes):
+    return _Req({"type": "http", "method": "GET", "path": "/health",
+                 "headers": [(b"host", host)]})
+
+
+# Optional whitespace around the Host value (RFC 9112) is not "malformed":
+# uvicorn's httptools parser keeps trailing spaces and tabs.
+for host in (b"localhost:8001 ", b"localhost:8001\t", b"pseudocoassistant.com  "):
+    check(f"G6: Host {host!r} with trailing whitespace is valid", _host_is_valid(_host_req(host)))
+for host in (b"box/health?x= ", b"user@box\t"):
+    check(f"G6: malformed Host {host!r} is still refused after the strip",
+          not _host_is_valid(_host_req(host)))
+
+# A non-ASCII secret is a wrong secret, never a TypeError (a 500).
+check("G6: keys_match('café', key) is False", keys_match("café", KEY) is False)
+check("G6: keys_match(key, key) is True", keys_match(KEY, KEY) is True)
+check("G6: settings code_is_valid('café') is False", settings_gate.code_is_valid("café") is False)
+basic = "Basic " + base64.b64encode("x:café".encode("utf-8")).decode("ascii")
+r = get("/api/protected", headers={"Authorization": basic})
+check("G6: a non-ASCII Basic password -> 401, not 500", r.status_code == 401, f"got {r.status_code}")
+bad_cookie = f"{COOKIE_NAME}=caf".encode("ascii") + b"\xc3\xa9"
+r = get("/api/protected", headers={"cookie": bad_cookie})
+check("G6: a non-ASCII cookie -> 401, not 500", r.status_code == 401, f"got {r.status_code}")
+r = get("/api/protected", headers={"cookie": bad_cookie, HDR: KEY})
+check("G6: a valid X-Access-Key beside a non-ASCII cookie -> 200", r.status_code == 200,
+      f"got {r.status_code}")
+
+# The request log names the path percent-encoded, so an encoded CR/LF cannot
+# start a forged line in the plain-text log.
+log_app = FastAPI()
+log_app.add_middleware(RequestLoggingMiddleware)
+
+
+@log_app.get("/{p}")
+def _logged(p: str):
+    return {"p": p}
+
+
+_lines = []
+
+
+class _Capture(logging.Handler):
+    def emit(self, record):
+        _lines.append(record.getMessage())
+
+
+_cap = _Capture()
+_log = logging.getLogger("backend.middleware.request_logging")
+_log.addHandler(_cap)
+_old_level = _log.level
+_log.setLevel(logging.INFO)
+TestClient(log_app).get("/x%0D%0A2026-11-05 18:00:00,000 - backend.routers.auth - WARNING - FORGED")
+_log.removeHandler(_cap)
+_log.setLevel(_old_level)
+check("G6: an encoded CR/LF in the path stays on one log line",
+      bool(_lines) and all("\r" not in m and "\n" not in m for m in _lines), repr(_lines))
+check("G6: the logged path is percent-encoded", any("%0D%0A" in m for m in _lines), repr(_lines))
+
 print()
 if _failures:
     print(f"FAILED {len(_failures)} check(s): {', '.join(_failures)}")

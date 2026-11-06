@@ -1,5 +1,4 @@
 import logging
-import secrets
 from pathlib import Path
 from urllib.parse import quote
 
@@ -7,7 +6,7 @@ from fastapi import APIRouter, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from backend.config import settings
-from backend.middleware.access_key import COOKIE_NAME, session_token
+from backend.middleware.access_key import COOKIE_NAME, keys_match, session_token
 from backend.middleware import settings_gate
 
 logger = logging.getLogger(__name__)
@@ -46,7 +45,7 @@ async def login_submit(
     next_path: str = Form("/app", alias="next"),
 ):
     target = _safe_next(next_path)
-    if settings.access_key and secrets.compare_digest(access_code, settings.access_key):
+    if settings.access_key and keys_match(access_code, settings.access_key):
         response = RedirectResponse(url=target, status_code=303)
         response.set_cookie(
             COOKIE_NAME,

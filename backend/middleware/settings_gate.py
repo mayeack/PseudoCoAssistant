@@ -33,8 +33,10 @@ def session_token() -> str:
 
 def has_settings_access(request: Request) -> bool:
     cookie = request.cookies.get(COOKIE_NAME, "")
-    return bool(cookie) and secrets.compare_digest(cookie, session_token())
+    return bool(cookie) and secrets.compare_digest(
+        cookie.encode("utf-8"), session_token().encode("utf-8"))
 
 
 def code_is_valid(code: str) -> bool:
-    return secrets.compare_digest(code, SETTINGS_ACCESS_CODE)
+    # Bytes, not str: compare_digest raises TypeError on non-ASCII text (a 500).
+    return secrets.compare_digest(code.encode("utf-8"), SETTINGS_ACCESS_CODE.encode("utf-8"))

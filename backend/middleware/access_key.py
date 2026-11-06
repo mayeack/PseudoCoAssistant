@@ -39,7 +39,18 @@ def routed_path(request: Request) -> str:
 
 def _host_is_valid(request: Request) -> bool:
     host = request.headers.get("host")
-    return host is None or bool(_VALID_HOST.match(host))
+    # RFC 9112 allows optional whitespace around a field value, and uvicorn's
+    # httptools parser keeps trailing spaces and tabs, so strip them first.
+    return host is None or bool(_VALID_HOST.match(host.strip(" \t")))
+
+
+def keys_match(presented: str, expected: str) -> bool:
+    """Constant-time comparison of two secrets, on their UTF-8 bytes.
+
+    ``secrets.compare_digest`` raises TypeError for a str holding non-ASCII
+    characters, which turned a wrong key such as "café" into a 500.
+    """
+    return secrets.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
 
 
 def session_token() -> str:
@@ -53,7 +64,7 @@ def session_token() -> str:
 
 def _has_valid_cookie(request: Request) -> bool:
     cookie = request.cookies.get(COOKIE_NAME, "")
-    return bool(cookie) and secrets.compare_digest(cookie, session_token())
+    return bool(cookie) and keys_match(cookie, session_token())
 
 
 def _has_valid_basic_auth(request: Request) -> bool:
@@ -65,7 +76,7 @@ def _has_valid_basic_auth(request: Request) -> bool:
     except (binascii.Error, UnicodeDecodeError, ValueError):
         return False
     _, _, password = decoded.partition(":")
-    return secrets.compare_digest(password, settings.access_key)
+    return keys_match(password, settings.access_key)
 
 
 # Header that carries the raw key, for API clients whose auth settings take a
@@ -76,9 +87,7 @@ ACCESS_KEY_HEADER = "X-Access-Key"
 
 def _has_valid_key_header(request: Request) -> bool:
     presented = request.headers.get(ACCESS_KEY_HEADER, "")
-    return bool(presented) and secrets.compare_digest(
-        presented.encode("utf-8"), settings.access_key.encode("utf-8")
-    )
+    return bool(presented) and keys_match(presented, settings.access_key)
 
 
 class AccessKeyMiddleware(BaseHTTPMiddleware):
@@ -88,7 +97,8 @@ class AccessKeyMiddleware(BaseHTTPMiddleware):
       * Browser  -> log in at /login, which sets an HttpOnly session cookie.
       * API/curl -> HTTP Basic Auth  (curl -u x:$ACCESS_KEY ...).
       * API      -> an ``X-Access-Key: $ACCESS_KEY`` header.
-    No-op when settings.access_key is empty (local development).
+    No-op when settings.access_key is empty (local development), apart from
+    refusing a malformed Host header.
     """
 
     async def dispatch(self, request: Request, call_next):

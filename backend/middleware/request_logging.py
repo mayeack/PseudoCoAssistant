@@ -3,6 +3,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import time
 import logging
 import uuid
+from urllib.parse import quote
 from backend.logging.governance_logger import governance_logger
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,9 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
         # The routed path, not request.url.path: request.url is rebuilt from the
         # Host header, so a crafted Host would make the log name the wrong route.
-        path = request.scope.get("path") or "/"
+        # Logged percent-encoded: scope["path"] is already decoded, so an encoded
+        # CR/LF (%0D%0A) would otherwise start a forged line in the plain-text log.
+        path = quote(request.scope.get("path") or "/", safe="/:@!$&'()*+,;=")
 
         # Log request
         logger.info(
