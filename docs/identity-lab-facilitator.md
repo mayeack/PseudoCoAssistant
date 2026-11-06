@@ -147,7 +147,9 @@ That way the AI Defense blocks in the room stack belong to the victim alone, and
 - **4.5:** the persona activity: the daily baseline sign-ins, the self-check, the T-18 gate, the takeover and the replay.
 - **4.6:** the per-delivery preflight and the ordered teardown, as in this runbook.
 - **12.1** to **12.4:** the app's configuration, the participant accounts, `lab5-setup`, and the research behind them, as `docs/identity.md` and `deploy/lab5/README.md` describe them.
+- **12.5:** the build order: one 4.22.0 release, tested on the dev copy (port 8011, `l5-dev.pseudocoassistant.com`), whose `.env` holds the Lab 5 keys (so the test suites isolate themselves from it).
 - **12.6:** the Show template checklist ("Show template" in `deploy/lab5/README.md`).
+- **PR-1** to **PR-3:** the plan's three app changes, shipped together as 4.22.0: the identity groundwork, the Duo sign-in, and the Identity Risk Gate with Duo-driven revocation.
 
 ## Quick reference
 

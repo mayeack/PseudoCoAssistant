@@ -10,8 +10,8 @@ the app side of two of them:
 
 Everything here is **inert unless `DUO_ENABLED`**. With it off, Labs 0-4
 behave exactly as before, and the chat page sends no identity request. The
-only differences are additive (plan section 5 lists them for the Labs 0-4
-regression):
+only differences are additive, and the Labs 0-4 regression expects exactly
+these:
 
 - an `identity_risk` stage frame on every turn, which the UI hides on
   anonymous turns;

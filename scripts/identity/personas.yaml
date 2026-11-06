@@ -77,8 +77,9 @@ personas:
     name: Casey Wong
     role: victim
     home: {ipaddr: 198.51.100.33, hostname: CWONG-MBA}
-  # Spike persona (section 8); once its failures expire it is the dry-run
-  # victim on a test stack. Never a lab-day fallback.
+  # Spike persona: the spikes (S1, S2, ..., "Terms used here") run as it; once
+  # its failures expire it is the dry-run victim on a test stack (T-3). Never a
+  # lab-day fallback.
   - username: nina.osei
     name: Nina Osei
     role: spike

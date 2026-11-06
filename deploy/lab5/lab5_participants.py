@@ -403,7 +403,7 @@ def preflight(env: Env, create_missing: bool) -> None:
     cii = env.admin.group_by_name(CII_READ_ONLY)
     if not cii:
         raise Lab5Error(f"Duo has no '{CII_READ_ONLY}' group: Identity Intelligence creates it when it is "
-                        "provisioned (plan 2); participant accounts need it for Duo SSO into CII")
+                        "provisioned on the tenant; participant accounts need it for Duo SSO into CII")
     env.groups[CII_READ_ONLY] = str(cii["group_id"])
     wanted = group_name(env.workshop)
     group = env.admin.group_by_name(wanted)

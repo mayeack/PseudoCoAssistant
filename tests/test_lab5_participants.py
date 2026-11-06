@@ -2126,7 +2126,8 @@ def test_expire_crash_notifies() -> None:
 
 
 def test_docs_define_their_terms() -> None:
-    print("== the runbook defines every spike, decision and plan section the docs act on (the plan is not in git) ==")
+    print("== the runbook defines every spike, decision and plan section the docs and tools cite (the plan is not in "
+          "git) ==")
     runbook = (ROOT / "docs" / "identity-lab-facilitator.md").read_text()
     try:
         terms = runbook[runbook.index("## Terms used here"):runbook.index("## Quick reference")]
@@ -2138,10 +2139,53 @@ def test_docs_define_their_terms() -> None:
     cited = {t for text in texts for t in re.findall(r"\b(S\d{1,2}|[AI]\d)\b", text)}
     check("every spike (S1, S7, ...) and decision (A3, I5, ...) the docs cite is defined in 'Terms used here'",
           terms and cited and cited <= defined, f"undefined: {sorted(cited - defined)}")
-    sections = set(re.findall(r"\b(?:plan |section )?(4\.[2-6]|12\.[1-6])\b", "\n".join(texts)))
-    check("...and so is every plan section they cite (4.2-4.6, 12.1-12.6)",
-          all(f"**{sec}" in terms or (sec in ("12.2", "12.3") and "**12.1** to **12.4" in terms)
-              for sec in sections), str(sorted(sections)))
+
+    # Every plan section or plan PR the docs and the Lab 5 code cite by number: "plan 2", "plan section 5",
+    # "section 8", "(plan 12.5)", "PR-3", and the bare 4.2-4.6 / 12.1-12.6 the tools print.
+    sources = [ROOT / "docs" / "identity.md", ROOT / "deploy" / "lab5" / "README.md",
+               ROOT / "scripts" / "identity" / "personas.yaml", ROOT / "tests" / "identity_isolation.py",
+               ROOT / "tests" / "run_all.sh", ROOT / "deploy" / "launchd" / "run-lab5-job.sh",
+               ROOT / "deploy" / "launchd" / "install-lab5.sh", ROOT / "backend" / "agents" / "nodes" / "identity.py",
+               ROOT / "backend" / "middleware" / "identity.py", ROOT / "backend" / "routers" / "identity_auth.py",
+               ROOT / "tests" / "test_identity_gate.py", ROOT / "tests" / "test_duo_signin.py"]
+    sources += sorted((ROOT / "deploy" / "lab5").glob("*.py")) + sorted((ROOT / "deploy" / "lab5").glob("*.yaml"))
+    sources += sorted((ROOT / "scripts" / "identity").glob("*.py"))
+    sources += sorted((ROOT / "backend" / "services").glob("identity_*.py"))
+    explicit = re.compile(r"\bplan (?:section )?(\d+(?:\.\d+)?)\b|(?<!workshop )\bsection (\d+(?:\.\d+)?)\b"
+                          r"|\b(PR-\d+)\b")
+    bare = re.compile(r"\b(?:plan |section )?(4\.[2-6]|12\.[1-6])\b")
+    found: Dict[str, List[str]] = {}
+    for path in sources:
+        text = runbook.replace(terms, "") if path.name == "identity-lab-facilitator.md" else path.read_text()
+        for line_no, line in enumerate(text.splitlines(), 1):
+            for match in explicit.finditer(line):
+                found.setdefault(next(g for g in match.groups() if g), []).append(
+                    f"{path.relative_to(ROOT)}:{line_no}")
+            for match in bare.finditer(line):
+                found.setdefault(match.group(1), []).append(f"{path.relative_to(ROOT)}:{line_no}")
+    for line_no, line in enumerate(runbook.replace(terms, "").splitlines(), 1):
+        for match in list(explicit.finditer(line)) + list(bare.finditer(line)):
+            found.setdefault(next(g for g in match.groups() if g), []).append(f"runbook:{line_no}")
+
+    ranges = re.findall(r"\*\*([\w.-]+)\*\* to \*\*([\w.-]+):?\*\*", terms)
+
+    def key(term):
+        head, _, num = term.rpartition("-") if term.startswith("PR-") else ("", "", term)
+        return head, tuple(int(x) for x in num.split("."))
+
+    def is_defined(term: str) -> bool:
+        if f"**{term}**" in terms or f"**{term}:**" in terms:
+            return True
+        return any(key(a)[0] == key(term)[0] and len(key(a)[1]) == len(key(term)[1]) and key(a) <= key(term) <= key(b)
+                   for a, b in ranges)
+
+    undefined = {term: where[:3] for term, where in sorted(found.items()) if not is_defined(term)}
+    check("...and so is every plan section or plan PR the docs and the Lab 5 code cite, wherever and however they "
+          "cite it", found and not undefined, str(undefined))
+    check("...the explicit forms are read: 'plan 2', 'plan section 5', 'section 8', 'PR-3' and '(plan 12.5)'",
+          [next(g for g in m.groups() if g) for m in explicit.finditer(
+              "(plan 2) plan section 5, section 8; PR-3 (plan 12.5) workshop section 4.7")]
+          == ["2", "5", "8", "PR-3", "12.5"])
     check("the docs say the plan is kept outside the repository, so nobody follows a link that is not there",
           "kept outside the repository" in runbook and "kept outside the repository" in texts[1])
 

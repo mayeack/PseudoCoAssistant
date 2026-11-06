@@ -112,7 +112,7 @@ WARN_HOURS = 2.0                       # `status` warns when a batch has less le
 # margin on top (they are on no card, so a later time only delays down's
 # "every batch is deleted or has expired").
 LOST_MARGIN_S = 300
-VICTIM_ROLES = ("victim", "spike")     # spike: the dry-run victim, on a test stack only (plan 8)
+VICTIM_ROLES = ("victim", "spike")     # spike: the dry-run victim, on a test stack only (T-3)
 CAST_FILE = "scripts/identity/personas.yaml"
 # workshop.yaml `bypass_codes:` (lab5_setup refuses anything else before it connects)
 RANGES = {"count": (1, BYPASS_PER_REQUEST, "codes per persona per box"),
