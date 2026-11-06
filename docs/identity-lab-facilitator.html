@@ -80,13 +80,13 @@ ul,ol{padding-left:1.4rem}
 <p>Run <code>deploy/launchd/install-lab5.sh</code> from the main checkout. It installs the daily <code>lab5-setup expire</code> (08:15) and the persona baseline plus self-check (09:20).</p>
 </li>
 <li>
-<p>After spikes S1, S2 and S7 pass, at least 4 weeks before the first delivery, set <code>baseline.enabled: true</code> in <code>personas.yaml</code>. From then on every persona signs in once a day. If anything is wrong, the self-check raises a macOS notification: a failed sign-in, a missing Keychain secret or counter, a disabled or locked-out persona, or a trusted persona failing a CII check.</p>
+<p>After spikes S1, S2 and S7 pass, at least 4 weeks before the first delivery, set <code>baseline.enabled: true</code> in <code>personas.yaml</code>. From then on every persona signs in once a day. If anything is wrong, the self-check raises a macOS notification: a failed sign-in, a missing Keychain secret or counter, a disabled or locked-out persona, or a trusted persona failing a CII check. So does a run that crashes or cannot load <code>personas.yaml</code>, and the launchd wrapper (<code>deploy/launchd/run-lab5-job.sh</code>) notifies when the job cannot start at all, for example after a Python upgrade breaks the tool's venv: re-create it as <code>deploy/lab5/README.md</code> says.</p>
 </li>
 <li>
 <p><strong>T-18 gate:</strong> <code>py scripts/identity/persona_activity.py selfcheck --gate</code>. Every persona must be out of &quot;Unknown&quot;. If one is not, the delivery date moves.</p>
 </li>
 </ol>
-<p>Long trips with the Mac shut down stop the baseline. A few missed days are fine. A missed week before a delivery is not, and the self-check fails after three days without a sign-in.</p>
+<p>Long trips with the Mac shut down stop the baseline. A few missed days are fine. A missed week before a delivery is not, and the self-check fails after three days without a sign-in. A shut-down Mac runs nothing and notifies nothing, so run <code>py scripts/identity/persona_activity.py selfcheck</code> by hand when you are back.</p>
 <h2>The victim's takeover</h2>
 <p>The scripted takeover is <code>py scripts/identity/persona_activity.py takeover --victim &lt;room victim&gt;</code>:</p>
 <ol>

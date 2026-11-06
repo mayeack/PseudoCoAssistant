@@ -204,6 +204,10 @@ def load_cast(path: Optional[Path] = None) -> Cast:
         doc = yaml.safe_load(path.read_text())
     except OSError as exc:
         raise Lab5Error(f"cannot read the persona cast {path}: {exc.strerror}")
+    except yaml.YAMLError as exc:      # a typo in the file: a Lab5Error, so the daily jobs report it
+        mark = getattr(exc, "problem_mark", None)
+        where = f" (line {mark.line + 1})" if mark is not None else ""
+        raise Lab5Error(f"the persona cast {path} is not valid YAML{where}: fix the file")
     return cast_from_dict(doc or {})
 
 

@@ -388,6 +388,8 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
         cast = load_cast(args.cast)
     except Lab5Error as exc:
         print(f"persona_activity: {exc}", file=out)
+        if args.command in ("baseline", "selfcheck"):        # the daily job: no one reads its output
+            deps.notify("Lab 5 persona " + args.command, "did not run: " + str(exc)[:150])
         return 2
     private_dir(root)
     reporter = Reporter(redactor, out=out, log_path=root / "personas" / "runs" / f"{utc_stamp()}-{args.command}.log")
@@ -423,6 +425,12 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
         if args.command in ("baseline", "selfcheck"):
             deps.notify("Lab 5 persona " + args.command, "did not run: " + redactor.scrub(str(exc))[:150])
         return 2
+    except Exception as exc:  # noqa: BLE001 - the daily job's crash must notify too (the traceback follows)
+        reporter.line(f"persona_activity {args.command}: crashed ({type(exc).__name__})")
+        if args.command in ("baseline", "selfcheck"):
+            deps.notify("Lab 5 persona " + args.command, f"crashed ({type(exc).__name__}); see "
+                                                          "~/.pseudoco-lab5/personas/runs/")
+        raise
     finally:
         reporter.close()
 

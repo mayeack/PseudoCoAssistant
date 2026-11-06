@@ -32,10 +32,10 @@ Everything here runs from your Mac. There is no broker and nothing in AWS. Secre
 
    Plan section 4.2 limits every lab app to PseudoCo Workforce. That was written before the participant accounts: Sign-in limited that way refuses every participant, so no attendee can sign in to their own instance. Never add a participant account to PseudoCo Workforce to get around it.
 5. Run `deploy/launchd/install-lab5.sh` from the main checkout. It installs the daily `lab5-setup expire` (08:15) and the persona baseline plus self-check (09:20).
-6. After spikes S1, S2 and S7 pass, at least 4 weeks before the first delivery, set `baseline.enabled: true` in `personas.yaml`. From then on every persona signs in once a day. If anything is wrong, the self-check raises a macOS notification: a failed sign-in, a missing Keychain secret or counter, a disabled or locked-out persona, or a trusted persona failing a CII check.
+6. After spikes S1, S2 and S7 pass, at least 4 weeks before the first delivery, set `baseline.enabled: true` in `personas.yaml`. From then on every persona signs in once a day. If anything is wrong, the self-check raises a macOS notification: a failed sign-in, a missing Keychain secret or counter, a disabled or locked-out persona, or a trusted persona failing a CII check. So does a run that crashes or cannot load `personas.yaml`, and the launchd wrapper (`deploy/launchd/run-lab5-job.sh`) notifies when the job cannot start at all, for example after a Python upgrade breaks the tool's venv: re-create it as `deploy/lab5/README.md` says.
 7. **T-18 gate:** `py scripts/identity/persona_activity.py selfcheck --gate`. Every persona must be out of "Unknown". If one is not, the delivery date moves.
 
-Long trips with the Mac shut down stop the baseline. A few missed days are fine. A missed week before a delivery is not, and the self-check fails after three days without a sign-in.
+Long trips with the Mac shut down stop the baseline. A few missed days are fine. A missed week before a delivery is not, and the self-check fails after three days without a sign-in. A shut-down Mac runs nothing and notifies nothing, so run `py scripts/identity/persona_activity.py selfcheck` by hand when you are back.
 
 ## The victim's takeover
 

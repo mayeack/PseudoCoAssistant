@@ -11,11 +11,13 @@
          persona and is safe to run any time. Daily, one-shot (KeepAlive=false);
          a run missed while the Mac sleeps runs when it wakes. Reads the
          Provisioner keys from the login Keychain through `security`.
+         run-lab5-job.sh raises a macOS notification when the job cannot start
+         (LAB5_PYTHON missing or broken); the job notifies on a failed run.
          Installed by install-lab5.sh, which fills in the placeholders. -->
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>__PSEUDOCO_ASSISTANT_DIR__/deploy/lab5/lab5-setup</string>
+        <string>__PSEUDOCO_ASSISTANT_DIR__/deploy/launchd/run-lab5-job.sh</string>
         <string>expire</string>
     </array>
     <key>EnvironmentVariables</key>

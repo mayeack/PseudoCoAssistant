@@ -2045,6 +2045,21 @@ def test_half_made_participant() -> None:
               == {"l5-acme", "CII Read-Only"}, out)
 
 
+def test_expire_crash_notifies() -> None:
+    print("== expire, the daily job: a crash (not a Lab5Error) notifies before its traceback ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        h.duo.transport = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug"))
+        try:
+            h.run("expire", yaml=False)
+            raised = False
+        except RuntimeError:
+            raised = True
+        check("a crash propagates (its traceback reaches the job's log) after a notification naming it",
+              raised and h.notes and h.notes[-1][0] == "lab5-setup expire"
+              and "crashed (RuntimeError)" in h.notes[-1][1], str(h.notes))
+
+
 def main() -> int:
     for test in (test_units, test_up_creates_participants, test_check_and_refusals, test_expire,
                  test_expire_after_up_cleans_the_handout, test_signin_user_access_docs,
@@ -2054,7 +2069,7 @@ def main() -> int:
                  test_handouts_revoke_waits_for_the_new_batch, test_duo_transport_errors, test_contained_victim,
                  test_bypass_locked_out_is_temporary, test_bypass_lost_create_answer, test_signin_policy_docs,
                  test_bypass_down_then_up, test_bypass_unreadable_record, test_bypass_valid_until_after_creates,
-                 test_half_made_participant):
+                 test_half_made_participant, test_expire_crash_notifies):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

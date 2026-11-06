@@ -1492,6 +1492,11 @@ def run_expire(args: argparse.Namespace, deps: Deps) -> int:
         reporter.line(f"lab5-setup expire: {exc}")
         deps.notify("lab5-setup expire", "did not run: " + redactor.scrub(str(exc))[:150])
         return 2
+    except Exception as exc:  # noqa: BLE001 - a daily job no one watches: a crash must notify too
+        reporter.line(f"lab5-setup expire: crashed ({type(exc).__name__}); see the traceback in "
+                      f"logs/launchd-lab5-expire.log")
+        deps.notify("lab5-setup expire", f"crashed ({type(exc).__name__}); see {root}/runs/")
+        raise
     finally:
         reporter.close()
 

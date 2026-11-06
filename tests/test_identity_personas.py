@@ -577,8 +577,9 @@ def test_launchd() -> None:
     script = ROOT / "deploy" / "launchd" / "install-lab5.sh"
     check("install-lab5.sh parses", subprocess.run(["bash", "-n", str(script)]).returncode == 0)
     check("install-lab5.sh is executable", os.access(script, os.X_OK))
-    for job, needle in (("expire", ["deploy/lab5/lab5-setup", "expire"]),
-                        ("baseline", ["scripts/identity/persona_activity.py", "baseline"])):
+    wrapper = ROOT / "deploy" / "launchd" / "run-lab5-job.sh"
+    for job, needle in (("expire", ["deploy/launchd/run-lab5-job.sh", "expire"]),
+                        ("baseline", ["deploy/launchd/run-lab5-job.sh", "baseline"])):
         label = f"com.yeack.pseudoco-assistant-lab5-{job}"
         proc = subprocess.run(["bash", str(script), "--only", job, "--print"], capture_output=True,
                               env=dict(os.environ, LAB5_PYTHON="/opt/lab5/bin/python"))
@@ -596,8 +597,9 @@ def test_launchd() -> None:
         check(f"{job}: daily at a fixed time, one-shot, not at load",
               set(plist.get("StartCalendarInterval", {})) == {"Hour", "Minute"} and plist.get("KeepAlive") is False
               and plist.get("RunAtLoad") is False)
-        check(f"{job}: uses the Lab 5 venv, no placeholder left",
-              "/opt/lab5/bin/python" in proc.stdout.decode() and "__" not in proc.stdout.decode())
+        check(f"{job}: uses the Lab 5 venv (LAB5_PYTHON for the wrapper), no placeholder left",
+              (plist.get("EnvironmentVariables") or {}).get("LAB5_PYTHON") == "/opt/lab5/bin/python"
+              and "__" not in proc.stdout.decode())
         check(f"{job}: logs to logs/launchd-lab5-{job}.log (gitignored)",
               plist.get("StandardOutPath", "").endswith(f"/logs/launchd-lab5-{job}.log"))
         check(f"{job}: no workshop file and no secret on its command line",
@@ -605,11 +607,58 @@ def test_launchd() -> None:
     install = (ROOT / "deploy" / "launchd" / "install.sh").read_text()
     check("install.sh (the app's agents) does not install the Lab 5 jobs", "lab5" not in install)
 
+    # A job that cannot start (LAB5_PYTHON missing, a broken venv) is the one
+    # failure nothing in Python can report: the wrapper notifies for it.
+    check("run-lab5-job.sh parses and is executable",
+          subprocess.run(["bash", "-n", str(wrapper)]).returncode == 0 and os.access(wrapper, os.X_OK))
+    with tempfile.TemporaryDirectory() as tmp:
+        stub = Path(tmp) / "osascript"
+        said = Path(tmp) / "said.txt"
+        stub.write_text(f"#!/bin/bash\nprintf '%s\\n' \"$@\" >> {said}\n")
+        stub.chmod(0o755)
+        for job in ("expire", "baseline"):
+            said.unlink(missing_ok=True)
+            run = subprocess.run(["bash", str(wrapper), job], capture_output=True, text=True, timeout=30,
+                                 env=dict(os.environ, LAB5_PYTHON=str(Path(tmp) / "no-such-venv" / "python"),
+                                          PATH=f"{tmp}:{os.environ.get('PATH', '')}"))
+            note = said.read_text() if said.exists() else ""
+            check(f"{job}: LAB5_PYTHON missing -> exit 2, the fix in the log, and a macOS notification",
+                  run.returncode == 2 and "lacks duo_client/PyYAML" in run.stderr
+                  and "display notification" in note and f"Lab 5 {job}" in note and "did not run" in note,
+                  f"{run.returncode} {run.stderr!r} {note!r}")
+        run = subprocess.run(["bash", str(wrapper), "nonsense"], capture_output=True, text=True, timeout=30)
+        check("an unknown job is refused (exit 2) and runs nothing", run.returncode == 2 and "usage" in run.stderr)
+
+
+def test_daily_job_crash_notifies() -> None:
+    print("== a daily job that crashes (not a Lab5Error) still raises its notification ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        w = World(Path(tmp))
+        w.pp("--dry-run")
+        w.cii = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug"))
+        try:
+            w.pa("selfcheck", "--no-notify")
+            raised = None
+        except RuntimeError as exc:
+            raised = exc
+        check("selfcheck: the crash propagates (its traceback reaches the log)", raised is not None)
+        check("...after a notification naming it", w.notes and w.notes[-1][0] == "Lab 5 persona selfcheck"
+              and "crashed (RuntimeError)" in w.notes[-1][1], str(w.notes))
+        bad = Path(tmp) / "broken.yaml"
+        bad.write_text("personas: [\n")
+        out = io.StringIO()
+        deps = pa.Deps(keychain_runner=w.keychain.runner, state_root=w.root, out=out,
+                       notify=lambda title, msg: w.notes.append((title, msg)))
+        rc = pa.main(["baseline", "--cast", str(bad)], deps=deps)
+        check("baseline with a personas.yaml it cannot load: exit 2, and a notification (it used to say nothing)",
+              rc == 2 and w.notes[-1][0] == "Lab 5 persona baseline" and "did not run" in w.notes[-1][1],
+              out.getvalue() + str(w.notes[-1:]))
+
 
 def main() -> int:
     for test in (test_cast_is_disjoint, test_cast_validation, test_keychain_store, test_provision, test_baseline,
                  test_counter_lock, test_takeover, test_replay, test_selfcheck, test_reset_and_teardown,
-                 test_cii_client, test_launchd):
+                 test_cii_client, test_launchd, test_daily_job_crash_notifies):
         try:
             test()
         except Exception as exc:  # noqa: BLE001
