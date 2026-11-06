@@ -106,7 +106,11 @@ AI Red Teaming → **Add component → Add target**:
 3. **Advanced settings** and **Summary**, then save. Run **Test connection**
    before a full run.
 
-Then **Start red teaming**, pick the target and a profile.
+Then **Start red teaming**, pick the target and a profile, and name the run
+`PseudoCo <theme> <Protected|Unprotected>`: `PseudoCo MedAdvice Protected`
+when the template sends `ai_defense_review: true`, `PseudoCo MedAdvice
+Unprotected` when it does not. Every run against a target carries the same
+name, and the start time tells the runs apart.
 
 ## What a run costs and where it lands
 
@@ -120,3 +124,25 @@ Then **Start red teaming**, pick the target and a profile.
   `multi_agent_mode: true` each turn makes several model calls and takes
   longer still.
 - The tunnel and the app have to stay up for the whole run.
+
+## Keeping it fresh
+
+The skill `ai-defense-red-team-and-inventory`
+(`.claude/skills/ai-defense-red-team-and-inventory/`) drives red teaming and
+the AI Inventory scan through the AI Defense API with the PseudoCo org's
+Management key. A desktop scheduled task runs its `refresh.py refresh` at
+07:00 on the 1st of every month. One refresh does four things:
+
+1. It re-scans `main` with `cisco-aibom` and uploads the result to AI
+   Inventory. If `main` hasn't moved, it re-uploads the last report instead.
+2. It runs Quick Start (1,998 prompts) against both targets, one after the
+   other. The "with AI Defense" target goes first and takes about 2 h. The
+   unprotected baseline follows and takes over 10 h, because every prompt
+   reaches the local model. The runs are named `PseudoCo MedAdvice
+   Protected` and `PseudoCo MedAdvice Unprotected`.
+3. It compares each run with the previous run on the same target.
+4. It writes a summary to `~/.ai-defense-refresh/reports/<date>/`.
+
+A baseline run can end `JOB_STOPPED` when Cisco's per-attack deadline expires
+while attacks queue on the model. The summary still scores the attacks that
+finished and lists the stop as a problem.
