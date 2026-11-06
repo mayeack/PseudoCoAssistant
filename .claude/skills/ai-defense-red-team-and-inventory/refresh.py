@@ -79,7 +79,10 @@ TARGETS = {
         "needs_ai_defense": False,
     },
 }
-DEFAULT_TARGETS = ("protected",)
+# Both run every month, one after the other: they share the one local model.
+# Protected first (~2 h, AI Defense stops most prompts before the model), then the
+# baseline, where every prompt reaches the model (many hours; may end JOB_STOPPED).
+DEFAULT_TARGETS = ("protected", "baseline")
 PROFILE_ID = "95751205-3d1e-434f-b619-7a951e76965a"   # "AI Defense Quick Start" (1,998 prompts via API)
 
 TERMINAL_JOB_STATES = {"JOB_COMPLETED", "JOB_STOPPED", "JOB_FAILED", "JOB_CANCELLED", "JOB_CANCELED", "JOB_ERROR"}
@@ -585,7 +588,7 @@ def wait_job(task_id, interval, max_hours):
                 log("error_message: " + job["error_message"][:500])
             return job
         if time.time() > deadline:
-            raise Fail(f"{task_id} still {status} after {max_hours} h; check it later with redteam-wait")
+            raise Fail(f"{task_id} still {status} after {max_hours} h; check it later with redteam-wait/redteam-report")
         time.sleep(interval)
 
 
@@ -867,7 +870,7 @@ def main(argv=None):
 
     def add_wait_opts(sp):
         sp.add_argument("--interval", type=int, default=300, help="poll seconds (default 300)")
-        sp.add_argument("--max-hours", type=float, default=16, help="give up waiting after this long")
+        sp.add_argument("--max-hours", type=float, default=30, help="give up waiting on one run after this long")
 
     sub.add_parser("setup", help="install cisco-aibom + catalog under ~/.ai-defense-refresh")
 

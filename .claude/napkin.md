@@ -281,7 +281,8 @@ Curated, high-value runbook. Read before work; keep only recurring guidance.
 - **AI Red Teaming + AI Inventory live in a DIFFERENT org (PseudoCo)** and use the
   Management key in `~/.aibom-ai-defense-key`, not the inspection key. Skill
   `ai-defense-red-team-and-inventory` (`refresh.py`); a desktop scheduled task
-  reruns it on the 5th of each month. A red-team run = ~2,000 real governed turns
+  reruns it on the 1st of each month against BOTH targets (protected, then the
+  unprotected baseline: most of a day). Each run = ~2,000 real governed turns
   in the DB, Splunk and the MedAdvice Agent stream.
 
 ## Chat latency (2026-07-15 remediation — where the time goes)

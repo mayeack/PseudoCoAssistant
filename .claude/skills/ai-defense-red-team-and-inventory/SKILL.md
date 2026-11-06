@@ -26,37 +26,44 @@ library, so the system `python3` runs it. It never prints a secret.
 
 A desktop scheduled task, **AI Defense monthly refresh**
 (`~/.claude/scheduled-tasks/ai-defense-monthly-refresh/`), fires at 07:00 local
-on the 5th of every month. It runs:
+on the 1st of every month. It runs:
 
 ```bash
-cd /Applications/DemoBot && python3 .claude/skills/ai-defense-red-team-and-inventory/refresh.py refresh
+cd /Applications/DemoBot && caffeinate -is python3 .claude/skills/ai-defense-red-team-and-inventory/refresh.py refresh
 ```
+
+`caffeinate -is` keeps the Mac awake for the whole run. If the Mac sleeps, the
+tunnel goes dark, and Cisco keeps sending attacks that then fail.
 
 That command does four things in order:
 
-1. **preflight.** It changes nothing. It checks the Management key, the target
-   and the profile, that no run is in flight, the app on `localhost:8001`, the
-   public tunnel, that the tunnel accepts `.env`'s `ACCESS_KEY` as
-   `X-Access-Key`, that `ACCESS_KEY` hasn't changed since the target was last
-   confirmed, and that `AI_DEFENSE_ENABLED=True`. Any FAIL stops the run.
+1. **preflight.** It changes nothing. It checks the Management key, both
+   targets and the profile, that no run is in flight, the app on
+   `localhost:8001`, the public tunnel, that the tunnel accepts `.env`'s
+   `ACCESS_KEY` as `X-Access-Key`, that `ACCESS_KEY` hasn't changed since the
+   targets were last confirmed, and that `AI_DEFENSE_ENABLED=True`. Any FAIL
+   stops the run.
 2. **AI Inventory.** If GitHub `main` moved since the last upload, it validates
    the Anthropic key, scans (about 5 min) and uploads. If `main` hasn't moved,
    it re-uploads the last report for free, which refreshes the inventory's
    last-seen data. A failure here goes into the summary, and the red team still
    runs.
-3. **Red team.** It starts a Quick Start run against the **protected** target
-   and polls every 5 min until the run ends (about 2 h).
+3. **Red team.** It runs Quick Start against **both** targets, one after the
+   other, polling every 5 min. The **protected** target (AI Defense on) goes
+   first and takes about 2 h. The **unprotected baseline** follows and takes
+   many hours (see below). Expect the whole refresh to take most of a day.
 4. **Summary.** It fetches the per-attack results, compares them with the
    previous run on the same target and writes
    `~/.ai-defense-refresh/reports/<date>/SUMMARY.md` (plus `.html`).
 
 The scheduled task only fires while the Claude desktop app is open. If the app
-is closed on the 5th, the task runs at the next launch.
+is closed on the 1st, the task runs at the next launch.
 
 **What a run costs, and where it lands.** Each red-team attack is a real
 governed chat turn: a `medadvice.db` row, a Splunk `gen_ai:json` governance
-event, a trace in the MedAdvice Agent stream and APM spans. Expect about 2,000
-attack turns on the Governance Logs page and in Agent Observability that day.
+event, a trace in the MedAdvice Agent stream and APM spans. Expect about 4,000
+attack turns (two runs of 1,998) on the Governance Logs page and in Agent
+Observability that day.
 An agentic AIBOM scan costs roughly 2.4–2.9M Claude Sonnet tokens on the
 `.env` `ANTHROPIC_API_KEY`, about 1.2M of them cache reads. The persistent
 `--cache-dir` should make later scans of a lightly changed repo much cheaper,
@@ -143,8 +150,12 @@ Each one goes to a child process environment or a request header only.
 
 | Key in `TARGETS` | target_id | Template constants | In the monthly run |
 |---|---|---|---|
-| `protected` | `465aecb9-2367-4f70-95fb-7b110dd3234a` "PseudoCo Assistant - MedAdvice with AI Defense (pseudocoassistant.com)" | `ai_defense_review: true`, all `force_*_injection: false`, `theme: medadvice` | **yes** |
-| `baseline` | `536c17ae-23b3-4ffb-b05c-c4d01ead7878` "PseudoCo Assistant - MedAdvice (pseudocoassistant.com)" | `ai_defense_review: false` | opt-in: `--targets protected,baseline` |
+| `protected` | `465aecb9-2367-4f70-95fb-7b110dd3234a` "PseudoCo Assistant - MedAdvice with AI Defense (pseudocoassistant.com)" | `ai_defense_review: true`, all `force_*_injection: false`, `theme: medadvice` | yes, first |
+| `baseline` | `536c17ae-23b3-4ffb-b05c-c4d01ead7878` "PseudoCo Assistant - MedAdvice (pseudocoassistant.com)" | `ai_defense_review: false` | yes, second |
+
+Both run every month: the protected-vs-unprotected pair is the comparison the
+demo needs. `--targets protected` or `--targets baseline` runs just one, for a
+manual run.
 
 Both targets are Custom Endpoint, OpenAI API provider, with no streaming, URL
 `https://pseudocoassistant.com/api/chat/completions`, response path
@@ -152,14 +163,23 @@ Both targets are Custom Endpoint, OpenAI API provider, with no streaming, URL
 `docs/red-teaming.md` explains why that endpoint exists and how a target is
 configured.
 
-**Why the baseline is opt-in.** An API start of Quick Start sends **1,998
-prompts**. The start body has no attack-volume field (19 names were probed),
-unlike the console Quick Scan's 500. Unprotected, every prompt reaches the one
-local `mistral-nemo:12b` at about 20–30 s, so a baseline run would take well
-over 10 h. Cisco's per-attack deadline also expires while the attacks queue:
-the 2026-11-04 baseline stopped at 96% of just 500 after 5 `DeadlineExceeded`
-attacks. Run the baseline only with a faster model behind the app, or start
-the 500-prompt Quick Scan from the console.
+**What to expect from the baseline.** An API start of Quick Start sends
+**1,998 prompts**. The start body has no attack-volume field (19 names were
+probed), unlike the console Quick Scan's 500. Unprotected, every prompt
+reaches the one local `mistral-nemo:12b` at about 20–30 s, so a baseline run
+takes well over 10 h. Each run waits at most `--max-hours` (default 30).
+Cisco's per-attack deadline can expire while attacks queue on the model: the
+2026-11-04 baseline ended `JOB_STOPPED` at 96% of 500 after 5
+`DeadlineExceeded` attacks. A stopped run is still reported. The summary
+scores the attacks that finished, counts the errored ones as skipped, and
+lists the stop under Problems. If stops become routine, the levers are a
+faster model behind the app or Ollama serving parallel requests
+(`OLLAMA_NUM_PARALLEL`), not the script.
+
+The baseline target holds the `ACCESS_KEY` the user pasted on 2026-11-04. The
+fingerprint check assumes that is still `.env`'s key. If a baseline run comes
+back nearly all `Application` blocks or errors, the target's key is stale:
+check the app log for 401s from Cisco.
 
 **API** (base `https://api.security.cisco.com/api/ai-defense/v1`, header
 `X-Cisco-AI-Defense-Tenant-API-Key` = the Management key):
