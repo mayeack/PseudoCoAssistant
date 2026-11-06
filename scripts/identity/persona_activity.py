@@ -391,6 +391,12 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
         if args.command in ("baseline", "selfcheck"):        # the daily job: no one reads its output
             deps.notify("Lab 5 persona " + args.command, "did not run: " + str(exc)[:150])
         return 2
+    except Exception as exc:  # noqa: BLE001 - a cast that cannot load must notify too (the traceback follows)
+        print(f"persona_activity {args.command}: crashed loading {args.cast} ({type(exc).__name__})", file=out)
+        if args.command in ("baseline", "selfcheck"):
+            deps.notify("Lab 5 persona " + args.command, f"crashed loading the persona cast ({type(exc).__name__}); "
+                                                          "see the traceback in its log")
+        raise
     private_dir(root)
     reporter = Reporter(redactor, out=out, log_path=root / "personas" / "runs" / f"{utc_stamp()}-{args.command}.log")
     kwargs: Dict[str, Any] = {}

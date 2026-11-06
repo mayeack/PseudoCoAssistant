@@ -737,6 +737,38 @@ def test_daily_job_crash_notifies() -> None:
         check("baseline with a personas.yaml it cannot load: exit 2, and a notification (it used to say nothing)",
               rc == 2 and w.notes[-1][0] == "Lab 5 persona baseline" and "did not run" in w.notes[-1][1],
               out.getvalue() + str(w.notes[-1:]))
+        # Valid YAML with a value of the wrong type: cast_from_dict raised ValueError / AttributeError, outside
+        # every handler, so the 09:20 job died with a traceback and no notification.
+        good = w.cast_path.read_text()
+        for name, typo in (("jitter_minutes: 40m", lambda t: t.replace("jitter_minutes: 40", "jitter_minutes: 40m")),
+                           ("spacing_seconds: 10s", lambda t: t.replace("spacing_seconds: 10", "spacing_seconds: 10s")),
+                           ("reuse_days: 8d", lambda t: t.replace("reuse_days: 8", "reuse_days: 8d")),
+                           ("baseline: true (not baseline.enabled)",
+                            lambda t: re.sub(r"(?m)^baseline:\n(?:  .*\n)+", "baseline: true\n", t))):
+            text = typo(good)
+            bad.write_text(text)
+            before = len(w.notes)
+            try:
+                rc, raised = pa.main(["baseline", "--cast", str(bad)], deps=deps), ""
+            except Exception as exc:  # noqa: BLE001
+                rc, raised = None, type(exc).__name__
+            check(f"baseline with {name}: exit 2 and a notification (a value of the wrong type), never a "
+                  "silent traceback",
+                  text != good and not raised and rc == 2 and len(w.notes) == before + 1
+                  and w.notes[-1][0] == "Lab 5 persona baseline" and "wrong type" in w.notes[-1][1]
+                  and "did not run" in w.notes[-1][1], f"{raised} {w.notes[-1:]}")
+        real_load = pa.load_cast
+        pa.load_cast = lambda path: (_ for _ in ()).throw(RuntimeError("bug"))
+        try:
+            pa.main(["baseline", "--cast", str(w.cast_path)], deps=deps)
+            raised = None
+        except RuntimeError as exc:
+            raised = exc
+        finally:
+            pa.load_cast = real_load
+        check("a crash while loading the cast (not a Lab5Error) propagates after a notification naming it",
+              raised is not None and w.notes[-1][0] == "Lab 5 persona baseline"
+              and "crashed loading the persona cast (RuntimeError)" in w.notes[-1][1], str(w.notes[-1:]))
 
 
 def main() -> int:

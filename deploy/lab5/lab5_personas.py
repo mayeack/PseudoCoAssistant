@@ -208,7 +208,13 @@ def load_cast(path: Optional[Path] = None) -> Cast:
         mark = getattr(exc, "problem_mark", None)
         where = f" (line {mark.line + 1})" if mark is not None else ""
         raise Lab5Error(f"the persona cast {path} is not valid YAML{where}: fix the file")
-    return cast_from_dict(doc or {})
+    try:
+        return cast_from_dict(doc or {})
+    except (TypeError, ValueError, AttributeError) as exc:
+        # Valid YAML with a value of the wrong type (`jitter_minutes: 40m`, `baseline: true`): a Lab5Error
+        # too, so the daily jobs report it instead of dying with a traceback no one reads.
+        raise Lab5Error(f"the persona cast {path} has a value of the wrong type ({type(exc).__name__}: "
+                        f"{str(exc)[:120]}): fix the file")
 
 
 # =========================================================================== state
