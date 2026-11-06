@@ -10,12 +10,16 @@ tests/fixtures/cii_end_user_answers.json here, so the two try the same ones.
 ``codes`` in each of its ``places``, alone and then in all of them at once,
 on each of its ``messages``, then the ``errors`` it lists (two different codes
 on one error). A code the table holds is so tried in every place it covers,
-never only where an entry happened to put it.
+never only where an entry happened to put it. Given ``all_messages`` it puts
+them on every message of the table instead, the code-less ``error_messages``
+too, so no code the table holds and no message it holds go untried together
+(the parsers' own checks run that cross; the full lookups keep the section's
+messages).
 """
 from __future__ import annotations
 
 import copy
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 def with_code(error: Dict[str, Any], place: str, code: Any) -> Dict[str, Any]:
@@ -30,17 +34,30 @@ def with_code(error: Dict[str, Any], place: str, code: Any) -> Dict[str, Any]:
     return out
 
 
-def coded_errors(table: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+def all_messages(table: Dict[str, Any]) -> List[str]:
+    """Every message of the table, once each: the ``coded_errors`` section's
+    and the code-less ``error_messages``."""
+    out: List[str] = []
+    for message in list(table["coded_errors"]["messages"]) + list(table["error_messages"]["messages"]):
+        if message not in out:
+            out.append(message)
+    return out
+
+
+def coded_errors(table: Dict[str, Any],
+                 messages: Optional[Sequence[str]] = None) -> List[Tuple[str, Dict[str, Any]]]:
     """Every error of the table's ``coded_errors``, as ``(name, error)``: each
-    code in each place alone and in every place at once, on each message, then
-    the listed errors. None carries a path: the shape it is tried in gives it."""
+    code in each place alone and in every place at once, on each message (the
+    section's, or ``messages``: ``all_messages`` for every one the table
+    holds), then the listed errors. None carries a path: the shape it is tried
+    in gives it."""
     section = table["coded_errors"]
     places = list(section["places"])
     out: List[Tuple[str, Dict[str, Any]]] = []
     for where in [[place] for place in places] + [places]:
         label = where[0] if len(where) == 1 else "every place at once"
         for code in section["codes"]:
-            for message in section["messages"]:
+            for message in (section["messages"] if messages is None else messages):
                 error: Dict[str, Any] = {"message": message}
                 for place in where:
                     error = with_code(error, place, code)

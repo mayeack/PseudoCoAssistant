@@ -581,6 +581,117 @@ def test_cii_client() -> None:
     for what, app_value, mac_value in pins:
         check(f"CII 'no such user', {what}: the self-check's copy is the gate's (identity_lookup)",
               app_value == mac_value, f"{app_value!r} vs {mac_value!r}"[:400])
+
+    # The pin above keeps the two copies the same; these keep them right for
+    # every answer, not only for those the shared table lists (no table lists
+    # every message or code a rule could key on). Each copy's first statement
+    # returns False for an answer that carries an error, before anything else
+    # reads it, so no rule after it, whatever it reads, makes an error "no
+    # such user". And nothing else makes that answer: the gate's NOT_FOUND
+    # comes only from _cii_parse's first statement, under the rule, and the
+    # Mac's found False only from parse_end_user's, under its copy.
+    def docless(fn):
+        return fn.body[1:] if (fn.body and isinstance(fn.body[0], ast.Expr)
+                               and isinstance(fn.body[0].value, ast.Constant)
+                               and isinstance(fn.body[0].value.value, str)) else fn.body
+
+    def lone_return(node):
+        """``node`` is an ``if`` with no else whose body is one return."""
+        return (isinstance(node, ast.If) and not node.orelse and len(node.body) == 1
+                and isinstance(node.body[0], ast.Return))
+
+    def turns_away_errors(fn):
+        """fn's first statement is `if ... or <answer>.get("errors") not in
+        (None, []) or ...: return False`."""
+        body = docless(fn)
+        if not (fn.args.args and body and lone_return(body[0]) and isinstance(body[0].body[0].value, ast.Constant)
+                and body[0].body[0].value.value is False):
+            return False
+        test = body[0].test
+        guard = ast.dump(ast.parse(f'{fn.args.args[0].arg}.get("errors") not in (None, [])', mode="eval").body)
+        return any(ast.dump(operand) == guard for operand in
+                   (test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or) else [test]))
+
+    def first_under(fn, rule):
+        """fn's first statement when it is `if <rule>(<answer>): return ...`
+        with no else, else None."""
+        body = docless(fn)
+        first = body[0] if body else None
+        call = first.test if lone_return(first) else None
+        if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == rule
+                and len(call.args) == 1 and not call.keywords and isinstance(call.args[0], ast.Name)
+                and fn.args.args and call.args[0].id == fn.args.args[0].arg):
+            return first
+        return None
+
+    def bound_once(tree, name):
+        """The module binds ``name`` once, by an undecorated def at its top
+        level: nothing later in it rebinds or wraps that function."""
+        defs = [n for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name == name]
+        rebinds = [n for n in ast.walk(tree) if (isinstance(n, ast.Name) and n.id == name
+                                                 and not isinstance(n.ctx, ast.Load))
+                   or (isinstance(n, ast.alias) and (n.asname or n.name.split(".")[0]) == name)]
+        return len(defs) == 1 and defs[0] in tree.body and not defs[0].decorator_list and not rebinds
+
+    for label, tree, name in (("the gate's", app_tree, "_cii_not_found"), ("the self-check's", mac_tree, "not_found")):
+        fn = function(tree, name)
+        check(f"CII 'no such user', {label} copy ({name}): its first statement returns False for every answer that "
+              "carries an error (errors not absent, null or []), so no rule after it, whatever it reads, makes an "
+              "error 'no such user'; and nothing in its module rebinds or wraps it",
+              turns_away_errors(fn) and bound_once(tree, name),
+              ast.unparse(docless(fn)[0]) if docless(fn) else f"{name} is empty")
+
+    app_fns = {n.name: n for n in app_tree.body if isinstance(n, ast.FunctionDef)}
+    under_rule = first_under(app_fns["_cii_parse"], "_cii_not_found")
+    inside = {id(n) for n in ast.walk(under_rule)} if under_rule else set()
+    stray = []
+    for top in app_tree.body:
+        if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)) and top.name.startswith(("_duo", "duo_")):
+            continue  # Duo's own "no such user" (an empty users list), not CII's
+        if isinstance(top, ast.Assign) and any(
+                (isinstance(t, ast.Name) and t.id == "ANSWERED")
+                or (isinstance(t, ast.Tuple) and any(isinstance(e, ast.Name) and e.id == "NOT_FOUND" for e in t.elts))
+                for t in top.targets):
+            continue  # the constant itself, and the states that are answers
+        stray += [f"line {n.lineno}" for n in ast.walk(top) if id(n) not in inside and (
+            (isinstance(n, ast.Name) and n.id == "NOT_FOUND")
+            or (isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value == "not_found"))]
+    check("the gate: CII's 'no such user' (NOT_FOUND) comes only from the rule, in _cii_parse's first statement "
+          "(if _cii_not_found(body): return ...); identity_lookup names NOT_FOUND nowhere else but where it is "
+          "defined, in ANSWERED and in Duo's half (_duo_*, duo_*)",
+          under_rule is not None and bound_once(app_tree, "_cii_parse") and not stray
+          and any(isinstance(n, ast.Name) and n.id == "NOT_FOUND" for n in ast.walk(under_rule)),
+          ", ".join(stray) or "_cii_parse does not start with `if _cii_not_found(body): return ...`")
+
+    mac_fns = {n.name: n for n in mac_tree.body if isinstance(n, ast.FunctionDef)}
+    under_copy = first_under(mac_fns["parse_end_user"], "not_found")
+    inside = {id(n) for n in ast.walk(under_copy)} if under_copy else set()
+    ruled, stray = [], []
+    lab5_cii_path = ROOT / "deploy" / "lab5" / "lab5_cii.py"
+    for path in sorted((ROOT / "deploy" / "lab5").glob("*.py")) + sorted((ROOT / "scripts" / "identity").glob("*.py")):
+        tree = mac_tree if path == lab5_cii_path else ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Dict):
+                values = [v for k, v in zip(node.keys, node.values) if isinstance(k, ast.Constant) and k.value == "found"]
+            elif isinstance(node, ast.keyword) and node.arg == "found":
+                values = [node.value]
+            elif (isinstance(node, ast.Subscript) and not isinstance(node.ctx, ast.Load)
+                  and isinstance(node.slice, ast.Constant) and node.slice.value == "found"):
+                values = [None]
+            else:
+                values = []
+            for value in values:
+                if id(node) in inside:
+                    ruled.append(value)
+                elif not (isinstance(value, ast.Constant) and value.value is True):
+                    stray.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+    check("the self-check: 'not in CII yet' (found False) comes only from its copy of the rule, in parse_end_user's "
+          "first statement (if not_found(doc): return ...); every other found the Mac's tools (deploy/lab5, "
+          "scripts/identity) write is True",
+          under_copy is not None and bound_once(mac_tree, "parse_end_user") and not stray and len(ruled) == 1
+          and isinstance(ruled[0], ast.Constant) and ruled[0].value is False,
+          ", ".join(stray) or "parse_end_user does not start with `if not_found(doc): return {... found: False}`")
     fake.users["q@pseudocoassistant.com"] = {"trust": "QUESTIONABLE", "failing": ["MFA Flood"]}
     info = client.end_user("q@pseudocoassistant.com")
     check("a persona CII rates QUESTIONABLE and failing MFA Flood reads as such (the nested shape)",
@@ -626,15 +737,17 @@ def test_cii_client() -> None:
     # No error is ever "not in CII yet", whatever it says, what code it
     # carries, where the code sits or in which shape it comes (the gate runs
     # the same table and shapes): every code-less message, and every error
-    # that carries a code, each code in each place the table covers
-    # (tests/cii_end_user_answers.py builds them for both suites).
+    # that carries a code, each code in each place the table covers, on every
+    # message the table holds (tests/cii_end_user_answers.py builds them for
+    # both suites), so no code and no message it holds go untried together.
     shapes = table["error_shapes"]["shapes"]
     check("the shared table tries each error with data null and the error on getEndUser too (the shape the "
           "published schema gives an error there: GetEndUserOutput! is non-null)",
           any(s["data"] is None and s["path"] == ["getEndUser"] for s in shapes), str(shapes))
     for what, errors in (("code-less error message",
                           [(m, {"message": m}) for m in table["error_messages"]["messages"]]),
-                         ("error that carries a code", cii_answers.coded_errors(table))):
+                         ("error that carries a code (each code in each place, alone and all at once, on every "
+                          "message)", cii_answers.coded_errors(table, cii_answers.all_messages(table)))):
         misread = []
         for name, error in errors:
             for shape in shapes:

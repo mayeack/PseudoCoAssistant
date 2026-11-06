@@ -477,7 +477,11 @@ def _cii_not_found(body: Any) -> bool:
     ``deploy/lab5/lab5_cii.py`` applies the same rule on the Mac,
     tests/test_identity_personas.py pins the two copies' code together, and
     ``tests/fixtures/cii_end_user_answers.json`` holds the answers both must
-    read the same way."""
+    read the same way. Since no table lists every message or code a rule
+    could key on, that suite also pins this function's first statement,
+    which turns away every answer that carries an error before anything
+    reads it, and that ``_cii_parse``'s first statement, under this rule, is
+    the only place a CII answer becomes ``NOT_FOUND``."""
     if not isinstance(body, Mapping) or body.get("errors") not in (None, []) or "data" not in body:
         return False
     data = body.get("data")

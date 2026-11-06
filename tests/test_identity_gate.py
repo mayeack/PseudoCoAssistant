@@ -476,20 +476,46 @@ def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
           sorted(section["places"]) == sorted(places) and spellings <= set(section["codes"])
           and "Permission read:user not found for this API client" in section["messages"],
           f"{section['places']}, codes missing {sorted(spellings - set(section['codes']))}")
-    alone, together = set(), set()
-    for _, error in coded:
-        held = {place: read(error) for place, read in places.items() if read(error) is not None}
-        if len(held) == 1:
-            [(place, code)] = held.items()
-            alone.add((place, code, error.get("message")))
-        elif set(held) == set(places) and len(set(held.values())) == 1:
-            together.add((next(iter(held.values())), error.get("message")))
-    want = {(code, message) for code in section["codes"] for message in section["messages"]}
+    def covers(errors, messages):
+        """Whether ``errors`` put every code of the table in each place alone
+        and in all of them at once, on each of ``messages``, each an error
+        with a message and no path of its own (the shape gives it)."""
+        alone, together = set(), set()
+        for _, error in errors:
+            held = {place: read(error) for place, read in places.items() if read(error) is not None}
+            if len(held) == 1:
+                [(place, code)] = held.items()
+                alone.add((place, code, error.get("message")))
+            elif set(held) == set(places) and len(set(held.values())) == 1:
+                together.add((next(iter(held.values())), error.get("message")))
+        want = {(code, message) for code in section["codes"] for message in messages}
+        return (alone >= {(place, code, message) for place in places for code, message in want} and together >= want
+                and all(error.get("message") and "path" not in error for _, error in errors),
+                f"{len(alone)} alone of {len(places) * len(want)}, {len(together)} at once of {len(want)}")
+
     check("every code of the shared table is tried in each of those places alone and in all of them at once, on "
           "each of its messages, and each is an error with a message and no path of its own (the shape gives it)",
-          alone >= {(place, code, message) for place in places for code, message in want} and together >= want
-          and all(error.get("message") and "path" not in error for _, error in coded),
-          f"{len(alone)} alone of {len(places) * len(want)}, {len(together)} at once of {len(want)}")
+          *covers(coded, section["messages"]))
+    # The full lookups below put the codes on the section's messages. The
+    # parser, the only code that reads an error's words or code, tries every
+    # code in every place on every message of the table, the code-less ones
+    # too: a rule on a code plus words the table holds cannot pass because
+    # the table never put the two on one error.
+    every_message = cii_answers.all_messages(table)
+    crossed = cii_answers.coded_errors(table, every_message)
+    check(f"the cross puts every code of the shared table in each place alone and in all of them at once, on every "
+          f"message the table holds ({len(every_message)}: the coded errors' and the code-less ones)",
+          *covers(crossed, every_message))
+    misparsed = []
+    for name, error in crossed:
+        for shape in shapes:
+            got = lookup._cii_parse(_error_answer(shape, error))
+            if (got.get("state"), got.get("error"), got.get("trust_level"), got.get("failing_checks")) != (
+                    "unavailable", "graphql_error", None, []):
+                misparsed.append(f"{name} {shape['where']}: {got}")
+    check(f"every code in every place, alone and all at once, on every message of the shared table ({len(crossed)} "
+          f"errors), in each of its {len(shapes)} shapes: the gate's parser (_cii_parse) reads it unavailable "
+          "(graphql_error) with nothing learned, never 'no such user'", not misparsed, "; ".join(misparsed)[:2000])
     for what, errors in (("code-less error message", [(m, m) for m in table["error_messages"]["messages"]]),
                          ("error that carries a code", coded)):
         misread = []
