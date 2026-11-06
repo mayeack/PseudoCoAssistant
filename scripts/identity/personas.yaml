@@ -42,8 +42,8 @@ replay:
   pushes: 5                           # a short flood the facilitator denies on stage (1-9)
 
 # cii:
-#   end_user_query: >-                # spikes S5/S6 pin the shape; the default is in deploy/lab5/lab5_cii.py
-#     query Lab5EndUser($login: String!) { getEndUser(login: $login) { levelOfTrust failingChecks } }
+#   end_user_query: >-                # the default (deploy/lab5/lab5_cii.py); spikes S5/S6 confirm it. Keep the shape:
+#     query Lab5EndUser($login: String!) { getEndUser(login: $login) { endUserDetails { login status failingChecks endUserTrustScore { levelOfTrust lastUpdated } } } }
 
 # home: where the persona signs in from every day (a residential address near
 # the delivery region; spike S1 shows how Duo geolocates it) and its device.

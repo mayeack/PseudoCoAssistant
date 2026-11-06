@@ -531,6 +531,36 @@ def test_cii_client() -> None:
               for _, url, h, _ in fake.calls)
           and sum(CII["client_secret"] in str(body) for *_, body in fake.calls) == 1)
     check("a user CII does not know yet", client.end_user("b@pseudocoassistant.com")["found"] is False)
+
+    # The published schema (docs.oort.io): getEndUser(login) -> endUserDetails
+    # { failingChecks, endUserTrustScore { levelOfTrust } }. The app's gate asks
+    # exactly that; the self-check must read what the gate reads.
+    app_src = (ROOT / "backend" / "services" / "identity_lookup.py").read_text()
+    app_query = next(ast.literal_eval(node.value) for node in ast.walk(ast.parse(app_src))
+                     if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "CII_END_USER_QUERY"
+                                                             for t in node.targets))
+
+    def selection(query: str) -> str:
+        text = " ".join(query.split())
+        return text[text.index("getEndUser("):]
+
+    check("the default query asks what the app's gate asks (getEndUser -> endUserDetails), operation name aside",
+          selection(cii.END_USER_QUERY) == selection(app_query), f"{cii.END_USER_QUERY!r} vs {app_query!r}")
+    fake.users["q@pseudocoassistant.com"] = {"trust": "QUESTIONABLE", "failing": ["MFA Flood"]}
+    info = client.end_user("q@pseudocoassistant.com")
+    check("a persona CII rates QUESTIONABLE and failing MFA Flood reads as such (the nested shape)",
+          info == {"trust": "QUESTIONABLE", "failing_checks": ["MFA Flood"], "found": True}, str(info))
+    flat = cii.CIIClient(CII["client_id"], CII["client_secret"], CII["token_url"], CII["api_url"], fake,
+                         query="query Lab5EndUser($login: String!) { getEndUser(login: $login) "
+                               "{ levelOfTrust failingChecks } }")
+    try:
+        flat.end_user("q@pseudocoassistant.com")
+        refused = False
+    except Lab5Error:
+        refused = True
+    check("the old flat query fails against the published schema (a Lab5Error, never a silent Unknown)", refused)
+    check("FAVORABLE is a level of trust, and Neutral or better", "FAVORABLE" in cii.TRUST_LEVELS
+          and set(cii.GOOD_TRUST) == {"TRUSTED", "FAVORABLE", "NEUTRAL"})
     check("failing() matches check names loosely", cii.failing(["MFA Flood"], "mfa_flood")
           and not cii.failing(["MFA Flood"], "impossible travel"))
     try:

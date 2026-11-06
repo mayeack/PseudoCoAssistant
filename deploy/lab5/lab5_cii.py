@@ -7,10 +7,16 @@ about 10 h and is cached here for the run) and one GraphQL query,
 ``getEndUser(login)``, whose ``levelOfTrust`` and current ``failingChecks``
 are all the self-check reads (plan 4.5, 12.4). CII's login is the email.
 
-The query's exact shape is pinned by spikes S5/S6. ``END_USER_QUERY`` is the
-default, and personas.yaml ``cii.end_user_query`` overrides it without a code
-change. Values are parsed defensively: a trust level may come back as a string
-or as an object, and a failing check as a name or as an object.
+The shape is the published schema's (docs.oort.io Public API), the same one
+the app's gate asks (``backend/services/identity_lookup.CII_END_USER_QUERY``;
+tests/test_identity_personas.py pins the two together):
+``getEndUser(login: String!): GetEndUserOutput!``, whose ``endUserDetails``
+carries ``failingChecks`` and ``endUserTrustScore { levelOfTrust }``. A null
+``endUserDetails`` (or ``getEndUser``) is a user CII has no record of yet.
+Spikes S5/S6 confirm it on the tenant; personas.yaml ``cii.end_user_query``
+overrides the query, and an override must keep that shape, which is what the
+parser reads. Values are parsed defensively: a trust level may come back as a
+string or as an object, and a failing check as a name or as an object.
 """
 from __future__ import annotations
 
@@ -24,10 +30,11 @@ CII_ITEMS = {"client_id": "pseudoco-lab5-cii-client-id", "client_secret": "pseud
              "token_url": "pseudoco-lab5-cii-token-url", "api_url": "pseudoco-lab5-cii-api-url"}
 
 END_USER_QUERY = ("query Lab5EndUser($login: String!) { getEndUser(login: $login) "
-                  "{ levelOfTrust failingChecks } }")
+                  "{ endUserDetails { login status failingChecks endUserTrustScore { levelOfTrust lastUpdated } } } }")
 
-TRUST_LEVELS = ("TRUSTED", "NEUTRAL", "QUESTIONABLE", "UNTRUSTED", "UNKNOWN")
-GOOD_TRUST = ("TRUSTED", "NEUTRAL")
+# CII's LevelOfTrust, best first; "Neutral or better" (plan 4.6) is GOOD_TRUST.
+TRUST_LEVELS = ("TRUSTED", "FAVORABLE", "NEUTRAL", "QUESTIONABLE", "UNTRUSTED", "UNKNOWN")
+GOOD_TRUST = ("TRUSTED", "FAVORABLE", "NEUTRAL")
 
 Transport = Callable[[str, str, Dict[str, str], Optional[bytes], float], Tuple[int, bytes]]
 
@@ -93,13 +100,17 @@ class CIIClient:
             message = str(first.get("message") if isinstance(first, dict) else first)[:200]
             raise Lab5Error(f"CII query failed ({message}); spikes S5/S6 pin the query: "
                             "set cii.end_user_query in scripts/identity/personas.yaml")
-        user = (doc.get("data") or {}).get("getEndUser")
-        if not user:
+        data = doc.get("data") if isinstance(doc.get("data"), dict) else {}
+        user = data.get("getEndUser")
+        details = user.get("endUserDetails") if isinstance(user, dict) else None
+        if not isinstance(details, dict):
             return {"trust": "UNKNOWN", "failing_checks": [], "found": False}
-        checks = user.get("failingChecks") or []
+        score = details.get("endUserTrustScore")
+        level = score.get("levelOfTrust") if isinstance(score, dict) else score
+        checks = details.get("failingChecks") or []
         if not isinstance(checks, list):
             checks = [checks]
-        return {"trust": _trust(user.get("levelOfTrust")),
+        return {"trust": _trust(level),
                 "failing_checks": sorted({_check_name(c) for c in checks if _check_name(c)}),
                 "found": True}
 

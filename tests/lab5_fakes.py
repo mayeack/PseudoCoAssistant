@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 import random
 import subprocess
 import sys
@@ -443,7 +444,12 @@ class FakeKeychain:
 
 class FakeCII:
     """The CII token endpoint and getEndUser, behind the (method, url, headers,
-    body, timeout) transport the tools use."""
+    body, timeout) transport the tools use. It answers in the published
+    schema's shape (docs.oort.io Public API): ``getEndUser(login)`` is a
+    ``GetEndUserOutput`` whose ``endUserDetails`` carries ``failingChecks`` and
+    ``endUserTrustScore { levelOfTrust }``, and a query asking for
+    ``levelOfTrust`` or ``failingChecks`` straight on ``getEndUser`` fails
+    validation, as the real API's would."""
 
     def __init__(self) -> None:
         self.users: Dict[str, Dict[str, Any]] = {}
@@ -466,17 +472,25 @@ class FakeCII:
             return 401, b"{}"
         if self.graphql_error:
             return 200, json.dumps({"errors": [{"message": self.graphql_error}]}).encode()
+        query = " ".join(str(doc.get("query") or "").split())
+        flat = re.search(r"getEndUser\(login: \$login\) \{ (?:levelOfTrust|failingChecks)\b", query)
+        if flat or "endUserDetails" not in query:
+            field = "levelOfTrust" if "levelOfTrust" in query else "failingChecks"
+            return 200, json.dumps({"errors": [{"message": f"Field '{field}' in type 'GetEndUserOutput' is "
+                                                           "undefined"}]}).encode()
         login = doc["variables"]["login"]
         user = self.users.get(login)
         if user is None:
-            return 200, json.dumps({"data": {"getEndUser": None}}).encode()
+            return 200, json.dumps({"data": {"getEndUser": {"endUserDetails": None,
+                                                            "providerEndUserDetails": []}}}).encode()
         checks = user.get("failing", [])
         if self.shape == "objects":
-            payload = {"levelOfTrust": {"level": user.get("trust", "UNKNOWN")},
-                       "failingChecks": [{"name": c} for c in checks]}
+            score = {"levelOfTrust": {"level": user.get("trust", "UNKNOWN")}}
+            failing = [{"name": c} for c in checks]
         else:
-            payload = {"levelOfTrust": user.get("trust", "UNKNOWN"), "failingChecks": checks}
-        return 200, json.dumps({"data": {"getEndUser": payload}}).encode()
+            score, failing = {"levelOfTrust": user.get("trust", "UNKNOWN")}, checks
+        details = {"login": login, "failingChecks": failing, "endUserTrustScore": score}
+        return 200, json.dumps({"data": {"getEndUser": {"endUserDetails": details}}}).encode()
 
 
 class Clock:
