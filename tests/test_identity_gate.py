@@ -517,6 +517,27 @@ def test_victim_self_check_on_a_partial_answer() -> None:
     lookup.clear_cache()
 
 
+def test_victim_self_check_on_a_refused_client() -> None:
+    print("lab5-setup status: a code-less permission or scope error is 'cannot verify', never 'not in CII yet'")
+    _configure(True)
+    fake = _fresh_fake()
+    fake.set_user("avery.kim", trust="NEUTRAL")
+    # Each once read as CII's "no such user" (a quoted or parenthesized word, or a
+    # scope, taken for the login), so the row said WARN "trust no record in CII yet".
+    for message in ("No user (or group) permission granted to this API client",
+                    "No user 'read' scope granted to this API client",
+                    "Required scope user:read.all not found in access token"):
+        for where, data, path in (("on getEndUser", {"getEndUser": None}, ["getEndUser"]),
+                                  ("on endUserDetails", {"getEndUser": {"endUserDetails": None}},
+                                   ["getEndUser", "endUserDetails"])):
+            status, detail = _box_victim_row(fake, {"data": data, "errors": [{"message": message, "path": path}]})
+            check(f"{message!r} {where}: the box's victim row is FAIL (cannot verify), never WARN 'no record in CII'",
+                  status == "FAIL" and "cannot verify avery.kim (cii graphql_error)" in detail
+                  and "no record in CII" not in detail, f"{status}: {detail}")
+    fake.cii_body = None
+    lookup.clear_cache()
+
+
 def test_victim_self_check_on_a_lockout() -> None:
     print("lab5-setup status: a Duo lockout alone never makes the box's victim row OK (Duo unlocks it on its own)")
     _configure(True)
@@ -1142,6 +1163,7 @@ def main() -> int:
         test_lookup()
         test_cii_not_found_is_an_answer_only_by_its_shape()
         test_victim_self_check_on_a_partial_answer()
+        test_victim_self_check_on_a_refused_client()
         test_victim_self_check_on_a_lockout()
         test_decide()
         test_engines()

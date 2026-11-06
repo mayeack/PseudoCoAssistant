@@ -130,9 +130,12 @@ before any screen or model.
      not found", "User does not exist", "No such user"): "No user
      permissions are granted" or "User pool not found" is about something
      else, so it is an error, never that answer. So are "No user
-     permissions." and "Token has no user.": a word that ends a sentence is
-     never a login (a login's "." or "@" sits inside it), and a bare "no
-     user" counts only as the whole message.
+     permissions.", "Token has no user.", "No user (or group) permission
+     granted" and "Required scope user:read.all not found". A login is an
+     address: an "@" with a word character after it and no space in it,
+     bare, quoted or in parentheses. A word that ends a sentence, a scope,
+     or a quoted or parenthesized word is never one, and a bare "no user"
+     counts only as the whole message.
    - Any other answer that carries an error is `unavailable`, details or not:
      a request-level error (no `data`), an error elsewhere or without a path,
      or a partial answer (say, `failingChecks` failed and came back null), so

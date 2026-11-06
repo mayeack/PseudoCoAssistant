@@ -626,7 +626,7 @@
     }
   ],
   "wording": {
-    "_about": "Messages of a code-less error, each tried on getEndUser (getEndUser null) and on its endUserDetails (getEndUser an object, endUserDetails null). not_found: CII's 'no such user'. unavailable: words about something else (a permission, a scope, a pool, a session), never that answer, including a word that ends a sentence right after 'no user' (no login: a login's '.' or '@' sits inside it), a scope name or list that starts with 'user', and a 'no user' that ends a sentence about something else.",
+    "_about": "Messages of a code-less error, each tried on getEndUser (getEndUser null) and on its endUserDetails (getEndUser an object, endUserDetails null). not_found: CII's 'no such user'. unavailable: words about something else (a permission, a scope, a pool, a session), never that answer, including a word that ends a sentence right after 'no user', a scope name or list that starts with 'user' (user:read.all too), a quoted, backticked or parenthesized word after 'user' or 'no user', a login keyword with no login after it, and a 'no user' that ends a sentence about something else. A login is an address: an '@' with a word character after it and no space in it, bare, quoted, in backticks or in parentheses.",
     "not_found": [
       "End user avery.kim@pseudocoassistant.com not found",
       "User does not exist",
@@ -644,7 +644,14 @@
       "No user.",
       "No user: avery.kim@pseudocoassistant.com",
       "No user matching avery.kim@pseudocoassistant.com",
-      "No such user; check the login"
+      "No such user; check the login",
+      "End user \"avery.kim@pseudocoassistant.com\" does not exist",
+      "User `avery.kim@pseudocoassistant.com` not found",
+      "user:avery.kim@pseudocoassistant.com not found",
+      "No user 'avery.kim@pseudocoassistant.com'",
+      "No user (avery.kim@pseudocoassistant.com)",
+      "No user for avery.kim@pseudocoassistant.com",
+      "No user with email: avery.kim@pseudocoassistant.com"
     ],
     "unavailable": [
       "No user permissions are granted to this API client",
@@ -673,7 +680,25 @@
       "No user, group or role permission granted to this API client",
       "No user with the required permissions",
       "No such user pool",
-      "Could not resolve user scope. Not found."
+      "Could not resolve user scope. Not found.",
+      "No user (or group) permission granted to this API client",
+      "No user (read) access granted",
+      "No user 'read' scope granted to this API client",
+      "No user \"read\" permission",
+      "No user `read` scope",
+      "No user with 'read' permission",
+      "No user with \"end_user:read\" scope",
+      "No user: 'read'",
+      "No user named 'read.all'",
+      "No user (s) found",
+      "No user for id token",
+      "Required scope user:read.all not found in access token",
+      "Scope user:read.all does not exist",
+      "Scope end_user:read.all not found",
+      "Scope user 'read.all' not found",
+      "User (read) not found",
+      "Role for user api.client not found",
+      "No user 'read access@tenant' granted"
     ]
   }
 }

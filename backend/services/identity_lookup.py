@@ -110,26 +110,31 @@ CII_NOT_FOUND_CODES = frozenset({"NOTFOUND", "USERNOTFOUND", "ENDUSERNOTFOUND"})
 #: How much of an error's message the wording is looked for in.
 CII_MESSAGE_SCAN_MAX = 1000
 #: The wording of a "no such user" error: a sentence about the user itself (an
-#: end user, or its record, account, profile or details, with its login quoted
-#: or as an address if any) that is not found or does not exist; "no such
-#: user" at the end of a sentence or before a colon; "no user" as the whole
-#: message; or "no [such] user" before "found", "exists", "with login" (or
-#: email, username, id) or a login, quoted or as an address. A login's "." or
-#: "@" sits inside it, so a word that ends a sentence is never one. Anything
-#: else is not the user: other words between "user" and the verb ("user pool",
-#: "user permission", "scope user.read"), or after "no user" ("no user
-#: permissions.", "no user, group or role", "no user:read"), or a "no user"
-#: that ends a sentence about something else ("Token has no user.").
+#: end user, or its record, account, profile or details, with its login if
+#: any) that is not found or does not exist; "no such user" at the end of a
+#: sentence or before a colon; "no user" as the whole message; or "no [such]
+#: user" before "found" or "exists", or before a login, after "with", "for",
+#: "by", "matching" or "named" (and "login", "email", "username" or "id") or
+#: not. A login is an address: an "@" with a word character after it and no
+#: space in it, bare, quoted, in backticks or in parentheses. So a word that
+#: ends a sentence, a scope ("user:read.all") and a quoted or parenthesized
+#: word ("no user 'read' scope", "no user (or group)") are never one.
+#: Anything else is not the user: other words between "user" and the verb
+#: ("user pool", "user permission", "scope user.read"), or after "no user"
+#: ("no user permissions.", "no user, group or role", "no user:read", "no
+#: user for id token"), or a "no user" that ends a sentence about something
+#: else ("Token has no user.").
 #: Checked only on an error that sits on ``getEndUser`` or its
 #: ``endUserDetails`` (``_CII_NOT_FOUND_PATHS``, see ``_cii_not_found``).
 #: ``deploy/lab5/lab5_cii.py`` holds the same pattern (test_identity_personas pins it).
 _CII_USER_NOT_FOUND_RE = re.compile(
     # A sentence whose subject is the user itself: "<end> user [record|account|...] [with login] [<login>]
-    # [is|was|has] not (been) found / does not exist".
+    # [is|was|has] not (been) found / does not exist". A login is an address, bare or quoted.
     r"\b(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
     r"(?:\s+(?:with|for|having|by)\s+(?:login|email|username|id))?"
-    r"(?:(?:\s*:\s*|\s+)(?:\"[^\"\n]{1,200}\"|'[^'\n]{1,200}'|`[^`\n]{1,200}`|\([^()\n]{1,200}\)"
-    r"|[^\s\"'`()]{0,200}[@.](?=\w)[^\s\"'`()]{0,200}))?"
+    r"(?:(?:\s*:\s*|\s+)(?:\"[^\s\"@]{1,200}@(?=\w)[^\s\"]{0,200}\"|'[^\s'@]{1,200}@(?=\w)[^\s']{0,200}'"
+    r"|`[^\s`@]{1,200}@(?=\w)[^\s`]{0,200}`|\([^\s()@]{1,200}@(?=\w)[^\s()]{0,200}\)"
+    r"|[^\s\"'`()@]{1,200}@(?=\w)[^\s\"'`()]{0,200}))?"
     r"(?:\s*:\s*|\s+)(?:(?:is|was|has|had)\s+)?(?:not\s+(?:been\s+)?found"
     r"|(?:(?:does|did)\s+not|doesn't|didn't|not)\s+exist|(?:could|can)\s*not\s+be\s+found|can't\s+be\s+found)\b"
     # "No such user" at the end of a sentence (a mark before a space or the end), or before a colon.
@@ -137,12 +142,14 @@ _CII_USER_NOT_FOUND_RE = re.compile(
     r"\s*(?:$|[.;!?](?=\s|$)|:(?=\s|$))"
     # "No user" as the whole message.
     r"|^\s*no\s+(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?\s*[.!]?\s*$"
-    # "No [such] user" found / exists, or before a login: "with login" (email, ...), quoted, an address.
+    # "No [such] user" found / exists, or before a login (an address, bare or quoted), after "with login"
+    # (for, by, matching, named; email, username, id) or not.
     r"|\bno\s+(?:such\s+)?(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
     r"(?:\s+(?:found|exists?)\b"
-    r"|\s+(?:with|for|by|matching|named)\s+(?:login|email|username|id)\b"
-    r"|(?:\s*:\s*|\s+)(?:(?:with|matching|named)\s+)?(?:\"[^\"\n]{1,200}\"|'[^'\n]{1,200}'|`[^`\n]{1,200}`"
-    r"|\([^()\n]{1,200}\)|[^\s\"'`()@]{1,200}@(?=\w)[^\s\"'`()]{0,200}))",
+    r"|(?:\s+(?:with|for|by|matching|named)(?:\s+(?:login|email|username|id))?)?(?:\s*:\s*|\s+)"
+    r"(?:\"[^\s\"@]{1,200}@(?=\w)[^\s\"]{0,200}\"|'[^\s'@]{1,200}@(?=\w)[^\s']{0,200}'"
+    r"|`[^\s`@]{1,200}@(?=\w)[^\s`]{0,200}`|\([^\s()@]{1,200}@(?=\w)[^\s()]{0,200}\)"
+    r"|[^\s\"'`()@]{1,200}@(?=\w)[^\s\"'`()]{0,200}))",
     re.IGNORECASE)
 
 _CACHE_MAX = 2048

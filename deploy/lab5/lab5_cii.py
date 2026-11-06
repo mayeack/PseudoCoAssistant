@@ -52,11 +52,12 @@ NOT_FOUND_CODES = frozenset({"NOTFOUND", "USERNOTFOUND", "ENDUSERNOTFOUND"})
 MESSAGE_SCAN_MAX = 1000
 _USER_NOT_FOUND_RE = re.compile(
     # A sentence whose subject is the user itself: "<end> user [record|account|...] [with login] [<login>]
-    # [is|was|has] not (been) found / does not exist".
+    # [is|was|has] not (been) found / does not exist". A login is an address, bare or quoted.
     r"\b(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
     r"(?:\s+(?:with|for|having|by)\s+(?:login|email|username|id))?"
-    r"(?:(?:\s*:\s*|\s+)(?:\"[^\"\n]{1,200}\"|'[^'\n]{1,200}'|`[^`\n]{1,200}`|\([^()\n]{1,200}\)"
-    r"|[^\s\"'`()]{0,200}[@.](?=\w)[^\s\"'`()]{0,200}))?"
+    r"(?:(?:\s*:\s*|\s+)(?:\"[^\s\"@]{1,200}@(?=\w)[^\s\"]{0,200}\"|'[^\s'@]{1,200}@(?=\w)[^\s']{0,200}'"
+    r"|`[^\s`@]{1,200}@(?=\w)[^\s`]{0,200}`|\([^\s()@]{1,200}@(?=\w)[^\s()]{0,200}\)"
+    r"|[^\s\"'`()@]{1,200}@(?=\w)[^\s\"'`()]{0,200}))?"
     r"(?:\s*:\s*|\s+)(?:(?:is|was|has|had)\s+)?(?:not\s+(?:been\s+)?found"
     r"|(?:(?:does|did)\s+not|doesn't|didn't|not)\s+exist|(?:could|can)\s*not\s+be\s+found|can't\s+be\s+found)\b"
     # "No such user" at the end of a sentence (a mark before a space or the end), or before a colon.
@@ -64,12 +65,14 @@ _USER_NOT_FOUND_RE = re.compile(
     r"\s*(?:$|[.;!?](?=\s|$)|:(?=\s|$))"
     # "No user" as the whole message.
     r"|^\s*no\s+(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?\s*[.!]?\s*$"
-    # "No [such] user" found / exists, or before a login: "with login" (email, ...), quoted, an address.
+    # "No [such] user" found / exists, or before a login (an address, bare or quoted), after "with login"
+    # (for, by, matching, named; email, username, id) or not.
     r"|\bno\s+(?:such\s+)?(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
     r"(?:\s+(?:found|exists?)\b"
-    r"|\s+(?:with|for|by|matching|named)\s+(?:login|email|username|id)\b"
-    r"|(?:\s*:\s*|\s+)(?:(?:with|matching|named)\s+)?(?:\"[^\"\n]{1,200}\"|'[^'\n]{1,200}'|`[^`\n]{1,200}`"
-    r"|\([^()\n]{1,200}\)|[^\s\"'`()@]{1,200}@(?=\w)[^\s\"'`()]{0,200}))",
+    r"|(?:\s+(?:with|for|by|matching|named)(?:\s+(?:login|email|username|id))?)?(?:\s*:\s*|\s+)"
+    r"(?:\"[^\s\"@]{1,200}@(?=\w)[^\s\"]{0,200}\"|'[^\s'@]{1,200}@(?=\w)[^\s']{0,200}'"
+    r"|`[^\s`@]{1,200}@(?=\w)[^\s`]{0,200}`|\([^\s()@]{1,200}@(?=\w)[^\s()]{0,200}\)"
+    r"|[^\s\"'`()@]{1,200}@(?=\w)[^\s\"'`()]{0,200}))",
     re.IGNORECASE)
 
 Transport = Callable[[str, str, Dict[str, str], Optional[bytes], float], Tuple[int, bytes]]

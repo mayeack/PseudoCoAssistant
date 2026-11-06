@@ -184,9 +184,12 @@ no other code. Its words must be about the user itself (&quot;End user …
 not found&quot;, &quot;User does not exist&quot;, &quot;No such user&quot;): &quot;No user
 permissions are granted&quot; or &quot;User pool not found&quot; is about something
 else, so it is an error, never that answer. So are &quot;No user
-permissions.&quot; and &quot;Token has no user.&quot;: a word that ends a sentence is
-never a login (a login's &quot;.&quot; or &quot;@&quot; sits inside it), and a bare &quot;no
-user&quot; counts only as the whole message.</li>
+permissions.&quot;, &quot;Token has no user.&quot;, &quot;No user (or group) permission
+granted&quot; and &quot;Required scope user:read.all not found&quot;. A login is an
+address: an &quot;@&quot; with a word character after it and no space in it,
+bare, quoted or in parentheses. A word that ends a sentence, a scope,
+or a quoted or parenthesized word is never one, and a bare &quot;no user&quot;
+counts only as the whole message.</li>
 <li>Any other answer that carries an error is <code>unavailable</code>, details or not:
 a request-level error (no <code>data</code>), an error elsewhere or without a path,
 or a partial answer (say, <code>failingChecks</code> failed and came back null), so
