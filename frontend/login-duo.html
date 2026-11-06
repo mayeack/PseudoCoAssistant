@@ -7,9 +7,11 @@
   <title>Sign in with Duo · PseudoCo Assistant</title>
   <!-- Self-contained: no external fonts, scripts or images. Served by
        backend/routers/identity_auth.py (_render_login), which fills the gate
-       and signed-in placeholders from the duo_signin host gate and the
-       request's verified identity. Every message below is fixed text keyed by
-       the ?error= code; nothing from the URL is ever written into the page. -->
+       and session placeholders from the duo_signin host gate and the identity
+       middleware: data-signed-in-as is the verified identity, data-revoked-as
+       a revoked session (tombstone) this browser still holds. Every message
+       below is fixed text keyed by the ?error= code; nothing from the URL is
+       ever written into the page. -->
   <style>
     :root{
       --primary:#7c3aed; --primary-hover:#6d28d9; --ring:#c4b5fd;
@@ -61,11 +63,18 @@
     .gate.show{display:block}
     .foot{margin-top:22px; text-align:center; color:#94a3b8; font-size:12px; line-height:1.6}
     .foot a{color:var(--primary)}
+    /* "Continue without signing in": a plain link, except for a revoked
+       session, which every other page sends back here until it is signed out.
+       Then it is a sign-out that continues to /app. Server-rendered state, so
+       the right one shows without the script. */
+    .foot form.continue{display:none; margin:0}
+    #signin:not([data-revoked-as=""]) .foot a.continue{display:none}
+    #signin:not([data-revoked-as=""]) .foot form.continue{display:inline}
   </style>
 </head>
 <body>
   <main class="card" id="signin" data-gate="__DUO_SIGNIN_STATE__" data-gate-reason="__DUO_SIGNIN_REASON__"
-        data-signed-in-as="__SIGNED_IN_AS__">
+        data-signed-in-as="__SIGNED_IN_AS__" data-revoked-as="__REVOKED_AS__">
     <div class="brand">
       <span class="logo" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none"><rect x="4" y="10" width="16" height="11" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -94,7 +103,11 @@
     </form>
 
     <div class="foot">
-      <a href="/app">Continue without signing in</a><br>
+      <a href="/app" class="continue">Continue without signing in</a>
+      <form method="POST" action="/auth/identity/logout" class="continue">
+        <input type="hidden" name="next" value="/app">
+        <button type="submit" class="link" title="Signs this browser out of the ended session first">Continue without signing in</button>
+      </form><br>
       PseudoCo Assistant · Authorized access only
     </div>
   </main>
@@ -146,15 +159,27 @@
       el.classList.add('show');
     }
 
+    const who = root.dataset.signedInAs;
+    const revokedAs = root.dataset.revokedAs;
+
     const code = q.get('error');
     if (code) show('errorMsg', Object.prototype.hasOwnProperty.call(MESSAGES, code) ? MESSAGES[code] : MESSAGES.failed);
     for (const flag of Object.keys(NOTICES)) {
+      // A revoked session the server still sees gets its own message below.
+      if (flag === 'revoked' && revokedAs) continue;
       if (q.get(flag) === '1') { show('noticeMsg', NOTICES[flag]); break; }
     }
 
-    const who = root.dataset.signedInAs;
+    // The browser's session, as the server rendered it: signed in, or a revoked
+    // session (Duo disabled the account, say). A revoked one sends every other
+    // page back here, and Duo refuses to sign a disabled account in again, so
+    // Sign out has to be offered here too.
     if (who) {
       document.getElementById('signedInText').textContent = 'Signed in as ' + who + '. ';
+      document.getElementById('signedInMsg').classList.add('show');
+    } else if (revokedAs) {
+      document.getElementById('signedInText').textContent = 'Your verified session as ' + revokedAs
+        + ' was ended. Sign in again, or sign out to continue without one. ';
       document.getElementById('signedInMsg').classList.add('show');
     }
 

@@ -11,6 +11,12 @@ identity cookie (``REDIRECT_EXEMPT``), so a user can always sign in again.
   redirect and the identity cookie all live on that one host. The Continue
   button greys out from the ``duo_signin`` gate, rendered into the page here
   (a page fetch of ``/api/server-info`` would be refused for a revoked cookie).
+  So is the browser's session: signed in as whom, or a revoked tombstone. A
+  tombstone sends every other page here (``?revoked=1``), and Duo refuses to
+  sign a disabled account in again, so for one the page names the ended
+  session, offers Sign out, and turns "Continue without signing in" into a
+  sign-out that continues to ``/app`` (a plain link there would come straight
+  back).
 - ``POST /auth/duo/start`` - username in, 303 to Duo's prompt out, with the
   single-use state bound to this browser by a ``Secure; HttpOnly;
   SameSite=Lax; Path=/auth/duo/`` cookie.
@@ -23,8 +29,9 @@ identity cookie (``REDIRECT_EXEMPT``), so a user can always sign in again.
   ``OTEL_PYTHON_EXCLUDED_URLS`` and the uvicorn access log redacts its query
   (``log_handlers.install_access_log_redaction``).
 - ``POST /auth/identity/logout`` - ends the identity session (tombstone
-  included) and deletes the cookie. ``GET /logout`` (the room-key sign-out)
-  ends it too.
+  included), deletes the cookie and goes to ``/login/duo?signed_out=1``, or to
+  ``/app`` when the form's ``next`` is exactly ``/app`` (never another target).
+  ``GET /logout`` (the room-key sign-out) ends it too.
 - ``GET /api/identity/me`` - who this browser is signed in as. A plain ``def``
   route, so it runs in the threadpool; the chat page polls it every 10 s, and
   a revoked or expired session answers the middleware's 403 / 401 here.
@@ -49,6 +56,7 @@ from backend.middleware.identity import (
     LOGIN_PATH,
     current_identity,
     delete_identity_cookie,
+    revoked_identity,
     set_identity_cookie,
 )
 from backend.services import identity_signin, identity_store
@@ -68,6 +76,10 @@ _STATE_COOKIE_ATTRS = {"path": STATE_COOKIE_PATH, "secure": True, "httponly": Tr
 
 CALLBACK_PATH = "/auth/duo/callback"
 SIGNED_IN_REDIRECT = "/app?signin=ok"
+#: The one place sign-out may continue to besides the sign-in page (the
+#: sign-in page's "Continue without signing in" for a revoked session). The
+#: form's ``next`` must equal it exactly; any other value is ignored.
+SIGNED_OUT_CONTINUE = "/app"
 #: Notices the sign-in page shows besides an error code (?expired=1 etc.).
 NOTICE_FLAGS = ("expired", "revoked", "signed_out")
 _NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
@@ -145,6 +157,7 @@ def delete_state_cookie(response) -> None:
 def _render_login(request: Request) -> str:
     gate = identity_signin.gate()
     identity = current_identity(request)
+    revoked = revoked_identity(request) if identity is None else None
     text = _LOGIN_DUO_HTML.read_text() if _LOGIN_DUO_HTML.exists() else "<h1>Sign-in page not found</h1>"
     enabled = bool(gate.get("enabled"))
     values = {
@@ -152,6 +165,7 @@ def _render_login(request: Request) -> str:
         "__DUO_SIGNIN_DISABLED__": "" if enabled else "disabled",
         "__DUO_SIGNIN_REASON__": html.escape(gate.get("reason") or "", quote=True),
         "__SIGNED_IN_AS__": html.escape(identity.username if identity is not None else "", quote=True),
+        "__REVOKED_AS__": html.escape(revoked.username if revoked is not None else "", quote=True),
     }
     for placeholder, value in values.items():
         text = text.replace(placeholder, value)
@@ -225,8 +239,9 @@ def duo_callback(request: Request):
 
 
 @router.post("/auth/identity/logout")
-def identity_logout(request: Request):
-    """Sign out of the identity session (a revoked tombstone included)."""
+def identity_logout(request: Request, next_path: str = Form("", alias="next")):
+    """Sign out of the identity session (a revoked tombstone included). Goes to
+    the sign-in page, or to ``/app`` when ``next`` is exactly that."""
     if _cross_site(request):
         return JSONResponse({"detail": "cross-site sign-out refused"}, status_code=403, headers=_NO_STORE)
     token = request.cookies.get(COOKIE_NAME)
@@ -235,7 +250,10 @@ def identity_logout(request: Request):
             identity_store.end(token)
         except Exception:  # noqa: BLE001 - sign-out never fails; the cookie goes regardless
             logger.warning("identity session could not be ended at sign-out", exc_info=True)
-    response = _to_login(notice="signed_out")
+    if next_path == SIGNED_OUT_CONTINUE:
+        response = RedirectResponse(SIGNED_OUT_CONTINUE, status_code=303, headers=_NO_STORE)
+    else:
+        response = _to_login(notice="signed_out")
     delete_identity_cookie(response)
     return response
 

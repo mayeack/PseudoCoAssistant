@@ -23,7 +23,12 @@ Behaviour, only while ``DUO_ENABLED`` is on (off, the cookie is not even read):
 
 The sign-in, sign-out and public paths are never refused (``REDIRECT_EXEMPT``),
 or an expired or revoked cookie would loop between the two gates. Static assets
-and the health check are not even looked up.
+and the health check are not even looked up. On those paths a revoked cookie's
+session goes on ``request.state.identity_revoked`` (``revoked_identity``),
+never on ``request.state.identity``: it is not an identity, and only the sign-in
+page reads it, to say whose session ended and to offer Sign out. Without that,
+a browser holding a tombstone would land on a sign-in page with no way out but
+a Duo sign-in, which Duo refuses once it has disabled the account.
 
 Store calls run in the threadpool: the app is one uvicorn process, so a slow
 lookup on the event loop would stall every other request, SSE streams included.
@@ -56,6 +61,12 @@ EXPIRED_DETAIL = "identity_session_expired"
 REVOKED_DETAIL = "identity_session_revoked"
 LOGIN_PATH = "/login/duo"
 
+#: ``request.state`` keys only this middleware sets (both dropped on entry).
+#: ``identity`` is the verified identity; ``identity_revoked`` is a tombstone's
+#: session, set only on the paths a revoked cookie is let through to.
+STATE_IDENTITY = "identity"
+STATE_REVOKED = "identity_revoked"
+
 # Never refused for an expired / revoked cookie: the sign-in and sign-out
 # routes, plus everything the room-key gate itself serves without a key
 # (/login, /favicon.ico, /health), which would otherwise bounce between gates.
@@ -87,12 +98,26 @@ def deletion_header() -> Tuple[bytes, bytes]:
 
 
 # --------------------------------------------------------------------------- request helpers
+def _state_snapshot(request: Any, key: str) -> Optional[identity_store.IdentitySnapshot]:
+    state = getattr(request, "state", None)
+    value = getattr(state, key, None) if state is not None else None
+    return value if isinstance(value, identity_store.IdentitySnapshot) else None
+
+
 def current_identity(request: Any) -> Optional[identity_store.IdentitySnapshot]:
     """The request's verified identity, or None. Only the middleware sets it,
     and only a real snapshot counts."""
-    state = getattr(request, "state", None)
-    identity = getattr(state, "identity", None) if state is not None else None
-    return identity if isinstance(identity, identity_store.IdentitySnapshot) else None
+    return _state_snapshot(request, STATE_IDENTITY)
+
+
+def revoked_identity(request: Any) -> Optional[identity_store.IdentitySnapshot]:
+    """The revoked session (tombstone) behind this browser's cookie, or None.
+
+    Set only on the paths a revoked cookie is let through to (``REDIRECT_EXEMPT``:
+    the sign-in and sign-out routes); everywhere else that cookie is refused.
+    Never a verified identity: nothing may attribute a turn, own a conversation
+    or pass it to the chain. The sign-in page reads it to offer Sign out."""
+    return _state_snapshot(request, STATE_REVOKED)
 
 
 def _header(scope: Scope, name: bytes) -> str:
@@ -146,8 +171,9 @@ class IdentityMiddleware:
             return
         state = scope.get("state")
         if isinstance(state, dict):
-            # Only this middleware may set it; drop anything already there.
-            state.pop("identity", None)
+            # Only this middleware may set these; drop anything already there.
+            state.pop(STATE_IDENTITY, None)
+            state.pop(STATE_REVOKED, None)
         path = scope.get("path") or ""
         if not getattr(settings, "duo_enabled", False) or _in(path, PASSTHROUGH_PATHS, PASSTHROUGH_PREFIXES):
             await self.app(scope, receive, send)
@@ -159,10 +185,13 @@ class IdentityMiddleware:
 
         result = await run_in_threadpool(identity_store.lookup, token)
         if result.valid:
-            scope.setdefault("state", {})["identity"] = result.identity
+            scope.setdefault("state", {})[STATE_IDENTITY] = result.identity
             await self.app(scope, receive, send)
             return
         if _in(path, REDIRECT_EXEMPT_PATHS, REDIRECT_EXEMPT_PREFIXES):
+            if result.status == identity_store.REVOKED and result.identity is not None:
+                # Not an identity: the sign-in page's way out of the tombstone.
+                scope.setdefault("state", {})[STATE_REVOKED] = result.identity
             await self.app(scope, receive, send)
             return
         if result.status == identity_store.REVOKED:

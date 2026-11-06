@@ -347,7 +347,10 @@ def test_login_page() -> None:
     check("canonical host: 200, no-store", r.status_code == 200 and r.headers.get("cache-control") == "no-store")
     check("the gate is open: Continue enabled", 'data-gate="enabled"' in r.text
           and re.search(r'id="continueBtn"[^>]*\sdisabled', r.text) is None)
-    check("no placeholder left unrendered", "__DUO_SIGNIN" not in r.text and "__SIGNED_IN_AS__" not in r.text)
+    check("no placeholder left unrendered", re.search(r"__[A-Z][A-Z_]*__", r.text) is None,
+          str(re.findall(r"__[A-Z][A-Z_]*__", r.text)))
+    check("an anonymous browser: neither signed in nor holding a revoked session",
+          'data-signed-in-as=""' in r.text and 'data-revoked-as=""' in r.text)
 
     other = client("https://198.51.100.20:8001")
     r = other.get("/login/duo?error=state_mismatch&expired=1&junk=%3Cscript%3E&error2=x", headers=H,
@@ -389,6 +392,25 @@ def test_login_page() -> None:
           str(sorted(keys ^ set(signin.ERROR_CODES))))
     check("the form posts the username to /auth/duo/start",
           'action="/auth/duo/start"' in page and 'name="username"' in page)
+    foot = page[page.index('<div class="foot">'):page.index("</main>")]
+    check("the foot: a plain /app link, plus a sign-out form that continues to /app",
+          '<a href="/app" class="continue">Continue without signing in</a>' in foot
+          and re.search(r'<form method="POST" action="/auth/identity/logout" class="continue">\s*'
+                        r'<input type="hidden" name="next" value="/app">', foot) is not None)
+    check("...swapped by the server-rendered data-revoked-as alone (CSS, no script needed)",
+          ".foot form.continue{display:none" in page
+          and '#signin:not([data-revoked-as=""]) .foot a.continue{display:none}' in page
+          and '#signin:not([data-revoked-as=""]) .foot form.continue{display:inline}' in page)
+    script = page[page.index("<script>"):]
+    check("a revoked session gets its own message with the Sign out form (the ?revoked=1 notice steps aside)",
+          "const revokedAs = root.dataset.revokedAs;" in script
+          and "if (flag === 'revoked' && revokedAs) continue;" in script
+          and re.search(r"\} else if \(revokedAs\) \{\s*document\.getElementById\('signedInText'\)\.textContent = "
+                        r"'Your verified session as ' \+ revokedAs[^;]*;\s*"
+                        r"document\.getElementById\('signedInMsg'\)\.classList\.add\('show'\);", script) is not None)
+    msg = page[page.index('id="signedInMsg"'):page.index('action="/auth/duo/start"')]
+    check("...and that message box holds the Sign out form", 'action="/auth/identity/logout"' in msg
+          and ">Sign out</button>" in msg)
     check("the page needs the room key like every other route (no PUBLIC_PATHS change)",
           access_mw.PUBLIC_PATHS == {"/health", "/login", "/favicon.ico"}
           and c.get("/login/duo", headers={"Accept": "text/html"}).status_code == 401)
@@ -562,7 +584,8 @@ def test_callback_success() -> None:
     token = ic.split(";")[0].split("=", 1)[1]
     check("...never the cookie or its hash", token not in me.text and store.hash_token(token) not in me.text)
     page = c.get("/login/duo", headers=H)
-    check("the sign-in page knows who is signed in", 'data-signed-in-as="nina.osei"' in page.text)
+    check("the sign-in page knows who is signed in (and holds no revoked session)",
+          'data-signed-in-as="nina.osei"' in page.text and 'data-revoked-as=""' in page.text)
 
     sid = c.post("/api/chat/session/new", headers=H).json()["session_id"]
     r = c.post("/api/chat/message", headers=H,
@@ -740,19 +763,76 @@ def test_sign_out() -> None:
     check("...and the browser is anonymous again", c.get("/api/identity/me", headers=H).json() == {"signed_in": False})
 
     # a revoked tombstone: every request answers identity_session_revoked until sign-out
-    c = client()
-    sign_in(c, "victim.user", code="CODE-OUT-2")
-    ref = rows("victim.user")[0].id
-    store.revoke(ref, reason="duo_disabled")
+    page_h = {**H, "Accept": "text/html,application/xhtml+xml"}
+
+    def revoked_browser(code):
+        cc = client()
+        sign_in(cc, "victim.user", code=code)
+        store.revoke(rows("victim.user")[0].id, reason="duo_disabled")
+        return cc
+
+    c = revoked_browser("CODE-OUT-2")
     r = c.get("/api/identity/me", headers=H)
     check("revoked: GET /api/identity/me (the 10 s poll) answers 403 identity_session_revoked",
           r.status_code == 403 and r.json() == {"detail": "identity_session_revoked"}, r.text)
-    page = c.get("/login/duo", headers={**H, "Accept": "text/html"})
+    r = c.get("/app", headers=page_h, follow_redirects=False)
+    check("revoked: loading the app (a reload, a new tab) goes to /login/duo?revoked=1",
+          r.status_code == 303 and location(r) == "/login/duo?revoked=1", location(r))
+    page = c.get("/login/duo?revoked=1", headers=page_h)
     check("revoked: the sign-in page still loads, with its gate rendered", page.status_code == 200
           and 'data-gate="enabled"' in page.text)
+    check("revoked: the page names the ended session and is not signed in as it",
+          'data-revoked-as="victim.user"' in page.text and 'data-signed-in-as=""' in page.text)
+    check("...so it offers a way out: the Sign out form and the sign-out-and-continue form",
+          page.text.count('action="/auth/identity/logout"') == 2 and 'name="next" value="/app"' in page.text)
+    check("...while every other request is still refused (the page attributes nothing)",
+          c.get("/api/identity/me", headers=H).status_code == 403
+          and c.post("/api/chat/session/new", headers=H).status_code == 403)
+    host_capabilities.record_duo_health(False, "HTTP 503")
+    try:
+        page = c.get("/login/duo?revoked=1", headers=page_h)
+        check("revoked with Duo sign-in closed: Continue with Duo disabled, the way out still offered",
+              re.search(r'id="continueBtn"[^>]*\sdisabled', page.text) is not None
+              and 'data-revoked-as="victim.user"' in page.text
+              and re.search(r'class="link"[^>]*\sdisabled', page.text) is None)
+    finally:
+        _open_gate()
+    r = c.post("/auth/identity/logout", headers={**H, "Origin": "https://evil.example"},
+               data={"next": "/app"}, follow_redirects=False)
+    check("a cross-site sign-and-continue is refused (403), the tombstone stays",
+          r.status_code == 403 and len(rows("victim.user")) == 1)
+
+    # way out 1: the message's Sign out -> the sign-in page, signed out
     r = c.post("/auth/identity/logout", headers=H, follow_redirects=False)
-    check("revoked: signing out clears the tombstone", location(r) == "/login/duo?signed_out=1"
+    check("revoked: Sign out clears the tombstone", location(r) == "/login/duo?signed_out=1"
           and rows("victim.user") == [] and c.get("/api/identity/me", headers=H).json() == {"signed_in": False})
+    page = c.get("/login/duo?signed_out=1", headers=page_h)
+    check("...the sign-in page no longer holds a revoked session (the plain /app link is back)",
+          'data-revoked-as=""' in page.text and 'data-signed-in-as=""' in page.text)
+    r = c.get("/app", headers=page_h, follow_redirects=False)
+    check("...and the app loads again, anonymous", r.status_code == 200 and 'id="identityBanner"' in r.text,
+          f"{r.status_code} {location(r)}")
+
+    # way out 2: "Continue without signing in" -> signed out, straight to /app
+    c = revoked_browser("CODE-OUT-2B")
+    r = c.post("/auth/identity/logout", headers=page_h, data={"next": "/app"}, follow_redirects=False)
+    dc = cookie_header(r, COOKIE)
+    check("revoked: Continue without signing in = sign out, 303 /app, tombstone gone, cookie deleted",
+          r.status_code == 303 and location(r) == "/app" and rows("victim.user") == []
+          and "max-age=0" in attrs(dc) and "secure" in attrs(dc) and "path=/" in attrs(dc)
+          and r.headers.get("cache-control") == "no-store", f"{location(r)} {dc}")
+    r = c.get("/app", headers=page_h, follow_redirects=False)
+    check("...and /app then loads (no bounce back to the sign-in page)",
+          r.status_code == 200 and c.get("/api/identity/me", headers=H).json() == {"signed_in": False},
+          f"{r.status_code} {location(r)}")
+
+    # next is honoured only when it is exactly /app
+    for i, bad in enumerate(("https://evil.example/", "//evil.example/app", "/app/../settings-ui", "/settings-ui",
+                             "/app?x=1", "/APP", " /app", "")):
+        c = revoked_browser(f"CODE-OUT-NEXT-{i}")
+        r = c.post("/auth/identity/logout", headers=H, data={"next": bad}, follow_redirects=False)
+        check(f"next={bad!r}: ignored, the sign-in page as usual (tombstone still ended)",
+              location(r) == "/login/duo?signed_out=1" and rows("victim.user") == [], location(r))
 
     # GET /logout (the room-key sign-out) ends the identity session too
     c = client()

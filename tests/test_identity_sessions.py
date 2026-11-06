@@ -362,8 +362,10 @@ def test_cookie_helper() -> None:
 # --------------------------------------------------------------------------- middleware (raw ASGI)
 async def _echo(scope, receive, send):
     ident = (scope.get("state") or {}).get("identity")
+    revoked = (scope.get("state") or {}).get("identity_revoked")
     body = json.dumps({"identity": getattr(ident, "username", None),
-                       "kind": type(ident).__name__ if ident is not None else None}).encode()
+                       "kind": type(ident).__name__ if ident is not None else None,
+                       "revoked": getattr(revoked, "username", revoked)}).encode()
     await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"application/json")]})
     await send({"type": "http.response.body", "body": body})
 
@@ -406,17 +408,25 @@ def test_middleware() -> None:
     check("DUO_ENABLED off: a valid cookie is ignored (inert)", st == 200 and json.loads(body)["identity"] is None)
     st, _, _ = run(_call(mw, "/api/x", cookie=old))
     check("DUO_ENABLED off: an expired cookie is not refused", st == 200)
-    st, _, body = run(_call(mw, "/api/x", state={"identity": "spoofed"}))
-    check("an upstream state.identity is always dropped", json.loads(body)["identity"] is None)
+    spoof = {"identity": "spoofed", "identity_revoked": "spoofed"}
+    st, _, body = run(_call(mw, "/api/x", state=spoof))
+    check("an upstream state.identity / identity_revoked is always dropped",
+          json.loads(body)["identity"] is None and json.loads(body)["revoked"] is None, body.decode())
+    st, _, body = run(_call(mw, "/login/duo", cookie=gone, state=spoof))
+    check("DUO_ENABLED off: a revoked cookie is not even read on the sign-in page",
+          st == 200 and json.loads(body)["revoked"] is None, body.decode())
 
     settings.duo_enabled = True
     try:
         st, hdrs, body = run(_call(mw, "/api/x"))
         check("no cookie: untouched", st == 200 and json.loads(body)["identity"] is None and "set-cookie" not in hdrs)
+        st, _, body = run(_call(mw, "/login/duo", state=spoof))
+        check("DUO_ENABLED on, no cookie: an upstream identity_revoked is dropped too",
+              json.loads(body)["identity"] is None and json.loads(body)["revoked"] is None, body.decode())
         st, hdrs, body = run(_call(mw, "/api/x", cookie=good))
         out = json.loads(body)
         check("valid cookie: state.identity is the frozen snapshot",
-              st == 200 and out == {"identity": "nina.osei", "kind": "IdentitySnapshot"}, str(out))
+              st == 200 and out == {"identity": "nina.osei", "kind": "IdentitySnapshot", "revoked": None}, str(out))
 
         for label, cookie in (("expired", old), ("unknown", store.new_token()), ("garbage", "x" * 10)):
             st, hdrs, body = run(_call(mw, "/api/x", cookie=cookie))
@@ -443,9 +453,39 @@ def test_middleware() -> None:
                      for c in (old, gone) for a in ("application/json", "text/html")]
             check(f"exempt from the refusal: {path}", codes == [200, 200, 200, 200], str(codes))
         st, _, body = run(_call(mw, "/login/duo", cookie=good))
-        check("an exempt sign-in path still sees a valid identity", json.loads(body)["identity"] == "nina.osei")
+        check("an exempt sign-in path still sees a valid identity", json.loads(body)["identity"] == "nina.osei"
+              and json.loads(body)["revoked"] is None)
+
+        # A tombstone on the paths it is let through to: the sign-in page must
+        # be able to offer Sign out, but the session is never an identity.
+        for path in ("/login/duo", "/auth/identity/logout", "/auth/duo/start"):
+            st, hdrs, body = run(_call(mw, path, cookie=gone, accept="text/html", state=spoof))
+            out = json.loads(body)
+            check(f"revoked on {path}: state.identity_revoked is the tombstone's session, state.identity stays empty",
+                  st == 200 and out["revoked"] == "victim.user" and out["identity"] is None
+                  and "set-cookie" not in hdrs, str(out))
+        st, _, body = run(_call(mw, "/login/duo", cookie=old))
+        check("expired on the sign-in page: neither identity nor identity_revoked",
+              json.loads(body)["identity"] is None and json.loads(body)["revoked"] is None, body.decode())
+        st, _, body = run(_call(mw, "/api/x", cookie=gone, state=spoof))
+        check("revoked elsewhere: still refused before the app (nothing to read)",
+              st == 403 and json.loads(body) == {"detail": "identity_session_revoked"}, body.decode())
     finally:
         settings.duo_enabled = False
+
+    # The two request helpers: each reads only its own key, and only a real snapshot.
+    req = SimpleNamespace(state=SimpleNamespace(identity_revoked=rsnap))
+    check("revoked_identity() returns the tombstone's snapshot; current_identity() never does",
+          idmw.revoked_identity(req) is rsnap and idmw.current_identity(req) is None)
+    req = SimpleNamespace(state=SimpleNamespace(identity=gsnap))
+    check("current_identity() returns the verified snapshot; revoked_identity() does not",
+          idmw.current_identity(req) is gsnap and idmw.revoked_identity(req) is None)
+    for junk in ("victim.user", {"username": "victim.user"}, None):
+        req = SimpleNamespace(state=SimpleNamespace(identity=junk, identity_revoked=junk))
+        check(f"a non-snapshot ({type(junk).__name__}) counts as neither",
+              idmw.current_identity(req) is None and idmw.revoked_identity(req) is None)
+    check("no state at all: neither", idmw.current_identity(object()) is None
+          and idmw.revoked_identity(object()) is None)
 
 
 def test_off_event_loop() -> None:
