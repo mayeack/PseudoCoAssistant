@@ -203,6 +203,17 @@ class GenAILogEntry(BaseModel):
     # what the turn carried: "text" or "text+pdf".
     attachment: Optional[Dict[str, Any]] = None
     input_modality: Optional[str] = None
+    # Lab 5 identity evidence (backend/agents/state.py identity_governance_fields):
+    # present only on a turn of a verified (Duo) identity session.
+    identity_verified: Optional[bool] = None
+    identity_source: Optional[str] = None
+    identity_override: Optional[bool] = None
+    identity_risk: Optional[str] = None
+    identity_check: Optional[str] = None
+    identity_risk_reasons: Optional[List[str]] = None
+    identity_duo_status: Optional[str] = None
+    identity_trust_level: Optional[str] = None
+    identity_failing_checks: Optional[List[str]] = None
 
     # Timestamp
     timestamp: datetime = Field(default_factory=datetime.utcnow)

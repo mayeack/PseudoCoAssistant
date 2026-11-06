@@ -70,6 +70,9 @@
     .foot form.continue{display:none; margin:0}
     #signin:not([data-revoked-as=""]) .foot a.continue{display:none}
     #signin:not([data-revoked-as=""]) .foot form.continue{display:inline}
+    /* Unblock me: offered only for a revoked session (server-rendered state). */
+    #signedInMsg form.unblock{display:none}
+    #signin:not([data-revoked-as=""]) #signedInMsg form.unblock{display:inline; margin-left:8px}
   </style>
 </head>
 <body>
@@ -91,6 +94,12 @@
       <span id="signedInText"></span>
       <form method="POST" action="/auth/identity/logout" style="display:inline">
         <button type="submit" class="link">Sign out</button>
+      </form>
+      <!-- Unblock me (plan 12.1): only for a revoked session. It restores this
+           PseudoCo Assistant session; the Duo account stays as Duo has it. -->
+      <form method="POST" action="/api/identity/unblock" class="unblock">
+        <input type="hidden" name="next" value="/app">
+        <button type="submit" class="link" title="Restores this session in PseudoCo Assistant only; your Duo account is not changed">Unblock me</button>
       </form>
     </div>
 
@@ -179,7 +188,7 @@
       document.getElementById('signedInMsg').classList.add('show');
     } else if (revokedAs) {
       document.getElementById('signedInText').textContent = 'Your verified session as ' + revokedAs
-        + ' was ended. Sign in again, or sign out to continue without one. ';
+        + ' was ended. Sign in again, sign out to continue without one, or unblock it. ';
       document.getElementById('signedInMsg').classList.add('show');
     }
 

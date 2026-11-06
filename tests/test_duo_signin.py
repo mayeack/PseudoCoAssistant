@@ -514,6 +514,42 @@ def test_start() -> None:
         _configure()
 
 
+def test_disabled_persona_refused() -> None:
+    print("POST /auth/duo/start refuses a persona Duo reports disabled (read-only Admin API, cached)")
+    import httpx
+    from backend.services import identity_lookup
+
+    calls = []
+
+    def duo(request):
+        calls.append(request)
+        name = dict(httpx.QueryParams(request.url.query)).get("username")
+        status = "disabled" if name == "victim.user" else "active"
+        return httpx.Response(200, json={"stat": "OK", "response": [
+            {"username": name, "status": status, "email": f"{name}@pseudocoassistant.com"}]})
+
+    saved = (settings.duo_admin_ikey, settings.duo_admin_skey)
+    settings.duo_admin_ikey, settings.duo_admin_skey = "DIWJ8X6AEYOR5OMC6TQ1", "s" * 40
+    identity_lookup.set_transport(httpx.MockTransport(duo))
+    signin.reset()
+    try:
+        c = client()
+        n_issued = len(FakeDuo.issued)
+        r = start(c, "victim.user")
+        fails = _audits("identity_signin_failure")
+        check("a Duo-disabled persona -> 303 /login/duo?error=duo_denied, no prompt URL built",
+              location(r) == "/login/duo?error=duo_denied" and len(FakeDuo.issued) == n_issued, location(r))
+        check("...one identity_signin_failure (reason duo_denied), and only a GET to Duo",
+              fails[-1].get("user") == "victim.user" and fails[-1].get("details") == {"reason": "duo_denied"}
+              and calls and all(q.method == "GET" and q.url.path == "/admin/v1/users" for q in calls))
+        r = start(c, "nina.osei")
+        check("an active persona still goes to Duo's prompt", location(r).startswith(f"https://{API_HOST}/"))
+    finally:
+        settings.duo_admin_ikey, settings.duo_admin_skey = saved
+        identity_lookup.set_transport(None)
+        signin.reset()
+
+
 def test_rate_limit() -> None:
     print("rate limit: per username (never per IP), first refusal audited once per window")
     signin.reset()
@@ -773,7 +809,11 @@ def test_sign_out() -> None:
 
     c = revoked_browser("CODE-OUT-2")
     r = c.get("/api/identity/me", headers=H)
-    check("revoked: GET /api/identity/me (the 10 s poll) answers 403 identity_session_revoked",
+    check("revoked: GET /api/identity/me (the 10 s poll) reaches the tombstone: whose session ended and why",
+          r.status_code == 200 and r.json() == {"signed_in": False, "revoked": True, "username": "victim.user",
+                                                "revoked_reason": "duo_disabled", "can_unblock": True}, r.text)
+    r = c.get("/api/server-info", headers=H)
+    check("...while any other request answers 403 identity_session_revoked (the banner's trigger)",
           r.status_code == 403 and r.json() == {"detail": "identity_session_revoked"}, r.text)
     r = c.get("/app", headers=page_h, follow_redirects=False)
     check("revoked: loading the app (a reload, a new tab) goes to /login/duo?revoked=1",
@@ -786,8 +826,10 @@ def test_sign_out() -> None:
     check("...so it offers a way out: the Sign out form and the sign-out-and-continue form",
           page.text.count('action="/auth/identity/logout"') == 2 and 'name="next" value="/app"' in page.text)
     check("...while every other request is still refused (the page attributes nothing)",
-          c.get("/api/identity/me", headers=H).status_code == 403
+          c.get("/api/identity/me", headers=H).json().get("signed_in") is False
           and c.post("/api/chat/session/new", headers=H).status_code == 403)
+    check("...and the page offers Unblock me for it (a form to /api/identity/unblock, next=/app)",
+          'action="/api/identity/unblock"' in page.text)
     host_capabilities.record_duo_health(False, "HTTP 503")
     try:
         page = c.get("/login/duo?revoked=1", headers=page_h)
@@ -1034,8 +1076,8 @@ def test_frontend() -> None:
           and 'action="/auth/identity/logout"' in badge)
     check("#identityBanner sits beside #emergencyBanner, hidden by default",
           re.search(r'<div id="identityBanner" class="hidden ', page) is not None
-          and 0 < page.index('id="emergencyBanner"') - page.index('id="identityBanner"') < 2000)
-    check("chat.js cache-buster bumped to v=34", "/static/js/chat.js?v=34" in page)
+          and 0 < page.index('id="emergencyBanner"') - page.index('id="identityBanner"') < 4000)
+    check("chat.js cache-buster bumped to v=35", "/static/js/chat.js?v=35" in page)
     check("chat.js: exactly ONE fetch wrapper, around window.fetch",
           js.count("window.fetch =") == 1 and "const _pageFetch = window.fetch.bind(window);" in js
           and js.count("_pageFetch(") == 1)
@@ -1103,6 +1145,7 @@ def main() -> int:
         test_login_page()
         test_login_unchanged()
         test_start()
+        test_disabled_persona_refused()
         test_rate_limit()
         test_callback_success()
         test_callback_refusals()

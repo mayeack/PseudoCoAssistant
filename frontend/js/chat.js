@@ -920,6 +920,9 @@ function startProviderPolling() {
 // polled with the indicators above); nothing here is ever sent as identity.
 // The badge shows the persona in neutral colours; the trust pill shows only
 // state, and only when the server reports one. Hidden unless signed in.
+// The banner follows the same answer: a revoked session (SESSION ENDED), an
+// identity the Identity Risk Gate refuses (IDENTITY AT RISK) or one the user
+// has unblocked (UNBLOCKED), each with the Unblock me toggle.
 let _identity = null;
 
 async function refreshIdentity() {
@@ -930,6 +933,7 @@ async function refreshIdentity() {
         if (res.status === 401 || res.status === 403) { renderIdentity(null); return; }
         if (!res.ok) return;
         const data = await res.json();
+        if (data && data.revoked) { showIdentityBanner('revoked', data); return; }
         renderIdentity(data && data.signed_in ? data : null);
     } catch (e) { /* best-effort: the badge keeps its last state */ }
 }
@@ -953,16 +957,22 @@ function renderIdentity(identity) {
     badge.classList.remove('hidden');
     if (signin) signin.classList.add('hidden');
     renderTrustPill(identity);
-    // A valid session again (signed in in another tab, say): the banner is stale.
-    hideIdentityBanner();
+    // The banner follows the server's answer: Unblock me on, the gate refusing
+    // this identity, or nothing (a stale revoked / expired banner goes).
+    if (identity.override) showIdentityBanner('override', identity);
+    else if (identity.verdict === 'block') showIdentityBanner('blocked', identity);
+    else hideIdentityBanner();
 }
 
 // Trust pill: colour is state. Duo status (locked out / disabled) wins over the
-// trust level; nothing is shown until the server reports either.
+// trust level; a lookup that could not answer shows a neutral note (the gate
+// fails open); nothing is shown until the server reports any of these.
 const TRUST_PILL_COLORS = {
     trusted: ['bg-green-100', 'text-green-700'],
+    favorable: ['bg-green-100', 'text-green-700'],
     neutral: ['bg-gray-100', 'text-gray-600'],
     unknown: ['bg-gray-100', 'text-gray-600'],
+    unavailable: ['bg-gray-100', 'text-gray-600'],
     questionable: ['bg-amber-100', 'text-amber-800'],
     untrusted: ['bg-red-100', 'text-red-700'],
     locked_out: ['bg-red-100', 'text-red-700'],
@@ -974,7 +984,8 @@ function renderTrustPill(identity) {
     if (!pill) return;
     const status = String(identity.duo_status || '').toLowerCase().replace(/\s+/g, '_');
     const level = String(identity.trust_level || '').toLowerCase().replace(/\s+/g, '_');
-    const key = (status === 'locked_out' || status === 'disabled') ? status : level;
+    let key = (status === 'locked_out' || status === 'disabled') ? status : level;
+    if (!TRUST_PILL_COLORS[key] && identity.identity_check === 'unavailable') key = 'unavailable';
     const all = [].concat(...Object.values(TRUST_PILL_COLORS));
     pill.classList.remove(...all);
     if (!key || !TRUST_PILL_COLORS[key]) {
@@ -982,8 +993,10 @@ function renderTrustPill(identity) {
         pill.classList.add('hidden', 'bg-gray-100', 'text-gray-600');
         return;
     }
-    pill.textContent = key.replace('_', ' ').toUpperCase();
-    pill.title = key === status ? 'Duo account status' : 'Cisco Identity Intelligence trust level';
+    pill.textContent = key === 'unavailable' ? 'STATUS UNAVAILABLE' : key.replace('_', ' ').toUpperCase();
+    pill.title = key === 'unavailable'
+        ? 'Duo or Cisco Identity Intelligence could not be reached; your messages are not held up by it'
+        : (key === status ? 'Duo account status' : 'Cisco Identity Intelligence trust level');
     pill.classList.add(...TRUST_PILL_COLORS[key]);
     pill.classList.remove('hidden');
 }
@@ -991,34 +1004,83 @@ function renderTrustPill(identity) {
 const IDENTITY_BANNERS = {
     revoked: {
         title: 'SESSION ENDED',
-        text: 'Your verified session was ended. Sign in again to continue as a verified user, '
-            + 'or sign out to continue without one.',
-        signout: true, dismiss: false,
+        text: (info) => 'Your verified session' + (info && info.username ? ' as ' + info.username : '')
+            + ' was ended' + (info && info.revoked_reason === 'duo_disabled' ? ' because Duo disabled the account' : '')
+            + '. Sign in again, sign out to continue without one, or turn on Unblock me to restore this '
+            + 'session here (your Duo account is not changed).',
+        signin: true, signout: true, dismiss: false, unblock: true,
     },
     expired: {
         title: 'SIGN-IN EXPIRED',
-        text: 'Your Duo sign-in expired, so you are no longer a verified user. '
+        text: () => 'Your Duo sign-in expired, so you are no longer a verified user. '
             + 'Sign in again to continue with your identity.',
-        signout: false, dismiss: true,
+        signin: true, signout: false, dismiss: true, unblock: false,
+    },
+    blocked: {
+        title: 'IDENTITY AT RISK',
+        text: (info) => 'Cisco Identity Intelligence reports a risk on your signed-in identity'
+            + (info && info.reasons_text ? ' (' + info.reasons_text + ')' : '')
+            + ', so your messages are refused before they reach the assistant. Turn on Unblock me to '
+            + 'continue anyway: every event will record the override.',
+        signin: false, signout: true, dismiss: false, unblock: true,
+    },
+    override: {
+        title: 'UNBLOCKED',
+        text: () => 'Unblock me is on: your messages go through the Identity Risk Gate, and every event '
+            + 'records the real verdict with the override. Your Duo account is not changed. '
+            + 'Turn it off to be gated again.',
+        signin: false, signout: true, dismiss: false, unblock: true,
     },
 };
 
-function showIdentityBanner(kind) {
+function showIdentityBanner(kind, info) {
     const spec = IDENTITY_BANNERS[kind];
     const banner = document.getElementById('identityBanner');
     if (!spec || !banner) return;
+    // Another refused request (no details): the banner already says more.
+    if (!info && banner.dataset.kind === kind && !banner.classList.contains('hidden')) return;
     document.getElementById('identityBannerTitle').textContent = spec.title;
-    document.getElementById('identityBannerText').textContent = spec.text;
+    document.getElementById('identityBannerText').textContent = spec.text(info);
+    document.getElementById('identityBannerSignin').classList.toggle('hidden', !spec.signin);
     document.getElementById('identityBannerSignout').classList.toggle('hidden', !spec.signout);
     document.getElementById('identityBannerDismiss').classList.toggle('hidden', !spec.dismiss);
+    const unblock = document.getElementById('identityBannerUnblock');
+    if (unblock) unblock.classList.toggle('hidden', !spec.unblock);
+    const toggle = document.getElementById('identityUnblockToggle');
+    if (toggle) toggle.checked = kind === 'override';
+    const first = banner.dataset.kind !== kind || banner.classList.contains('hidden');
     banner.dataset.kind = kind;
     banner.classList.remove('hidden');
-    renderIdentity(null);
+    if (kind === 'revoked' || kind === 'expired') {
+        renderIdentity(null);
+        // Raised by the fetch wrapper (no details yet): the status poll reaches
+        // a revoked session and says whose it was and why.
+        if (kind === 'revoked' && !info && first) refreshIdentity();
+    }
 }
 
 function hideIdentityBanner() {
     const banner = document.getElementById('identityBanner');
     if (banner) banner.classList.add('hidden');
+}
+
+// Unblock me (plan 12.1): restores this PseudoCo Assistant session and lets its
+// turns through the Identity Risk Gate; never touches Duo or Cisco Identity
+// Intelligence. Off again, the next turn is gated. Per identity session, so
+// signing out or a new sign-in ends it. Not a Demo Controls card, and never a
+// chat request field: the server holds it.
+async function toggleIdentityOverride(on) {
+    const toggle = document.getElementById('identityUnblockToggle');
+    if (toggle) toggle.disabled = true;
+    try {
+        const res = await fetch(on ? '/api/identity/unblock' : '/api/identity/reblock', { method: 'POST' });
+        if (!res.ok && toggle) toggle.checked = !on;
+    } catch (e) {
+        if (toggle) toggle.checked = !on;
+    } finally {
+        if (toggle) toggle.disabled = false;
+        refreshIdentity();
+    }
 }
 
 // /auth/duo/callback lands on /app?signin=ok. The conversations this browser
@@ -1075,6 +1137,7 @@ function handleKeyPress(event) {
 const STAGE_LABELS = {
     router: 'Routing to the right care team…',
     attachment_intake: 'Reading your document…',
+    identity_risk: 'Verifying your identity (Cisco Identity Intelligence)…',
     policy: 'Policy screening…',
     prompt_defense: 'Screening your message (AI Defense)…',
     agent_control_prompt: 'Screening your message (Agent Observability Controls)…',
@@ -1459,6 +1522,11 @@ async function sendMessageViaStream(payload) {
                 if (event.node === 'attachment_intake' && !payload.attachment) {
                     continue;
                 }
+                // identity_risk reports on every turn too; it only verifies a
+                // signed-in identity (Lab 5).
+                if (event.node === 'identity_risk' && !_identity) {
+                    continue;
+                }
                 setLoadingStatus(STAGE_LABELS[event.node]);
             }
         }
@@ -1543,6 +1611,9 @@ async function sendMessage(presetText = null, schedulingAction = null) {
         if (data.escalated) {
             showEscalationWarning();
         }
+        // A signed-in turn may have been refused by the Identity Risk Gate:
+        // the badge and banner follow the server's answer at once.
+        if (_identity) refreshIdentity();
 
     } catch (error) {
         console.error('Error sending message:', error);

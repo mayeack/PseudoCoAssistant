@@ -1,14 +1,14 @@
 """The shared guardrail chain every blueprint is wired into — parity by construction.
 
-    START -> attachment_intake -> policy -> prompt_defense -> agent_control_prompt
+    START -> attachment_intake -> identity_risk -> policy -> prompt_defense -> agent_control_prompt
           -> nemo_input_rails -> scheduling_intake -> ehr_lookup -> internal_docs
           -> mcp_thrash_launch -> <core entry>
              ... core ...
     <core exit> -> safety -> injection -> scheduling -> compliance -> agent_control
                 -> nemo_output_rails -> response_defense -> governance -> END
 
-Any node may short-circuit to END by setting ``terminal`` (policy block,
-AI Defense block, NeMo rail, Agent Control deny, clarifying question, generation
+Any node may short-circuit to END by setting ``terminal`` (Identity Risk Gate
+block, policy block, AI Defense block, NeMo rail, Agent Control deny, clarifying question, generation
 error). Adding a guardrail means adding it HERE (and to ``PRE_NODES`` /
 ``POST_NODES``), never inside a blueprint's core, so both architectures get it
 in the same change — tests/test_blueprint_parity.py asserts every compiled
@@ -27,6 +27,7 @@ from backend.agents.nodes.attachment import attachment_intake_node
 from backend.agents.nodes.compliance import compliance_node
 from backend.agents.nodes.defense import prompt_defense_node, response_defense_node
 from backend.agents.nodes.ehr import ehr_lookup_node
+from backend.agents.nodes.identity import identity_risk_node
 from backend.agents.nodes.governance import governance_node
 from backend.agents.nodes.injection import injection_node
 from backend.agents.nodes.internal_docs import internal_docs_node
@@ -41,6 +42,11 @@ from backend.agents.state import PseudoCoAssistantState
 # FIRST: when the turn carries a document it reads the text layer as a governed
 # tool call (no model, never terminal), so every screen below inspects the typed
 # message plus the document -- the same text the answering agent gets.
+# identity_risk (backend/agents/nodes/identity.py, docs/identity.md) is SECOND
+# (Lab 5, A2): on a signed-in turn it asks Duo and Cisco Identity Intelligence
+# about the verified user and refuses a compromised identity before any screen
+# or model runs. After attachment_intake, so a refused document turn carries
+# the document's metadata (never its text); a no-op on an anonymous turn.
 # Screen the PROMPT before any model call. Order matters: the internal policy
 # engine is free and deterministic, Cisco AI Defense inspects next, the Agent
 # Control prompt-stage controls after it (mirroring its place on output: AI
@@ -58,7 +64,7 @@ from backend.agents.state import PseudoCoAssistantState
 # on a turn that cleared every prompt screen; it spawns a daemon thread that runs
 # the synthetic MCP tool-thrash concurrently with generation and returns at once.
 PRE_NODES: List[str] = [
-    "attachment_intake", "policy", "prompt_defense", "agent_control_prompt", "nemo_input_rails",
+    "attachment_intake", "identity_risk", "policy", "prompt_defense", "agent_control_prompt", "nemo_input_rails",
     "scheduling_intake", "ehr_lookup", "internal_docs", "mcp_thrash_launch",
 ]
 # Screen / shape the ANSWER. Cisco AI Defense (response_defense) stays the last
@@ -73,6 +79,7 @@ GUARDRAIL_NODES: List[str] = PRE_NODES + POST_NODES
 
 _NODE_FNS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "attachment_intake": attachment_intake_node,
+    "identity_risk": identity_risk_node,
     "policy": policy_block_node,
     "prompt_defense": prompt_defense_node,
     "agent_control_prompt": agent_control_prompt_node,
@@ -94,7 +101,7 @@ _NODE_FNS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
 
 # Nodes that may short-circuit (set ``terminal``) and therefore need the
 # conditional edge; the rest chain unconditionally.
-_MAY_TERMINATE = {"policy", "prompt_defense", "agent_control_prompt", "nemo_input_rails",
+_MAY_TERMINATE = {"identity_risk", "policy", "prompt_defense", "agent_control_prompt", "nemo_input_rails",
                   "agent_control", "nemo_output_rails", "response_defense"}
 
 

@@ -357,6 +357,13 @@ def begin(username: Any, *, client_address: Optional[str] = None) -> Tuple[str, 
         raise SigninError(RATE_LIMITED, name, audit=audit)
     if name not in settings.identity_allowed_users_set:
         raise SigninError(NOT_ALLOWED, name)
+    # A persona Duo reports disabled is refused here (Duo would refuse it at
+    # the prompt too). Only with the read-only Admin API keys; cached, and an
+    # unanswered lookup refuses nothing.
+    from backend.services import identity_lookup
+
+    if identity_lookup.duo_configured() and identity_lookup.duo_user(name).get("duo_status") == "disabled":
+        raise SigninError(DUO_DENIED, name)
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
     try:

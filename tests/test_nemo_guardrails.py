@@ -256,8 +256,10 @@ def test_graph_order() -> None:
           and ("ehr_lookup", "internal_docs") in edges
           and ("internal_docs", "mcp_thrash_launch") in edges
           and ("mcp_thrash_launch", "intake") in edges)
-    check("attachment_intake -> policy: the attached document is read before every screen, the input rails included",
-          ("attachment_intake", "policy") in edges and ("nemo_input_rails", "attachment_intake") not in edges)
+    check("attachment_intake -> identity_risk -> policy: the attached document is read before every screen, "
+          "the input rails included, and the Identity Risk Gate (Lab 5) sits between it and policy",
+          ("attachment_intake", "identity_risk") in edges and ("identity_risk", "policy") in edges
+          and ("nemo_input_rails", "attachment_intake") not in edges)
     check("agent_control -> nemo_output_rails -> response_defense (Cisco stays last)",
           ("agent_control", "nemo_output_rails") in edges and ("nemo_output_rails", "response_defense") in edges)
     check("both rails can short-circuit to END",

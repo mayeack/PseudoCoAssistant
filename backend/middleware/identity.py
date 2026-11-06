@@ -17,9 +17,21 @@ Behaviour, only while ``DUO_ENABLED`` is on (off, the cookie is not even read):
   ``/login/duo?expired=1`` (a browser page);
 - revoked: the session is a tombstone, and every request answers 403
   ``identity_session_revoked`` (API) or 303 to ``/login/duo?revoked=1``, cookie
-  kept, until the user signs in again or signs out;
+  kept, until the user signs in again, signs out, or turns Unblock me on;
+- the revocation pull (plan 12.1, A4): on a valid session's request, Duo's
+  status for the user (``identity_lookup.duo_user``, 10 s cache, off the event
+  loop) is checked, and ``disabled`` revokes the session there and then (a
+  tombstone and an ``identity_session_revoked`` audit event). Locked out only
+  blocks turns (the gate). An Unblock me session is left alone, and nothing
+  happens without the Admin API keys or when Duo cannot be reached;
 - no response here ever carries ``WWW-Authenticate: Basic`` (that would pop the
   browser's Basic-auth dialog over the room-key gate's).
+
+Three identity API paths reach a tombstone too (``TOMBSTONE_PATHS``:
+``GET /api/identity/me``, ``POST /api/identity/unblock`` and
+``POST /api/identity/reblock``), again only as ``identity_revoked``: the chat
+page's banner learns whose session ended and why, and Unblock me can bring it
+back. Without that, a revoked session could never be unblocked.
 
 The sign-in, sign-out and public paths are never refused (``REDIRECT_EXEMPT``),
 or an expired or revoked cookie would loop between the two gates. Static assets
@@ -51,7 +63,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from backend.config import settings
 from backend.middleware.access_key import PUBLIC_PATHS
-from backend.services import identity_store
+from backend.services import identity_lookup, identity_store
 
 #: The identity cookie. ``__Host-``: Secure, Path=/, no Domain, host-only.
 COOKIE_NAME = "__Host-pseudoco_assistant_identity"
@@ -72,6 +84,11 @@ STATE_REVOKED = "identity_revoked"
 # (/login, /favicon.ico, /health), which would otherwise bounce between gates.
 REDIRECT_EXEMPT_PATHS = frozenset({LOGIN_PATH, "/auth/identity/logout", "/logout"} | set(PUBLIC_PATHS))
 REDIRECT_EXEMPT_PREFIXES: Tuple[str, ...] = ("/auth/duo/", "/static/")
+# Reached by a revoked session (as ``identity_revoked``, never as an identity):
+# the banner's status poll and the Unblock me toggle.
+TOMBSTONE_PATHS = frozenset({"/api/identity/me", "/api/identity/unblock", "/api/identity/reblock"})
+#: The revocation reason of a session Duo disabled.
+DUO_DISABLED_REASON = "duo_disabled"
 # Not even looked up: no identity is ever needed to serve these.
 PASSTHROUGH_PATHS = frozenset({"/health", "/favicon.ico"})
 PASSTHROUGH_PREFIXES: Tuple[str, ...] = ("/static/",)
@@ -158,6 +175,26 @@ async def _refuse(scope: Scope, send: Send, detail: str, *, status: int, delete_
     await _respond(send, status, headers, json.dumps({"detail": detail}).encode("utf-8"))
 
 
+# --------------------------------------------------------------------------- revocation pull
+def pull_revocation(identity: Optional[identity_store.IdentitySnapshot]) -> bool:
+    """Revoke a valid session whose Duo account is now ``disabled`` (A4).
+
+    Blocking (a cached Duo Admin API read), so the middleware runs it in the
+    threadpool. Returns True when it revoked. Never raises: a lookup that
+    cannot answer leaves the session as it is (the gate decides turns), and an
+    Unblock me session is never revoked here."""
+    if identity is None or identity.overridden or not identity_lookup.duo_configured():
+        return False
+    try:
+        answer = identity_lookup.duo_user(identity.username)
+        if answer.get("duo_status") != "disabled":
+            return False
+        identity_store.revoke(identity.session_ref, reason=DUO_DISABLED_REASON, actor="duo")
+        return True
+    except Exception:  # noqa: BLE001 - a failed pull never fails the request
+        return False
+
+
 # --------------------------------------------------------------------------- middleware
 class IdentityMiddleware:
     """Resolve the identity cookie; see the module docstring."""
@@ -184,8 +221,15 @@ class IdentityMiddleware:
             return
 
         result = await run_in_threadpool(identity_store.lookup, token)
+        if result.valid and await run_in_threadpool(pull_revocation, result.identity):
+            result = identity_store.LookupResult(identity_store.REVOKED, result.identity, DUO_DISABLED_REASON)
         if result.valid:
             scope.setdefault("state", {})[STATE_IDENTITY] = result.identity
+            await self.app(scope, receive, send)
+            return
+        if (path in TOMBSTONE_PATHS and result.status == identity_store.REVOKED
+                and result.identity is not None):
+            scope.setdefault("state", {})[STATE_REVOKED] = result.identity
             await self.app(scope, receive, send)
             return
         if _in(path, REDIRECT_EXEMPT_PATHS, REDIRECT_EXEMPT_PREFIXES):

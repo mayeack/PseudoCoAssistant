@@ -2383,6 +2383,29 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
         )
 
         try:
+            # Identity Risk Gate (Lab 5), before the policy check as on the
+            # agentic path (PRE_NODES[1]): the SAME function the identity_risk
+            # node runs, imported lazily (the agentic package imports this
+            # module). Nothing happens on an anonymous turn; once it ran, every
+            # later event of the turn carries its verdict.
+            if verified:
+                from backend.agents.nodes.identity import identity_gate_turn
+                identity_verdict, identity_block = identity_gate_turn(
+                    identity_session=verified,
+                    session_id=session_id,
+                    request_id=request_id,
+                    trace_id=trace_id,
+                    user_message=user_message,
+                    start_time=start_time,
+                    theme=theme,
+                    client_address=client_address,
+                    enduser_id=enduser_id,
+                    governance_fields=dict(identity_fields),
+                )
+                identity_fields = identity_governance_fields(verified, identity_verdict)
+                if identity_block is not None:
+                    return identity_block
+
             # Internal policy engine (built-in, separate from Cisco AI Defense).
             # Defaults to on when the caller doesn't specify, preserving the
             # always-on safety behavior for non-UI callers (e.g. auto-prompter).

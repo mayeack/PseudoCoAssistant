@@ -56,7 +56,13 @@ class PseudoCoAssistantState(TypedDict, total=False):
     # from a request body or from ``enduser_id`` -- it is a run_turn /
     # build_initial_state parameter, deliberately NOT a ChatRequest field.
     # (``identity`` alone already means the service identity overrides below.)
-    # ``identity_risk``: the Identity Risk Gate's verdict for the turn.
+    # ``identity_risk``: the Identity Risk Gate's verdict for the turn
+    # (``identity_gate.decide``: verdict, reasons, check, duo_status,
+    # trust_level, failing_checks, as_of), set by the shared-chain
+    # ``identity_risk`` PRE node on a signed-in turn and unset otherwise. Every
+    # later event of the turn carries it (``identity_turn_fields``). An
+    # ``identity_session`` with ``override`` True is an Unblock me session:
+    # the gate records the real verdict and lets the turn through.
     identity_session: Optional[Dict[str, Any]]
     identity_risk: Dict[str, Any]
 
@@ -285,7 +291,8 @@ def verified_identity(identity_session: Any) -> Optional[Dict[str, Any]]:
 
     Accepts the dict form (``IdentitySnapshot.to_state()``) or anything with a
     ``to_state()`` (the snapshot itself). The username is stripped and
-    lowercased the way the identity store stores it."""
+    lowercased the way the identity store stores it; ``override`` (Unblock me)
+    is kept only when it is True."""
     if identity_session is not None and not isinstance(identity_session, Mapping):
         to_state = getattr(identity_session, "to_state", None)
         identity_session = to_state() if callable(to_state) else None
@@ -294,21 +301,57 @@ def verified_identity(identity_session: Any) -> Optional[Dict[str, Any]]:
     username = str(identity_session.get("username") or "").strip().lower()
     if not username:
         return None
-    return {**dict(identity_session), "username": username,
-            "source": str(identity_session.get("source") or "duo")}
+    verified = {**dict(identity_session), "username": username,
+                "source": str(identity_session.get("source") or "duo")}
+    if verified.get("override") is not True:
+        verified.pop("override", None)
+    return verified
 
 
-def identity_governance_fields(identity_session: Any) -> Dict[str, Any]:
-    """``identity_verified`` / ``identity_source`` for one turn's governance events.
+def identity_risk_fields(identity_risk: Any) -> Dict[str, Any]:
+    """The Identity Risk Gate's verdict as flat governance fields (Lab 5):
+    ``identity_risk`` ("allow" / "block", the REAL verdict, also under an
+    override), ``identity_check`` ("ok" / "unavailable"), and, when known,
+    ``identity_risk_reasons``, ``identity_duo_status``,
+    ``identity_trust_level`` and ``identity_failing_checks``. ``{}`` without
+    a verdict (an anonymous turn, or an event before the gate ran)."""
+    if not isinstance(identity_risk, Mapping) or identity_risk.get("verdict") not in ("allow", "block"):
+        return {}
+    fields: Dict[str, Any] = {"identity_risk": identity_risk["verdict"],
+                              "identity_check": identity_risk.get("check") or "unavailable"}
+    for key, out in (("reasons", "identity_risk_reasons"), ("failing_checks", "identity_failing_checks")):
+        values = identity_risk.get(key)
+        if isinstance(values, (list, tuple)) and values:
+            fields[out] = [str(v) for v in values]
+    for key, out in (("duo_status", "identity_duo_status"), ("trust_level", "identity_trust_level")):
+        if identity_risk.get(key):
+            fields[out] = str(identity_risk[key])
+    return fields
+
+
+def identity_governance_fields(identity_session: Any, identity_risk: Any = None) -> Dict[str, Any]:
+    """The identity evidence for one turn's governance events.
 
     Present only when the turn carries a verified identity session; an anonymous
     turn contributes no key at all, so Labs 0-4 events are unchanged. Fresh
     names, never ``enduser_id``: every emit site already passes that one, so a
-    second ``enduser_id`` would be a duplicate keyword."""
+    second ``enduser_id`` would be a duplicate keyword. ``identity_verified`` /
+    ``identity_source`` always; ``identity_override`` True on an Unblock me
+    session; the gate's verdict (``identity_risk_fields``) once it is known."""
     verified = verified_identity(identity_session)
     if not verified:
         return {}
-    return {"identity_verified": True, "identity_source": verified["source"]}
+    fields: Dict[str, Any] = {"identity_verified": True, "identity_source": verified["source"]}
+    if verified.get("override") is True:
+        fields["identity_override"] = True
+    fields.update(identity_risk_fields(identity_risk))
+    return fields
+
+
+def identity_turn_fields(state: Mapping[str, Any]) -> Dict[str, Any]:
+    """``identity_governance_fields`` for a turn's state: its identity session
+    plus the gate's verdict once the ``identity_risk`` node has run."""
+    return identity_governance_fields(state.get("identity_session"), state.get("identity_risk"))
 
 
 def governance_identity_overrides(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -327,8 +370,9 @@ def governance_identity_overrides(state: Dict[str, Any]) -> Dict[str, Any]:
         value = state.get(key)
         if value:
             overrides[key] = value
-    # The verified end user (Lab 5): identity_verified / identity_source ride on
-    # every event of a signed-in turn, blocked ones included, through this same
-    # splat. Nothing on an anonymous turn.
-    overrides.update(identity_governance_fields(state.get("identity_session")))
+    # The verified end user (Lab 5): identity_verified / identity_source, the
+    # override and, once the gate has run, its verdict ride on every event of a
+    # signed-in turn, blocked ones included, through this same splat. Nothing
+    # on an anonymous turn.
+    overrides.update(identity_turn_fields(state))
     return overrides

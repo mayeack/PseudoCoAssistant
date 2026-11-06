@@ -32,9 +32,13 @@ identity cookie (``REDIRECT_EXEMPT``), so a user can always sign in again.
   included), deletes the cookie and goes to ``/login/duo?signed_out=1``, or to
   ``/app`` when the form's ``next`` is exactly ``/app`` (never another target).
   ``GET /logout`` (the room-key sign-out) ends it too.
-- ``GET /api/identity/me`` - who this browser is signed in as. A plain ``def``
-  route, so it runs in the threadpool; the chat page polls it every 10 s, and
-  a revoked or expired session answers the middleware's 403 / 401 here.
+- ``GET /api/identity/me`` - who this browser is signed in as, the Unblock me
+  override, and the latest Duo / Identity Intelligence status and gate verdict.
+  A plain ``def`` route, so it runs in the threadpool; the chat page polls it
+  every 10 s. A revoked session reaches it as a tombstone (``revoked: true``);
+  an expired one answers the middleware's 401.
+- ``POST /api/identity/unblock`` / ``POST /api/identity/reblock`` - Unblock me
+  on and off (plan 12.1). They reach a revoked session too; never Duo or CII.
 
 Routes that touch the store or Duo are plain ``def`` routes, so they run in the
 threadpool, never on the event loop.
@@ -59,7 +63,7 @@ from backend.middleware.identity import (
     revoked_identity,
     set_identity_cookie,
 )
-from backend.services import identity_signin, identity_store
+from backend.services import identity_gate, identity_lookup, identity_signin, identity_store
 from backend.services.identity_signin import SigninError
 
 logger = logging.getLogger(__name__)
@@ -261,14 +265,99 @@ def identity_logout(request: Request, next_path: str = Form("", alias="next")):
 @router.get("/api/identity/me")
 def identity_me(request: Request):
     """The verified identity of this browser, or ``{"signed_in": false}``.
-    Never the cookie or anything derived from it."""
+    Never the cookie or anything derived from it.
+
+    Signed in, it also carries what the badge and banner show: the Unblock me
+    ``override``, the latest Duo status / CII trust level / failing checks
+    (``identity_lookup``, cached; ``identity_check`` "unavailable" when either
+    could not answer) and the gate's ``verdict`` for the next turn. A revoked
+    session (the middleware lets it reach this path only as a tombstone)
+    answers ``{"signed_in": false, "revoked": true, "username", "revoked_reason"}``
+    so the banner can say whose session ended and offer Unblock me."""
     identity = current_identity(request)
+    headers = {"Cache-Control": "no-store"}
     if identity is None:
-        return JSONResponse({"signed_in": False}, headers={"Cache-Control": "no-store"})
+        revoked = revoked_identity(request)
+        if revoked is not None:
+            result = identity_store.status(revoked.session_ref)
+            return JSONResponse({
+                "signed_in": False, "revoked": True, "username": revoked.username,
+                "revoked_reason": result.revoked_reason if result is not None else None,
+                "can_unblock": True,
+            }, headers=headers)
+        return JSONResponse({"signed_in": False}, headers=headers)
+    status = identity_lookup.lookup(identity.username)
+    verdict = identity_gate.decide(status, fail_open=bool(getattr(settings, "identity_fail_open", True)))
     return JSONResponse({
         "signed_in": True,
         "username": identity.username,
         "source": identity.source,
         "signed_in_at": identity.created_at.isoformat(),
         "expires_at": identity.expires_at.isoformat(),
-    }, headers={"Cache-Control": "no-store"})
+        "override": identity.overridden,
+        "unblocked_at": identity.unblocked_at.isoformat() if identity.unblocked_at else None,
+        "duo_status": verdict["duo_status"],
+        "trust_level": verdict["trust_level"],
+        "failing_checks": verdict["failing_checks"],
+        "identity_check": verdict["check"],
+        "verdict": verdict["verdict"],
+        "reasons": verdict["reasons"],
+        "reasons_text": identity_gate.reasons_text(verdict),
+    }, headers=headers)
+
+
+def _override_identity(request: Request):
+    """The session Unblock me acts on: the verified one, or a tombstone."""
+    return current_identity(request) or revoked_identity(request)
+
+
+def _override_response(snapshot, *, next_path: str) -> object:
+    if next_path == SIGNED_OUT_CONTINUE:
+        return RedirectResponse(SIGNED_OUT_CONTINUE, status_code=303, headers=_NO_STORE)
+    return JSONResponse({"ok": True, "username": snapshot.username, "override": snapshot.overridden},
+                        headers=_NO_STORE)
+
+
+def _override_refusal(request: Request) -> Optional[JSONResponse]:
+    if not getattr(settings, "duo_enabled", False):
+        return JSONResponse({"detail": "Not Found"}, status_code=404, headers=_NO_STORE)
+    if _cross_site(request):
+        return JSONResponse({"detail": "cross-site request refused"}, status_code=403, headers=_NO_STORE)
+    if _override_identity(request) is None:
+        return JSONResponse({"detail": "identity_not_signed_in"}, status_code=401, headers=_NO_STORE)
+    return None
+
+
+@router.post("/api/identity/unblock")
+def identity_unblock(request: Request, next_path: str = Form("", alias="next")):
+    """Unblock me (plan 12.1): let this identity session's turns through the
+    Identity Risk Gate, and bring a revoked session back. Every later event
+    of the session carries ``identity_override=true`` beside the real verdict;
+    writes ``identity_unblocked``. Never touches Duo or Identity Intelligence:
+    a disabled account stays disabled. Answers JSON, or 303 ``/app`` for the
+    sign-in page's form (``next=/app``, nothing else)."""
+    refusal = _override_refusal(request)
+    if refusal is not None:
+        return refusal
+    snapshot = identity_store.unblock(_override_identity(request).session_ref,
+                                      client_address=_client_address(request))
+    if snapshot is None:
+        return JSONResponse({"detail": "identity_session_expired"}, status_code=401, headers=_NO_STORE)
+    logger.info("Unblock me on for %s (session %s)", snapshot.username, snapshot.session_ref)
+    return _override_response(snapshot, next_path=next_path)
+
+
+@router.post("/api/identity/reblock")
+def identity_reblock(request: Request, next_path: str = Form("", alias="next")):
+    """Unblock me off: the next turn is gated again (and a Duo-disabled
+    account's session is revoked again on its next request). Writes
+    ``identity_reblocked`` when the override was on."""
+    refusal = _override_refusal(request)
+    if refusal is not None:
+        return refusal
+    snapshot = identity_store.reblock(_override_identity(request).session_ref,
+                                      client_address=_client_address(request))
+    if snapshot is None:
+        return JSONResponse({"detail": "identity_session_expired"}, status_code=401, headers=_NO_STORE)
+    logger.info("Unblock me off for %s (session %s)", snapshot.username, snapshot.session_ref)
+    return _override_response(snapshot, next_path=next_path)

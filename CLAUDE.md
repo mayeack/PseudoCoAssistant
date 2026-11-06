@@ -192,6 +192,57 @@ keep it honest:
 - Extend `tests/test_attachments.py` and the `document_injection_*` scenarios in
   `tests/test_blueprint_parity.py` in the same PR as any attachment change.
 
+## Identity sign-in
+
+`docs/identity.md` is the design (Lab 5, "Verify: Cisco Identity Intelligence").
+Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
+
+- **Identity comes only from the verified session**: `request.state.identity`,
+  set by the identity middleware (`backend/middleware/identity.py`) from the
+  `__Host-pseudoco_assistant_identity` cookie. Never from `enduser_id`, never
+  from a request body. `identity_session` is a `run_turn` /
+  `build_initial_state` / legacy `process_message` parameter, never a
+  `ChatRequest` or `ChatCompletionRequest` field, and there is no Demo Controls
+  card for anything identity: a client cannot switch enforcement off.
+- **Secrets live in `.env` only** (`DUO_*`, `CII_*`, `IDENTITY_*`,
+  `PUBLIC_BASE_URL`), never in `settings_store` or `_INTEGRATION_FIELDS`:
+  anyone holding the room access key can rewrite those.
+- **The Duo redirect URI comes only from `PUBLIC_BASE_URL`**
+  (`settings.duo_redirect_uri`), never from the Host header; https only, on a
+  DNS name, and the scheme is the trusted proxy's.
+- Store and Duo calls run off the event loop; the middleware is pure ASGI (it
+  sits on the SSE path).
+
+## Identity Risk Gate
+
+- **`identity_risk` is `PRE_NODES[1]`** in the shared chain, after
+  `attachment_intake` and before `policy`, in `_MAY_TERMINATE`. Both
+  blueprints get it by construction; the legacy engine calls the same
+  `identity_gate_turn` before its policy check.
+- **No identity session, no work:** the node returns `{}` before any span,
+  log or lookup (the spray's actor has none, so AI Defense still sees it).
+- **`identity_gate.decide` is pure.** Lookups (`backend/services/identity_lookup.py`:
+  Duo Admin API, signed HMAC-SHA512; CII token + GraphQL) never raise, are
+  bounded (3 s connect / 5 s read), cached 10 s, and go out only over https.
+  The CII query is the one constant `CII_END_USER_QUERY`.
+- **Fail open (A3):** an unavailable lookup allows the turn with
+  `identity_check="unavailable"`; a block resting on what WAS learned still
+  blocks.
+- **No side effects in the chain.** The gate never revokes and never writes
+  to Duo or CII. Revocation is the middleware's pull: Duo `disabled` revokes
+  the session (a tombstone); `locked out` only blocks turns.
+- **Unblock me** (`POST /api/identity/unblock` / `/reblock`) is per identity
+  session, never a Demo Controls card or request field, and never touches Duo
+  or CII. The gate records the real verdict plus `identity_override=true` on
+  every event; the audit events are `identity_unblocked` / `identity_reblocked`.
+- The block event: `guardrail_ids=["cisco_identity_intelligence"]`,
+  `safety_categories=["compromised_identity"]`, severity HIGH (never
+  EMERGENCY), no escalation, the typed message only, `theme=` and the turn's
+  identity / attachment fields. Never tagged "injection" (Lab 4's correlation).
+- Extend `tests/test_identity_gate.py` and the `identity_*` scenarios in
+  `tests/test_blueprint_parity.py` in the same PR as any identity change. The
+  attachment rules above are unchanged.
+
 ## Product naming
 
 The product is **PseudoCo Assistant** (since 4.10.0). Its identifier forms are

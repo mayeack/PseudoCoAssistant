@@ -1,4 +1,5 @@
-"""Identity audit events (Lab 5): sign-in success and failure, session revocation.
+"""Identity audit events (Lab 5): sign-in success and failure, session
+revocation, and the Unblock me override turned on and off.
 
 Written through ``governance_logger.log_audit`` like every other audit event, so
 they reach the JSONL file, SQLite (``audit_logs``, with ``enduser_id``) and every
@@ -30,10 +31,16 @@ logger = logging.getLogger(__name__)
 SIGNIN_SUCCESS = "identity_signin_success"
 SIGNIN_FAILURE = "identity_signin_failure"
 SESSION_REVOKED = "identity_session_revoked"
-ACTIONS = frozenset({SIGNIN_SUCCESS, SIGNIN_FAILURE, SESSION_REVOKED})
+# Unblock me (plan 12.1): the user overrode the Identity Risk Gate for their
+# session (and cleared its tombstone, if any), or turned the override off.
+# ``user`` is who overrode; Duo and Identity Intelligence are never touched.
+UNBLOCKED = "identity_unblocked"
+REBLOCKED = "identity_reblocked"
+ACTIONS = frozenset({SIGNIN_SUCCESS, SIGNIN_FAILURE, SESSION_REVOKED, UNBLOCKED, REBLOCKED})
 
-#: The only keys an identity audit event's ``details`` may carry.
-DETAIL_KEYS = frozenset({"duo_txid", "trust_level", "reason"})
+#: The only keys an identity audit event's ``details`` may carry. ``cleared``:
+#: the revocation reason an Unblock me cleared (the session was a tombstone).
+DETAIL_KEYS = frozenset({"duo_txid", "trust_level", "reason", "cleared"})
 
 _REASON_RE = re.compile(r"[a-z0-9_]{1,64}")
 _TXID_RE = re.compile(r"[A-Za-z0-9-]{1,64}")
@@ -53,9 +60,12 @@ def _username(value: Any) -> Optional[str]:
     return text[:_USERNAME_MAX] or None
 
 
-def build_details(*, duo_txid: Any = None, trust_level: Any = None, reason: Any = None) -> Dict[str, str]:
+def build_details(*, duo_txid: Any = None, trust_level: Any = None, reason: Any = None,
+                  cleared: Any = None) -> Dict[str, str]:
     """``details`` for an identity event: only well-formed values of DETAIL_KEYS."""
     details: Dict[str, str] = {}
+    if cleared:
+        details["cleared"] = str(cleared) if _REASON_RE.fullmatch(str(cleared)) else "other"
     if duo_txid and _TXID_RE.fullmatch(str(duo_txid)):
         details["duo_txid"] = str(duo_txid)
     if trust_level and _TRUST_RE.fullmatch(str(trust_level)):
@@ -75,6 +85,7 @@ def log_identity_event(
     duo_txid: Any = None,
     trust_level: Any = None,
     reason: Any = None,
+    cleared: Any = None,
     request_id: Optional[str] = None,
 ) -> bool:
     """Write one identity audit event. Returns False when logging failed: an
@@ -89,7 +100,8 @@ def log_identity_event(
             request_id=request_id or str(uuid.uuid4()),
             action=action,
             actor=actor,
-            details=build_details(duo_txid=duo_txid, trust_level=trust_level, reason=reason),
+            details=build_details(duo_txid=duo_txid, trust_level=trust_level, reason=reason,
+                                  cleared=cleared),
             ip_address=client_address or None,
             enduser_id=_username(username),
         )
@@ -119,3 +131,16 @@ def log_session_revoked(*, username: Any, client_address: Optional[str], session
     return log_identity_event(SESSION_REVOKED, username=username, client_address=client_address,
                               session_ref=session_ref, actor=actor, reason=reason,
                               request_id=request_id)
+
+
+def log_unblocked(*, username: Any, client_address: Optional[str], session_ref: str,
+                  cleared: Any = None, request_id: Optional[str] = None) -> bool:
+    return log_identity_event(UNBLOCKED, username=username, client_address=client_address,
+                              session_ref=session_ref, reason="unblock_me", cleared=cleared,
+                              request_id=request_id)
+
+
+def log_reblocked(*, username: Any, client_address: Optional[str], session_ref: str,
+                  request_id: Optional[str] = None) -> bool:
+    return log_identity_event(REBLOCKED, username=username, client_address=client_address,
+                              session_ref=session_ref, reason="reblock", request_id=request_id)

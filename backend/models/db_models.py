@@ -210,6 +210,12 @@ class IdentitySession(Base):
     duo_txid = Column(String, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     revoked_reason = Column(String, nullable=True)
+    # Unblock me (plan 12.1, A4): set while the user has overridden the
+    # Identity Risk Gate for this session. The gate then lets its turns through
+    # (recording the real verdict and identity_override=true on every event)
+    # and the Duo revocation pull leaves it alone; POST /api/identity/reblock
+    # clears it. Never touches Duo or Cisco Identity Intelligence.
+    unblocked_at = Column(DateTime, nullable=True)
 
 class Appointment(Base):
     """One appointment booked from the chat's scheduling flow (docs/scheduling.md).

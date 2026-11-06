@@ -43,7 +43,7 @@ from langgraph.graph import END, START, StateGraph
 
 from backend.agents.blueprints import DEFAULT_BLUEPRINT, get_blueprint
 from backend.agents.blueprints.guardrails import wire_guardrails
-from backend.agents.state import PseudoCoAssistantState, build_initial_state, identity_governance_fields
+from backend.agents.state import PseudoCoAssistantState, build_initial_state, identity_turn_fields
 from backend.agents.supervisor import route_to_theme, router_node
 from backend.agents.themes import THEMES
 from backend.config import settings
@@ -296,7 +296,7 @@ def run_turn(
             error_message=str(exc),
             stack_trace=None,
             enduser_id=state.get("enduser_id"),
-            **identity_governance_fields(state.get("identity_session")),
+            **identity_turn_fields(state),
         )
         return _generic_error_result()
 
@@ -359,7 +359,7 @@ def run_turn_stream(**kwargs: Any) -> Iterator[Dict[str, Any]]:
             error_message=str(exc),
             stack_trace=None,
             enduser_id=state.get("enduser_id"),
-            **identity_governance_fields(state.get("identity_session")),
+            **identity_turn_fields(state),
         )
         result = _generic_error_result()
     yield {"event": "final", "result": result}

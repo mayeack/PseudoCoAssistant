@@ -250,6 +250,39 @@ check("modality: a chat event without a document has no attachment key and reads
 check("modality: a tool_call event has no input_modality key",
       "input_modality" not in tc and "input_modality" not in tc_allow)
 
+# 9b. Lab 5: the Identity Risk Gate's block (backend/agents/nodes/identity.py) --
+ident = derive_executive_fields(_base(
+    policy_blocked=True, guardrail_triggered=True, safety_violated=True, severity="HIGH",
+    guardrail_ids=["cisco_identity_intelligence"], safety_categories=["compromised_identity"],
+    usage_input_tokens=0, usage_output_tokens=0, usage_total_tokens=0))
+check("identity gate: policy name and business outcome",
+      ident["policy_name"] == "Cisco Identity Intelligence identity risk"
+      and ident["business_outcome"] == "blocked_compromised_identity" and ident["policy_action"] == "block",
+      str({k: ident.get(k) for k in ("policy_name", "business_outcome", "policy_action")}))
+check("identity gate: its own prompt category (never self-harm, emergency or prompt injection)",
+      ident["prompt_category"] == "compromised_identity", str(ident["prompt_category"]))
+unverified = derive_executive_fields(_base(
+    policy_blocked=True, guardrail_triggered=True, severity="MEDIUM",
+    guardrail_ids=["cisco_identity_intelligence"], safety_categories=["identity_unverified"]))
+check("identity gate: a fail-closed 'could not be verified' block is the same category",
+      unverified["prompt_category"] == "compromised_identity"
+      and unverified["business_outcome"] == "blocked_compromised_identity")
+built = create_governance_log(
+    operation_name="chat", request_model="m", conversation_id="S16", session_id="S16", input_messages=[],
+    token_type="output", request_id="R16", trace_id="T16", enduser_id="nina.osei", identity_verified=True,
+    identity_source="duo", identity_override=True, identity_risk="block", identity_check="ok",
+    identity_risk_reasons=["mfa_flood"], identity_duo_status="active", identity_trust_level="UNTRUSTED",
+    identity_failing_checks=["MFA Flood"])
+check("identity gate: create_governance_log keeps every identity field (explicit dict, nothing dropped)",
+      all(built.get(k) is not None for k in ("identity_override", "identity_risk", "identity_check",
+                                               "identity_risk_reasons", "identity_duo_status",
+                                               "identity_trust_level", "identity_failing_checks")),
+      str({k: v for k, v in built.items() if k.startswith("identity")}))
+plain = create_governance_log(operation_name="chat", request_model="m", conversation_id="S17", session_id="S17",
+                              input_messages=[], token_type="output", request_id="R17", trace_id="T17")
+check("identity gate: an anonymous event has no identity key at all",
+      not any(k.startswith("identity") for k in plain), str([k for k in plain if k.startswith("identity")]))
+
 # 10. Never raises on garbage -------------------------------------------------
 check("robust: empty dict -> dict", isinstance(derive_executive_fields({}), dict))
 check("robust: junk types -> dict",

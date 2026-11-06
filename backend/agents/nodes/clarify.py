@@ -11,7 +11,7 @@ from typing import Any, Dict
 
 from backend.agents.nodes.attachment import attachment_governance_fields
 from backend.agents.nodes.shared import clarifying_service
-from backend.agents.state import identity_governance_fields
+from backend.agents.state import identity_turn_fields
 from backend.logging.governance_logger import governance_logger
 from backend.models.schemas import MessageType
 from backend.telemetry import otel
@@ -52,7 +52,7 @@ def intake_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # on an anonymous turn. Not governance_identity_overrides: the
             # decision event has never carried workflow_name / blueprint, and
             # Labs 0-4 events stay unchanged.
-            **identity_governance_fields(state.get("identity_session")),
+            **identity_turn_fields(state),
             # A document turn's decision names its document (docs/attachments.md).
             **attachment_governance_fields(state),
         )

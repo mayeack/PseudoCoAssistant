@@ -193,6 +193,19 @@ def create_governance_log(
         # every emit site, so reusing it would be a duplicate keyword.
         "identity_verified": kwargs.get("identity_verified"),
         "identity_source": kwargs.get("identity_source"),
+        # The Identity Risk Gate (Lab 5) on a signed-in turn, from its
+        # identity_risk node on: the REAL verdict ("allow" / "block", also
+        # while Unblock me overrides it), whether the lookup answered ("ok" /
+        # "unavailable"), why, and what Duo / Identity Intelligence said.
+        # identity_override=True on every event of an Unblock me session.
+        # All absent (None-stripped) on an anonymous turn.
+        "identity_risk": kwargs.get("identity_risk"),
+        "identity_check": kwargs.get("identity_check"),
+        "identity_risk_reasons": kwargs.get("identity_risk_reasons"),
+        "identity_duo_status": kwargs.get("identity_duo_status"),
+        "identity_trust_level": kwargs.get("identity_trust_level"),
+        "identity_failing_checks": kwargs.get("identity_failing_checks"),
+        "identity_override": kwargs.get("identity_override"),
         "service_name": kwargs.get("service_name", "pseudoco-assistant"),
         "client_address": kwargs.get("client_address"),
 
@@ -220,6 +233,14 @@ def create_governance_log(
 
     # Remove None values for cleaner logs
     return {k: v for k, v in log_entry.items() if v is not None}
+
+#: Lab 5 identity evidence an escalation event keeps (like every other event of
+#: a signed-in turn): absent on an anonymous turn.
+IDENTITY_EVENT_KEYS = (
+    "identity_verified", "identity_source", "identity_override", "identity_risk", "identity_check",
+    "identity_risk_reasons", "identity_duo_status", "identity_trust_level", "identity_failing_checks",
+)
+
 
 def create_escalation_log(
     escalation_id: str,
@@ -253,8 +274,7 @@ def create_escalation_log(
     # identity_source, as on create_governance_log's events). Added only when
     # set: this entry keeps its None values, so an unconditional key would add
     # two nulls to every anonymous (Labs 0-4) escalation.
-    entry.update({k: kwargs[k] for k in ("identity_verified", "identity_source")
-                  if kwargs.get(k) is not None})
+    entry.update({k: kwargs[k] for k in IDENTITY_EVENT_KEYS if kwargs.get(k) is not None})
     entry.update(cim_identity(user=kwargs.get("enduser_id")))
     return entry
 

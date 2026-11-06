@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Identity: Duo sign-in and the Identity Risk Gate (Lab 5) — PseudoCo Assistant</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 880px; margin: 2rem auto; padding: 0 1rem; color: #1f2937; line-height: 1.55; }
+  h1, h2, h3 { color: #111827; line-height: 1.25; }
+  h1 { font-size: 1.9rem; border-bottom: 2px solid #e5e7eb; padding-bottom: .4rem; }
+  h2 { font-size: 1.35rem; margin-top: 2rem; border-bottom: 1px solid #e5e7eb; padding-bottom: .25rem; }
+  h3 { font-size: 1.1rem; margin-top: 1.4rem; }
+  code { background: #f3f4f6; padding: .1rem .3rem; border-radius: 3px; font-size: .92em; }
+  pre { background: #f3f4f6; padding: .8rem 1rem; border-radius: 6px; overflow-x: auto; font-size: .88em; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .93em; }
+  th, td { border: 1px solid #e5e7eb; padding: .4rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #f9fafb; }
+  ul { padding-left: 1.4rem; }
+  li { margin: .25rem 0; }
+  .note { font-size: .9em; color: #6b7280; }
+</style>
+</head>
+<body>
+<h1>Identity: Duo sign-in and the Identity Risk Gate (Lab 5)</h1>
+<p>Lab 5, "Verify: Cisco Identity Intelligence", makes four claims. This page is the app side of two of them:</p>
+<ul>
+<li>PseudoCo Assistant knows who is signed in, and refuses a compromised identity before the model runs.</li>
+<li>When a response agent disables the account in Duo, the app ends that identity's session.</li>
+</ul>
+<p>Everything here is **inert unless <code>DUO_ENABLED</code>**. With it off, Labs 0-4 behave exactly as before. The only additive differences are an <code>identity_risk</code> stage frame on every turn, which the UI hides on anonymous turns, and the identity fields on the events of a signed-in turn.</p>
+<p>There is no identity broker. Each instance holds its own Duo and Cisco Identity Intelligence (CII) credentials in <code>.env</code> for the workshop's lifetime, and they are rotated afterwards (plan section 12.1).</p>
+<h2>The pieces</h2>
+<table>
+<thead>
+<tr><th>Piece</th><th>Where</th><th>What it does</th></tr>
+</thead>
+<tbody>
+<tr><td>Sign-in</td><td><code>backend/routers/identity_auth.py</code>, <code>backend/services/identity_signin.py</code></td><td>Duo Universal Prompt (<code>duo_universal</code>), with usernames limited to <code>IDENTITY_ALLOWED_USERS</code></td></tr>
+<tr><td>Session</td><td><code>backend/services/identity_store.py</code>, table <code>identity_sessions</code></td><td>Stores the sha256 of a random cookie. Sessions can be revoked (kept as tombstones) and unblocked (<code>unblocked_at</code>)</td></tr>
+<tr><td>Middleware</td><td><code>backend/middleware/identity.py</code></td><td>Resolves the cookie, refuses expired or revoked sessions, and runs the <strong>revocation pull</strong></td></tr>
+<tr><td>Status lookup</td><td><code>backend/services/identity_lookup.py</code></td><td>Reads Duo Admin API status and CII trust level and failing checks. Read-only, cached, never raises</td></tr>
+<tr><td>Decision</td><td><code>backend/services/identity_gate.py</code></td><td>The pure <code>decide()</code></td></tr>
+<tr><td>Gate node</td><td><code>backend/agents/nodes/identity.py</code> (<code>identity_risk</code>)</td><td><code>PRE_NODES[1]</code> in the shared chain. The legacy engine calls the same function</td></tr>
+</tbody>
+</table>
+<h2>Where a verified identity comes from</h2>
+<p>The only source is the identity middleware's <code>request.state.identity</code>: a frozen snapshot of a valid session, which never includes the cookie. The chat router passes it to the turn as <code>identity_session</code>, a parameter of <code>run_turn</code>, <code>build_initial_state</code> and the legacy <code>process_message</code>.</p>
+<p>There is no <code>ChatRequest</code> or <code>ChatCompletionRequest</code> field for it and no Demo Controls card, so no client can switch the gate off.</p>
+<p>On a signed-in turn, <code>enduser_id</code> is the username. The spray can still aim at any username through <code>enduser_id</code>, but those turns have no session, so the gate skips them and AI Defense still screens them.</p>
+<h2>The Identity Risk Gate</h2>
+<p><code>identity_risk</code> runs at <code>PRE_NODES[1]</code>: after <code>attachment_intake</code> has reduced the document to metadata, and before <code>policy</code>. A refused turn therefore stops before any screen or model.</p>
+<ol>
+<li><strong>No identity session:</strong> the node returns <code>{}</code> before any span, log or lookup.</li>
+<li><strong>Lookup</strong> (<code>identity_lookup.lookup</code>):
+<ul>
+<li><strong>Duo Admin API.</strong> <code>GET /admin/v1/users?username=</code> with the read-only <strong>PseudoCo Lab: Status</strong> keys. Requests use Duo's HMAC-SHA512 signing (signature version 5, checked against known answers from <code>duo_client</code> 5.7.0). It returns the account status (active, bypass, disabled, locked out, pending deletion) and the account's email.</li>
+<li><strong>CII.</strong> An OAuth client-credentials token from <code>CII_TOKEN_URL</code>, cached until five minutes before it expires. Then the one GraphQL query <code>CII_END_USER_QUERY</code> against <code>CII_API_URL</code>: <code>getEndUser(login)</code> → <code>endUserDetails { failingChecks endUserTrustScore { levelOfTrust } }</code>. CII's login is the email, so the email Duo returned is the login.</li>
+<li><strong>Limits.</strong> Each call allows 3 s to connect and 5 s per read, and runs off the event loop. Each source's answer is cached per user for <code>IDENTITY_STATUS_TTL_SECONDS</code> (10 s), failures included.</li>
+<li><strong>Failures.</strong> Errors are reduced to fixed codes such as <code>timeout</code>, <code>http_503</code> or <code>stat_40103</code>. They never include a URL, key, token or response body.</li>
+</ul>
+</li>
+<li><strong>Decision</strong> (<code>identity_gate.decide</code>, pure). The gate <strong>allows</strong> the turn (a <code>QUESTIONABLE</code> user too; the badge shows it) unless one of these is true, which <strong>blocks</strong> it:
+<ul>
+<li>The Duo account is disabled, locked out or pending deletion, or Duo has no such user.</li>
+<li>The trust level is <code>UNTRUSTED</code>.</li>
+<li>The user currently fails <strong>MFA Flood</strong> or <strong>Impossible Travel</strong>.</li>
+</ul>
+</li>
+<li><strong>Fail open (A3).</strong> If either source could not answer, the turn is allowed with <code>identity_check=&quot;unavailable&quot;</code> on the event, and the badge shows a neutral "status unavailable".
+<ul>
+<li>With <code>IDENTITY_FAIL_OPEN=false</code>, the turn is refused with a neutral "could not be verified" banner instead.</li>
+<li>A block based on what <em>was</em> learned always applies. A disabled Duo account is blocked even while CII is down.</li>
+</ul>
+</li>
+</ol>
+<h3>The block event</h3>
+<p>A block writes one <code>log_response</code>, in the same shape as the internal policy block:</p>
+<table>
+<thead>
+<tr><th>Field</th><th>Value</th></tr>
+</thead>
+<tbody>
+<tr><td><code>guardrail_ids</code></td><td><code>[&quot;cisco_identity_intelligence&quot;]</code></td></tr>
+<tr><td><code>policy_blocked</code>, <code>guardrail_triggered</code>, <code>safety_violated</code></td><td><code>true</code></td></tr>
+<tr><td><code>safety_categories</code></td><td><code>[&quot;compromised_identity&quot;]</code>, or <code>[&quot;identity_unverified&quot;]</code> for a fail-closed block</td></tr>
+<tr><td><code>severity</code></td><td><code>HIGH</code>, or <code>MEDIUM</code> for a fail-closed block. Never <code>EMERGENCY</code></td></tr>
+<tr><td>tokens</td><td>zero: no model ran</td></tr>
+<tr><td><code>input_messages</code></td><td>the typed message only. The gate screens no text, so no document text is on the event, and the banner never says the document was screened</td></tr>
+<tr><td><code>theme</code>, <code>workflow_name</code>, <code>blueprint</code>, <code>attachment</code></td><td>as on every other event of the turn</td></tr>
+<tr><td><code>response_text</code></td><td><code>⚠️ POLICY BLOCKED (Cisco Identity Intelligence)</code></td></tr>
+</tbody>
+</table>
+<p>A block writes no escalation event and is never tagged "injection", which Lab 4's correlation keys on.</p>
+<p>The executive overlay maps the block to:</p>
+<ul>
+<li><code>policy_name</code>: "Cisco Identity Intelligence identity risk"</li>
+<li><code>business_outcome</code>: <code>blocked_compromised_identity</code></li>
+<li><code>prompt_category</code>: <code>compromised_identity</code></li>
+</ul>
+<h3>Identity fields on the events of a signed-in turn</h3>
+<table>
+<thead>
+<tr><th>Field</th><th>When</th></tr>
+</thead>
+<tbody>
+<tr><td><code>identity_verified=true</code>, <code>identity_source=&quot;duo&quot;</code></td><td>every event of a signed-in turn</td></tr>
+<tr><td><code>identity_override=true</code></td><td>every event of an Unblock me session</td></tr>
+<tr><td><code>identity_risk</code> (<code>allow</code> / <code>block</code>, the real verdict), <code>identity_check</code> (<code>ok</code> / <code>unavailable</code>)</td><td>every event once the gate has run</td></tr>
+<tr><td><code>identity_risk_reasons</code>, <code>identity_duo_status</code>, <code>identity_trust_level</code>, <code>identity_failing_checks</code></td><td>when known</td></tr>
+</tbody>
+</table>
+<p>All of these fields are absent on an anonymous turn. <code>enduser_id</code> and <code>user</code> are not promoted to HEC indexed fields.</p>
+<h2>Revocation: pull (A4)</h2>
+<p>On a valid session's request, the middleware reads the user's Duo status, cached for 10 s and run in the threadpool. If Duo says <code>disabled</code>, the middleware:</p>
+<ul>
+<li>revokes the session there and then, keeping it as a tombstone</li>
+<li>writes <code>identity_session_revoked</code> (reason <code>duo_disabled</code>, actor <code>duo</code>)</li>
+<li>answers that request <code>403 identity_session_revoked</code>, or <code>303 /login/duo?revoked=1</code> for a page</li>
+</ul>
+<p>Other cases:</p>
+<ul>
+<li>**<code>locked out</code>** only blocks turns, through the gate.</li>
+<li><strong>Duo unreachable:</strong> nothing happens.</li>
+<li><strong>Unblock me session:</strong> never revoked.</li>
+</ul>
+<p>The chat page polls every 10 s, so the banner appears within about 10-20 s.</p>
+<p><code>POST /auth/duo/start</code> refuses a persona that Duo reports disabled. Duo would also refuse it at the prompt.</p>
+<p>A tombstone is refused everywhere except:</p>
+<ul>
+<li>the sign-in and sign-out routes</li>
+<li>three identity APIs, which reach it as <code>request.state.identity_revoked</code> (never as an identity):
+<ul>
+<li><code>GET /api/identity/me</code>, which answers <code>{&quot;signed_in&quot;: false, &quot;revoked&quot;: true, &quot;username&quot;, &quot;revoked_reason&quot;}</code></li>
+<li><code>POST /api/identity/unblock</code></li>
+<li><code>POST /api/identity/reblock</code></li>
+</ul>
+</li>
+</ul>
+<h2>Unblock me (A4 note)</h2>
+<p>When a block or a revocation happens, the banner explains it and shows an <strong>Unblock me</strong> toggle. The sign-in page offers the same for a revoked session.</p>
+<ul>
+<li><strong>On</strong> (<code>POST /api/identity/unblock</code>):
+<ul>
+<li>Sets <code>unblocked_at</code> on this identity session and clears its tombstone.</li>
+<li>Writes <code>identity_unblocked</code>. <code>user</code> is who overrode, and <code>details.cleared</code> is the revocation reason it cleared.</li>
+<li>From then on the gate lets this session's turns through. Every event still carries the real <code>identity_risk</code> verdict plus <code>identity_override=true</code>, and the revocation pull leaves the session alone.</li>
+</ul>
+</li>
+<li><strong>Off</strong> (<code>POST /api/identity/reblock</code>):
+<ul>
+<li>Clears the override and writes <code>identity_reblocked</code>.</li>
+<li>The next turn is gated again, and a Duo-disabled account's session is revoked again on its next request.</li>
+</ul>
+</li>
+<li><strong>Never touches Duo or CII.</strong> The Duo account stays disabled, so the containment evidence stays intact for the debrief.</li>
+<li><strong>Per identity session.</strong> The override ends when the session ends (sign out, sign in again, or expiry). It is never a Demo Controls card or a request field.</li>
+<li><strong>Cross-site requests are refused.</strong> <code>next=/app</code>, and nothing else, turns the answer into a redirect for the sign-in page's form.</li>
+</ul>
+<h2>Duo application → configuration</h2>
+<table>
+<thead>
+<tr><th>Duo / CII application</th><th>Permissions</th><th><code>.env</code> keys</th><th>Used by</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>PseudoCo Lab: Sign-in</strong> (Web SDK)</td><td>n/a</td><td><code>DUO_CLIENT_ID</code>, <code>DUO_CLIENT_SECRET</code>, <code>DUO_API_HOST</code></td><td>sign-in (<code>identity_signin</code>)</td></tr>
+<tr><td><strong>PseudoCo Lab: Status (read-only)</strong> (Admin API)</td><td><em>Grant read resource</em> only</td><td><code>DUO_ADMIN_IKEY</code>, <code>DUO_ADMIN_SKEY</code> (+ <code>DUO_API_HOST</code>)</td><td>the gate, the revocation pull, the sign-in disabled check</td></tr>
+<tr><td><strong>CII API client</strong> (CII → Integrations → Add API Client, "Copy all")</td><td>read-only use</td><td><code>CII_CLIENT_ID</code>, <code>CII_CLIENT_SECRET</code>, <code>CII_TOKEN_URL</code>, <code>CII_API_URL</code></td><td>the gate (trust level, failing checks)</td></tr>
+<tr><td>PseudoCo Provisioner, PseudoCo VPN</td><td>write / Auth API</td><td>never on a box</td><td>Mac-side tooling only</td></tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr><th>Other key</th><th>Default</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td><code>DUO_ENABLED</code></td><td><code>false</code></td><td>master switch</td></tr>
+<tr><td><code>PUBLIC_BASE_URL</code></td><td>empty</td><td>the instance's https name; the only source of the Duo redirect URI</td></tr>
+<tr><td><code>IDENTITY_ALLOWED_USERS</code></td><td>empty</td><td>usernames this instance accepts at sign-in</td></tr>
+<tr><td><code>IDENTITY_SESSION_TTL_MINUTES</code></td><td><code>720</code></td><td>session lifetime</td></tr>
+<tr><td><code>IDENTITY_STATUS_TTL_SECONDS</code></td><td><code>10</code></td><td>lookup cache</td></tr>
+<tr><td><code>IDENTITY_FAIL_OPEN</code></td><td><code>true</code></td><td>A3: allow when a lookup cannot answer</td></tr>
+</tbody>
+</table>
+<p>Every value lives in <code>.env</code> only, never in <code>settings_store</code>, because anyone with the room access key can rewrite those.</p>
+<h2>Tests</h2>
+<ul>
+<li><code>tests/test_identity_gate.py</code> covers:
+<ul>
+<li>the signer, checked against known answers</li>
+<li>the lookup through fakes, including token refresh, caching and failures</li>
+<li><code>decide()</code></li>
+<li>both engines</li>
+<li>the revocation pull</li>
+<li>Unblock me</li>
+<li>the store's cache generation</li>
+<li>the rules</li>
+</ul>
+</li>
+<li><code>tests/test_blueprint_parity.py</code> runs these scenarios through both blueprints:
+<ul>
+<li><code>identity_anonymous</code></li>
+<li><code>identity_allowed</code></li>
+<li><code>identity_blocked</code>: AI Defense is never called, and no tokens are used</li>
+<li><code>identity_document_blocked</code>: extraction runs, nothing is screened, and no document text is on the event</li>
+<li><code>identity_unavailable_fail_open</code></li>
+<li><code>identity_spray_actor</code></li>
+<li><code>identity_unblocked</code></li>
+</ul>
+</li>
+<li><code>tests/test_identity_sessions.py</code> and <code>tests/test_duo_signin.py</code> cover sessions and sign-in.</li>
+</ul>
+</body>
+</html>

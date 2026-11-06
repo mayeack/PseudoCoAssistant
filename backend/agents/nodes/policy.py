@@ -21,7 +21,7 @@ from backend.agents.nodes.attachment import (
     screened_prompt,
 )
 from backend.agents.nodes.shared import clarifying_service, escalation_rules
-from backend.agents.state import governance_identity_overrides, identity_governance_fields
+from backend.agents.state import governance_identity_overrides, identity_turn_fields
 from backend.agents.token_usage import governance_usage_data
 from backend.logging.governance_logger import active_response_model, governance_logger
 from backend.models.schemas import MessageType, SeverityLevel
@@ -107,7 +107,7 @@ def policy_block_node(state: Dict[str, Any]) -> Dict[str, Any]:
             user_demographics=clarifying_service.extract_user_info(conversation_history),
             enduser_id=enduser_id,
             # A signed-in turn's identity evidence (Lab 5); {} when anonymous.
-            **identity_governance_fields(state.get("identity_session")),
+            **identity_turn_fields(state),
         )
 
     return {

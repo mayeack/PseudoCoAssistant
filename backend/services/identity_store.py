@@ -17,6 +17,12 @@ backend/middleware/identity.py). Everything behind it lives here:
   again (a new cookie) or signs out (``end``). ``revoke`` writes the
   ``identity_session_revoked`` audit event.
 - ``purge`` deletes rows past their expiry (run from ``create``, throttled).
+- ``unblock`` / ``reblock`` set and clear the session's Unblock me override
+  (``unblocked_at``; plan 12.1). ``unblock`` also clears a tombstone. Each
+  writes its audit event (``identity_unblocked`` / ``identity_reblocked``) and
+  neither ever talks to Duo or Cisco Identity Intelligence.
+- Every write drops the lookup cache, and a lookup that read the database
+  before such a drop never stores its (stale) row: the cache has a generation.
 
 Every function does blocking database work, so callers on the event loop run it
 in the threadpool (the middleware uses ``run_in_threadpool``). Nothing here
@@ -62,6 +68,10 @@ _lock = threading.Lock()
 # token_hash -> (fetched at, monotonic; row facts, or None for "no such token")
 _cache: Dict[str, Tuple[float, Optional["_Row"]]] = {}
 _touched: Dict[str, float] = {}
+# Bumped by clear_cache(): a lookup that read the database under an older
+# generation does not cache what it read (a revoke between the read and the
+# put would otherwise be undone for LOOKUP_CACHE_TTL_S).
+_generation = 0
 _last_purge = 0.0
 
 
@@ -83,17 +93,27 @@ class IdentitySnapshot:
     source: str = SOURCE_DUO
     duo_txid: Optional[str] = None
     client_address: Optional[str] = None
+    #: Set while Unblock me overrides the Identity Risk Gate for this session.
+    unblocked_at: Optional[datetime] = None
+
+    @property
+    def overridden(self) -> bool:
+        return self.unblocked_at is not None
 
     def to_state(self) -> Dict[str, Any]:
         """The turn-state form (``identity_session``): what the chain and the
-        governance evidence need, as plain data."""
-        return {
+        governance evidence need, as plain data. ``override`` only while
+        Unblock me is on."""
+        state = {
             "session_ref": self.session_ref,
             "username": self.username,
             "source": self.source,
             "signed_in_at": self.created_at.isoformat(),
             "expires_at": self.expires_at.isoformat(),
         }
+        if self.overridden:
+            state["override"] = True
+        return state
 
 
 @dataclass(frozen=True)
@@ -159,14 +179,19 @@ def _row_facts(row: IdentitySession) -> _Row:
             expires_at=row.expires_at,
             duo_txid=row.duo_txid,
             client_address=row.client_address,
+            unblocked_at=getattr(row, "unblocked_at", None),
         ),
         revoked_at=row.revoked_at,
         revoked_reason=row.revoked_reason,
     )
 
 
-def _cache_put(token_hash: str, facts: Optional[_Row]) -> None:
+def _cache_put(token_hash: str, facts: Optional[_Row], generation: Optional[int] = None) -> None:
+    """Cache one lookup. With ``generation`` (the value read before the
+    database query), nothing is stored when ``clear_cache`` ran since."""
     with _lock:
+        if generation is not None and generation != _generation:
+            return
         if len(_cache) >= _CACHE_MAX:
             _cache.clear()
         _cache[token_hash] = (time.monotonic(), facts)
@@ -174,9 +199,11 @@ def _cache_put(token_hash: str, facts: Optional[_Row]) -> None:
 
 def clear_cache() -> None:
     """Forget every cached lookup (revocation, sign-out, tests)."""
+    global _generation
     with _lock:
         _cache.clear()
         _touched.clear()
+        _generation += 1
 
 
 # --------------------------------------------------------------------------- API
@@ -231,6 +258,7 @@ def lookup(token: Optional[str], *, now: Optional[datetime] = None) -> LookupRes
     now = now or _utcnow()
     with _lock:
         hit = _cache.get(token_hash)
+        generation = _generation
     if hit is not None and time.monotonic() - hit[0] < LOOKUP_CACHE_TTL_S:
         facts = hit[1]
     else:
@@ -240,7 +268,7 @@ def lookup(token: Optional[str], *, now: Optional[datetime] = None) -> LookupRes
             facts = _row_facts(row) if row is not None else None
         finally:
             db.close()
-        _cache_put(token_hash, facts)
+        _cache_put(token_hash, facts, generation)
     if facts is None:
         return LookupResult(UNKNOWN)
     if now >= facts.snapshot.expires_at:
@@ -302,6 +330,76 @@ def revoke(session_ref: str, *, reason: str, actor: str = "system",
         actor=actor,
     )
     return True
+
+
+def unblock(session_ref: str, *, client_address: Optional[str] = None,
+            now: Optional[datetime] = None) -> Optional[IdentitySnapshot]:
+    """Unblock me (plan 12.1): override the Identity Risk Gate for this session
+    and clear its tombstone, if any. Writes ``identity_unblocked`` when that
+    changed anything. Returns the session's snapshot, or None when it does not
+    exist or has expired. Never talks to Duo or Identity Intelligence: the
+    account itself stays as Duo has it."""
+    now = now or _utcnow()
+    with get_db_context() as db:
+        row = db.query(IdentitySession).filter(IdentitySession.id == session_ref).first()
+        if row is None or row.expires_at <= now:
+            return None
+        cleared = row.revoked_reason if row.revoked_at is not None else None
+        changed = row.unblocked_at is None or row.revoked_at is not None
+        if changed:
+            row.unblocked_at = row.unblocked_at or now
+            row.revoked_at = None
+            row.revoked_reason = None
+        snapshot = _row_facts(row).snapshot
+    clear_cache()
+    if changed:
+        from backend.logging import identity_audit
+
+        identity_audit.log_unblocked(username=snapshot.username,
+                                     client_address=client_address or snapshot.client_address,
+                                     session_ref=snapshot.session_ref, cleared=cleared)
+    return snapshot
+
+
+def reblock(session_ref: str, *, client_address: Optional[str] = None,
+            now: Optional[datetime] = None) -> Optional[IdentitySnapshot]:
+    """Turn Unblock me off: the next turn is gated again (and the Duo
+    revocation pull applies again). Writes ``identity_reblocked`` when the
+    override was on. Returns the snapshot, or None when the session does not
+    exist or has expired."""
+    now = now or _utcnow()
+    with get_db_context() as db:
+        row = db.query(IdentitySession).filter(IdentitySession.id == session_ref).first()
+        if row is None or row.expires_at <= now:
+            return None
+        changed = row.unblocked_at is not None
+        row.unblocked_at = None
+        snapshot = _row_facts(row).snapshot
+    clear_cache()
+    if changed:
+        from backend.logging import identity_audit
+
+        identity_audit.log_reblocked(username=snapshot.username,
+                                     client_address=client_address or snapshot.client_address,
+                                     session_ref=snapshot.session_ref)
+    return snapshot
+
+
+def status(session_ref: str) -> Optional[LookupResult]:
+    """The session's current state by its public reference (no cache)."""
+    db = SessionLocal()
+    try:
+        row = db.query(IdentitySession).filter(IdentitySession.id == session_ref).first()
+        facts = _row_facts(row) if row is not None else None
+    finally:
+        db.close()
+    if facts is None:
+        return None
+    if _utcnow() >= facts.snapshot.expires_at:
+        return LookupResult(EXPIRED, facts.snapshot)
+    if facts.revoked_at is not None:
+        return LookupResult(REVOKED, facts.snapshot, facts.revoked_reason)
+    return LookupResult(VALID, facts.snapshot)
 
 
 def end(token: Optional[str]) -> bool:

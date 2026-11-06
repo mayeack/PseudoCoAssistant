@@ -695,6 +695,42 @@ finally:
     settings.ai_defense_enabled = _saved_enabled
 
 
+# --- Lab 5: the Identity Risk Gate (identity_risk node) ----------------------
+from backend.agents.nodes import identity as identity_node_mod  # noqa: E402
+from backend.services import identity_lookup as identity_lookup_mod  # noqa: E402
+
+_saved_lookup = identity_lookup_mod.lookup
+_lookups = []
+identity_lookup_mod.lookup = lambda username: (_lookups.append(username) or {
+    "duo_status": "locked_out", "trust_level": "QUESTIONABLE", "failing_checks": [], "as_of": "2026-11-05T10:00:00",
+    "available": True, "sources": {"duo": "ok", "cii": "ok"}})
+_session = {"session_ref": "ref-1", "username": "avery.kim", "source": "duo"}
+try:
+    check("identity gate: an anonymous turn returns {} and looks nobody up",
+          identity_node_mod.identity_risk_node(base_state()) == {} and _lookups == [])
+    out, events = captured_turn(lambda: identity_node_mod.identity_risk_node(
+        doc_state(identity_session=dict(_session), enduser_id="avery.kim")))
+    ev = events[-1] if events else {}
+    check("identity gate: a locked-out identity is refused (terminal, policy_blocked, HIGH)",
+          out.get("terminal") is True and out["result"]["policy_blocked"] is True
+          and out["result"]["severity"] == SeverityLevel.HIGH and out["identity_risk"]["verdict"] == "block",
+          str(out.get("identity_risk")))
+    check("identity gate: the block reaches the theme's Agent stream, attributed to Cisco Identity Intelligence",
+          len(events) == 1 and agent_observability._stream_for(ev) == _tele_stream
+          and ev.get("guardrail_ids") == ["cisco_identity_intelligence"]
+          and ev.get("identity_risk") == "block" and ev.get("identity_risk_reasons") == ["duo_locked_out"],
+          str({k: ev.get(k) for k in ("guardrail_ids", "identity_risk", "identity_risk_reasons")}))
+    check("identity gate: a document turn's block carries the record, the typed message only, no screen sentence",
+          (ev.get("attachment") or {}).get("status") == "ok"
+          and _PAYLOAD not in _norm(_message_text(ev.get("input_messages")))
+          and "screened together with your message" not in out["result"]["message"])
+    out = identity_node_mod.identity_risk_node(base_state(identity_session={**_session, "override": True}))
+    check("identity gate: Unblock me lets the turn on, keeping the real verdict",
+          not out.get("terminal") and out["identity_risk"]["verdict"] == "block")
+finally:
+    identity_lookup_mod.lookup = _saved_lookup
+
+
 print()
 if _failures:
     print(f"FAILED ({len(_failures)}): {', '.join(_failures)}")

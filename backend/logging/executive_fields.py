@@ -74,6 +74,9 @@ _BLOCK_GUARDRAILS = {
     "openclaw_tool_guard": ("OpenClaw tool guard", "blocked_tool_call"),
     "nemo_guardrails": ("NVIDIA NeMo Guardrails policy", "blocked_by_nemo_guardrails"),
     "nemoclaw_guardrails": ("NVIDIA NemoClaw guardrails", "blocked_tool_call"),
+    # Lab 5: the Identity Risk Gate (backend/agents/nodes/identity.py) refused a
+    # signed-in identity that Duo / Cisco Identity Intelligence report at risk.
+    "cisco_identity_intelligence": ("Cisco Identity Intelligence identity risk", "blocked_compromised_identity"),
 }
 
 # PII types that are also Protected Health Information in a medical context.
@@ -186,6 +189,11 @@ def _prompt_category(
     # "tool_exploitation" regardless of what PHI/PII rode in its arguments.
     if operation_name == "tool_call":
         return "tool_exploitation"
+    # Lab 5: a turn the Identity Risk Gate refused is about WHO asked, not what
+    # was asked -- never self-harm, an emergency or prompt injection (Lab 4's
+    # correlation keys on those).
+    if "cisco_identity_intelligence" in guardrail_ids or "compromised_identity" in cats_text:
+        return "compromised_identity"
     if "policy_block" in guardrail_ids or "self-harm" in cats_text:
         return "self_harm_crisis"
     if (severity or "").upper() == "EMERGENCY" or "emergency" in cats_text:
