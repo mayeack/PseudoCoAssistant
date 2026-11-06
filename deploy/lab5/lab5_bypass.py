@@ -254,7 +254,7 @@ def _entries(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [e for e in codes if isinstance(e, dict)] if isinstance(codes, list) else []
 
 
-def revoked_at(env: participants.Env, nn: str, batch: Batch) -> Optional[float]:
+def revocation_time(env: participants.Env, nn: str, batch: Batch) -> Optional[float]:
     """When `down` deleted the codes of the recorded batch a card carries (its
     ``bypass_batch`` id; a card written without one, by its issue time and
     the latest batch issued then). None: not revoked, or not known (an
@@ -277,7 +277,7 @@ def card_batch_of(env: participants.Env, nn: str, card: Optional[Dict[str, str]]
     still shows them, but none works."""
     batch = card_batch(card)
     if batch is not None:
-        batch.revoked_at = revoked_at(env, nn, batch)
+        batch.revoked_at = revocation_time(env, nn, batch)
     return batch
 
 

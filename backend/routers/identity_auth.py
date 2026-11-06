@@ -33,7 +33,11 @@ identity cookie (``REDIRECT_EXEMPT``), so a user can always sign in again.
 - ``POST /auth/identity/logout`` - ends the identity session (tombstone
   included), deletes the cookie and goes to ``/login/duo?signed_out=1``, or to
   ``/app`` when the form's ``next`` is exactly ``/app`` (never another target).
-  ``GET /logout`` (the room-key sign-out) ends it too.
+  Like the sign-in start and Unblock me, it refuses a post from another
+  site's page (``_cross_site``); the sign-in page's referrer policy is
+  ``same-origin``, so its own posts carry their Origin. ``GET /logout`` (the
+  room-key sign-out) ends the identity session too, on a navigation from this
+  origin or the address bar (backend/routers/auth.py).
 - ``GET /api/identity/me`` - who this browser is signed in as, the Unblock me
   override, and the latest Duo / Identity Intelligence status and gate verdict.
   A plain ``def`` route, so it runs in the threadpool; the chat page polls it
