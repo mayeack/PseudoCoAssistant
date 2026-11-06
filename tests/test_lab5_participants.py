@@ -19,7 +19,17 @@ What it pins:
     three markers; a participant someone also put in the persona group is
     still a participant, so its seat is still freed;
   * participants can sign in: `up` says the Sign-in app must admit CII
-    Read-Only, and no doc or tool limits every lab app to the persona group.
+    Read-Only, and no doc or tool limits every lab app to the persona group;
+  * persona bypass codes (plan 4.3): `up` puts one small batch per box on its
+    card for the room's victim and each trusted persona (reuse_count 5,
+    valid_secs from bypass_codes.valid_hours, preserve_existing=true), to the
+    cast's personas only, never a participant; Duo accepts them, up to
+    reuse_count sign-ins and until valid_secs; they reach no output, log or
+    state file; the personas' HOTP tokens stay script-only; a re-run keeps a
+    valid batch, `handouts` issues a fresh one; `down` and `expire` delete
+    none (valid_secs is the cutoff), and `down` says when the last one ends;
+  * the Sign-in policy allows bypass code + hardware token: `up`, the
+    persona tool and the docs say so, and nothing says bypass code only.
 
 Run:  .venv/bin/python tests/test_lab5_participants.py
 """
@@ -43,6 +53,8 @@ import lab5_envfile as envfile  # noqa: E402
 import lab5_participants as lp  # noqa: E402
 import lab5_setup as ls  # noqa: E402
 import lab5_duo as duo  # noqa: E402
+import lab5_bypass as lb  # noqa: E402
+from lab5_common import Lab5Error  # noqa: E402
 from lab5_fakes import API_HOST, KEYCHAIN_SECRETS, PROVISIONER, Clock, DuoFailure, FakeDuo  # noqa: E402
 
 check = tls.check
@@ -52,16 +64,24 @@ DAY = 86400.0
 YAML = tls.WORKSHOP_YAML.replace("participants:\n  enabled: false\n",
                                  "participants:\n  enabled: true\n  cii_url: https://ii.pseudoco.example/\n")
 assert YAML != tls.WORKSHOP_YAML
+# The default cast's room personas, as provision_personas.py leaves them in Duo
+# (the workshop file names avery.kim as the victim and the default trusted three).
+ROOM = (("avery.kim", "victim"), ("jordan.reyes", "victim"), ("marcus.bell", "trusted"),
+        ("elena.sousa", "trusted"), ("grace.lin", "trusted"))
+CARD_PERSONAS = ["avery.kim", "marcus.bell", "elena.sousa", "grace.lin"]
 
 
 class Harness:
-    def __init__(self, tmp: Path) -> None:
+    def __init__(self, tmp: Path, personas: bool = True) -> None:
         self.tmp = tmp
         self.world = tls.FakeWorld()
         self.clock = Clock(time.time())
         self.duo = FakeDuo(self.clock)
         self.notes: List[Tuple[str, str]] = []
         (tmp / "workshop.yaml").write_text(YAML)
+        if personas:
+            for name, role in ROOM:
+                self.duo.add_persona(name, role)
 
     @property
     def root(self) -> Path:
@@ -91,7 +111,18 @@ def secrets_sent(h: Harness) -> List[str]:
     vals += list(tls.ACCESS_KEYS.values())
     for row in h.handout().values():
         vals += row["passcodes"].split()
+    vals += h.duo.issued_codes                 # every persona bypass code Duo ever returned
     return vals
+
+
+def card_codes(row: Dict[str, str]) -> Dict[str, List[str]]:
+    """{persona: [codes]} on one handout card."""
+    return {user: codes for _, user, codes in lp.decode_bypass(row.get("bypass"))}
+
+
+def bypass_posts(h: Harness) -> List[Tuple[str, Dict[str, str]]]:
+    return [(path, params) for _, method, path, params in h.duo.calls
+            if method == "POST" and path.endswith("/bypass_codes")]
 
 
 def text_of_logs(root: Path) -> str:
@@ -183,7 +214,12 @@ def test_up_creates_participants() -> None:
         new = h.handout()["l5-acme-02"]["passcodes"].split()
         check("--reissue-passcodes: new passcodes for that box only",
               rc == 0 and new != old and h.handout()["l5-acme-01"] == before[2]["l5-acme-01"], out3)
-        check("--reissue-passcodes: one token per account still", len(h.duo.tokens) == 2)
+        check("--reissue-passcodes: one token per account still",
+              sorted(t["serial"] for t in h.duo.tokens.values() if t["serial"].startswith("l5-"))
+              == ["l5-acme-01", "l5-acme-02"])
+        check("--reissue-passcodes keeps the card's persona bypass codes (they are the personas', not the token's)",
+              lp.decode_bypass(h.handout()["l5-acme-02"].get("bypass"))
+              == lp.decode_bypass(before[2]["l5-acme-02"].get("bypass")) != [])
         check("--reissue-passcodes: an old passcode no longer works",
               auth.auth_passcode("l5-acme-02", old[1], "198.51.100.200", "ATTENDEE-LAPTOP")["result"] == "deny")
 
@@ -279,8 +315,9 @@ def _seed_expire(h: Harness) -> Dict[str, str]:
     ids["wrong_nn"] = mk("l5-acme-06", "acme", "07", 30, ("CII Read-Only", "l5-acme"))["user_id"]
     ids["persona_notes"] = mk("l5-acme-09", "acme", "09", 30, ("CII Read-Only", "l5-acme", "PseudoCo Workforce"),
                               notes="lab5 persona (scripts/identity/provision_personas.py); role=victim")["user_id"]
-    ids["persona"] = h.duo.add_user("avery.kim", notes="lab5 persona (scripts/identity/provision_personas.py); "
-                                    "role=victim", groups=("PseudoCo Workforce",), created=now - 60 * DAY)["user_id"]
+    persona = h.duo.by_name("avery.kim") or h.duo.add_persona("avery.kim", "victim")
+    persona["created"] = int(now - 60 * DAY)
+    ids["persona"] = persona["user_id"]
     ids["admin"] = h.duo.add_user("myeack", created=now - 90 * DAY)["user_id"]
     for key in ("day15",):
         uid = ids[key]
@@ -386,8 +423,10 @@ def test_expire_after_up_cleans_the_handout() -> None:
               "disabled (expired)" in out, out)
         h.clock.advance_days(7)                                  # 16 and 14 days old
         rc, out = h.run("expire", yaml=False)
-        check("day 14: both deleted with their tokens", rc == 0 and h.duo.by_name("l5-acme-01") is None
-              and h.duo.by_name("l5-acme-02") is None and not h.duo.tokens, out)
+        check("day 14: both deleted with their tokens (the personas' tokens stay)",
+              rc == 0 and h.duo.by_name("l5-acme-01") is None and h.duo.by_name("l5-acme-02") is None
+              and all(t["serial"].startswith("pseudoco-persona-") for t in h.duo.tokens.values())
+              and len(h.duo.tokens) == len(ROOM), out)
         rc, out = h.run("down")
         check("down says participant accounts are expire's job", "expire" in out, out)
 
@@ -452,9 +491,400 @@ def test_signin_user_access_docs() -> None:
           lp.CII_READ_ONLY == "CII Read-Only" and lp.SIGNIN_APP == "PseudoCo Lab: Sign-in")
 
 
+def test_bypass_codes_on_the_handout() -> None:
+    print("== persona bypass codes: one batch per box on its card; Duo takes them; nothing deletes them ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        rc, out = h.run("check")
+        check("check plans a batch per instance and changes nothing in Duo",
+              rc == 0 and out.count("PLAN     instance 0") == 2 and not h.duo.mutations()
+              and "1 code each for avery.kim (victim), marcus.bell, elena.sousa, grace.lin; 5 sign-ins per code" in out,
+              out)
+        token_counters = {t["serial"]: t["counter"] for t in h.duo.tokens.values()}
+
+        rc, out = h.run("up")
+        check("up exits 0", rc == 0, out)
+        rows = h.handout()
+        persona_ids = {h.duo.by_name(n)["user_id"]: n for n, _ in ROOM}
+        posts = bypass_posts(h)
+        check("one POST per persona per box: the victim and each trusted persona, nobody else",
+              sorted(persona_ids[path.split("/")[4]] for path, _ in posts) == sorted(CARD_PERSONAS * 2),
+              str(posts))
+        check("every batch: count 1, reuse_count 5, valid_secs 12 h, preserve_existing true, Duo picks the codes",
+              all(params == {"count": "1", "reuse_count": "5", "valid_secs": "43200", "preserve_existing": "true"}
+                  for _, params in posts), str(posts))
+        participant_ids = {h.duo.by_name(f"l5-acme-0{i}")["user_id"] for i in (1, 2)}
+        check("no participant account gets a bypass code (12.4)",
+              not any(path.split("/")[4] in participant_ids for path, _ in posts)
+              and not any(h.duo.bypass.get(uid) for uid in participant_ids))
+        check("jordan.reyes, the untouched fallback, gets none", not h.duo.live_codes("jordan.reyes"))
+        cards = {row["instance"]: card_codes(row) for row in rows.values()}
+        check("each card names the victim first, then the trusted personas, one code each",
+              all(list(c) == CARD_PERSONAS and all(len(v) == 1 for v in c.values()) for c in cards.values()),
+              str(cards))
+        everything = [code for c in cards.values() for codes in c.values() for code in codes]
+        check("per-team batches: no code is on two cards, and every card code is one Duo issued",
+              len(everything) == len(set(everything)) == 8 and sorted(everything) == sorted(h.duo.issued_codes))
+        check("trusted personas keep every box's batch (preserve_existing): 2 live codes each",
+              all(len(h.duo.live_codes(n)) == 2 for n in CARD_PERSONAS))
+        row1 = rows["l5-acme-01"]
+        check("the card says when they expire (12 h from now) and how many sign-ins each allows",
+              row1["bypass_reuse"] == "5"
+              and abs(lp.parse_time(row1["bypass_valid_until"]) - (h.clock() + 43200)) < 2, str(row1))
+        html_text = (h.root / "workshops" / "acme" / "handout.html").read_text()
+        check("handout.html: the persona table, the codes, how to use them and until when",
+              "Room victim" in html_text and "Trusted" in html_text and cards["01"]["marcus.bell"][0] in html_text
+              and "Bypass Code" in html_text and "5 sign-ins" in html_text and " UTC" in html_text, html_text[-3000:])
+        rec = lp.read_json(h.root / "workshops" / "acme" / "participants" / "01.json")
+        check("the participant record keeps the batch's times and personas, never a code",
+              rec.get("bypass_batches") and rec["bypass_batches"][0]["personas"] == CARD_PERSONAS
+              and not any(code in json_dump(rec) for code in everything), str(rec))
+
+        # ---------------------------------------------------------- the personas' HOTP tokens stay script-only
+        argv = " ".join(" ".join(a) for a in h.world.security.calls)
+        check("no persona HOTP secret is read from the Keychain", "pseudoco-lab5-hotp-" not in argv, argv)
+        check("no persona token is read, resynced or changed",
+              not any("resync" in path or "pseudoco-persona-" in str(params) for _, _, path, params in h.duo.calls)
+              and {t["serial"]: t["counter"] for t in h.duo.tokens.values() if t["serial"].startswith("pseudoco-persona-")}
+              == {k: v for k, v in token_counters.items() if k.startswith("pseudoco-persona-")})
+        on_card = {nn: set(r["passcodes"].split()) | {c for codes in card_codes(r).values() for c in codes}
+                   for nn, r in ((r["instance"], r) for r in rows.values())}
+        expected = {r["instance"]: {duo.hotp(h.duo.token_secret(name), i) for i in range(10)}
+                    | {c for codes in card_codes(r).values() for c in codes} for name, r in rows.items()}
+        check("a card carries its participant's passcodes and its bypass codes, and no other code",
+              on_card == expected and all(len(v) == 14 for v in on_card.values()), str(on_card))
+        leaked = [s for s in secrets_sent(h) if s in out or s in text_of_logs(h.root)]
+        check("no bypass code (or other secret) in the output or run logs", not leaked, str(leaked))
+        state_json = "\n".join(p.read_text() for p in h.root.rglob("*.json"))
+        check("no bypass code in the state JSON", not any(c in state_json for c in h.duo.issued_codes))
+
+        # ---------------------------------------------------------- Duo takes them: reuse_count, per team
+        auth = duo.AuthAPI(h.duo.transport("auth", *tls_vpn()), API_HOST)
+        code1 = cards["01"]["marcus.bell"][0]
+        results = [auth.auth_passcode("marcus.bell", code1, "198.51.100.200", "ATTENDEE-LAPTOP")["result"]
+                   for _ in range(6)]
+        check("Duo accepts a card's code 5 times (reuse_count), then refuses it",
+              results == ["allow"] * 5 + ["deny"], str(results))
+        check("... while team 02's code for the same persona still works (per-team batches)",
+              auth.auth_passcode("marcus.bell", cards["02"]["marcus.bell"][0], "198.51.100.201",
+                                 "ATTENDEE-LAPTOP2")["result"] == "allow")
+        check("a code only signs in its own persona",
+              auth.auth_passcode("elena.sousa", cards["02"]["avery.kim"][0], "198.51.100.201",
+                                 "ATTENDEE-LAPTOP2")["result"] == "deny")
+
+        # ---------------------------------------------------------- a re-run keeps a valid batch
+        before = len(bypass_posts(h))
+        rc, out2 = h.run("up")
+        check("second up keeps both batches: no new code, the cards unchanged",
+              rc == 0 and len(bypass_posts(h)) == before and h.handout() == rows
+              and out2.count("kept: valid until") == 2, out2)
+        rc, out3 = h.run("status")
+        check("status: each batch OK with its time left",
+              out3.count("OK       instance 0") == 2 and "h left) for avery.kim (victim), marcus.bell" in out3, out3)
+
+        # ---------------------------------------------------------- valid_secs is the cutoff
+        h.clock.t += 12 * 3600 + 1
+        check("12 h later Duo refuses the codes: valid_secs is their cutoff",
+              auth.auth_passcode("avery.kim", cards["02"]["avery.kim"][0], "198.51.100.201",
+                                 "ATTENDEE-LAPTOP2")["result"] == "deny")
+        rc, out4 = h.run("status")
+        check("status: expired batches fail the run and say how to issue new ones",
+              rc == 1 and out4.count("expired at") == 2 and "lab5-setup handouts <workshop.yaml> --only 1" in out4, out4)
+        rc, out5 = h.run("up")
+        new_rows = h.handout()
+        check("up after they expired issues a new batch for each card",
+              rc == 0 and out5.count("its codes have expired: 1 code each") == 2
+              and all(card_codes(new_rows[n]) != card_codes(rows[n]) for n in rows), out5)
+        check("... and the new codes work",
+              auth.auth_passcode("grace.lin", card_codes(new_rows["l5-acme-01"])["grace.lin"][0], "198.51.100.200",
+                                 "ATTENDEE-LAPTOP")["result"] == "allow")
+
+        # ---------------------------------------------------------- handouts: a fresh batch, nothing else
+        snapshot = {"users": {u["username"]: (u["status"], len(u["tokens"])) for u in h.duo.users.values()},
+                    "boxes": {nn: tls._snapshot(b) for nn, b in h.world.boxes.items()},
+                    "connects": len(h.world.connects)}
+        old1 = card_codes(new_rows["l5-acme-01"])
+        calls = len(h.duo.calls)
+        h.world.prompts.clear()
+        rc, out6 = h.run("handouts", "--only", "1")
+        after = h.handout()
+        check("handouts --only 1: a fresh batch on card 01 only, exit 0",
+              rc == 0 and card_codes(after["l5-acme-01"]) != old1
+              and after["l5-acme-02"] == new_rows["l5-acme-02"] and "CHANGED  instance 01" in out6, out6)
+        check("handouts asks for no SSH password and touches no box or participant account",
+              not h.world.prompts and len(h.world.connects) == snapshot["connects"]
+              and {nn: tls._snapshot(b) for nn, b in h.world.boxes.items()} == snapshot["boxes"]
+              and {u["username"]: (u["status"], len(u["tokens"])) for u in h.duo.users.values()} == snapshot["users"])
+        new_calls = h.duo.calls[calls:]
+        check("handouts only looks the personas up and creates codes (no DELETE of anything)",
+              all(m == "GET" or (m == "POST" and p.endswith("/bypass_codes")) for _, m, p, _ in new_calls)
+              and not any(m == "DELETE" for _, m, _, _ in h.duo.calls), str(new_calls))
+        check("the codes it replaced still work until they expire",
+              auth.auth_passcode("elena.sousa", old1["elena.sousa"][0], "198.51.100.200",
+                                 "ATTENDEE-LAPTOP")["result"] == "allow")
+        leaked = [s for s in secrets_sent(h) if s in out6 or s in text_of_logs(h.root)]
+        check("handouts prints and logs no code", not leaked, str(leaked))
+
+        # ---------------------------------------------------------- down and expire delete none
+        live = {n: len(h.duo.live_codes(n)) for n in CARD_PERSONAS}
+        calls = len(h.duo.calls)
+        rc, out7 = h.run("down")
+        check("down makes no Duo call: no bypass code is deleted",
+              rc == 0 and len(h.duo.calls) == calls and {n: len(h.duo.live_codes(n)) for n in CARD_PERSONAS} == live,
+              out7)
+        until = lp.minute(max(lp.parse_time(r["bypass_valid_until"]) for r in after.values()))
+        check("down says the codes are not deleted, that valid_secs is their cutoff, and when the last one ends",
+              f"Persona bypass codes are not deleted: valid_secs is their cutoff, and the last batch stops working "
+              f"at {until}" in out7, out7)
+        rc, out8 = h.run("expire", yaml=False)
+        check("expire touches no bypass code (and no persona)",
+              rc == 0 and not any("bypass_codes" in p for _, _, p, _ in h.duo.calls[calls:])
+              and {n: len(h.duo.live_codes(n)) for n in CARD_PERSONAS} == live
+              and "bypass codes run out at their own valid_secs" in out8, out8)
+        h.clock.t += 13 * 3600
+        rc, out9 = h.run("down")
+        check("once they have all expired, down says so", "every batch this workshop issued expired by" in out9, out9)
+
+
+def test_bypass_victim_swap() -> None:
+    print("== swapping the room's victim to its fallback: up re-issues the cards' codes ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        rc, out = h.run("up")
+        old = {n: card_codes(r) for n, r in h.handout().items()}
+        (Path(tmp) / "workshop.yaml").write_text(YAML.replace("  victim: avery.kim\n", "  victim: jordan.reyes\n"))
+        rc, out = h.run("status")
+        check("status before the re-run: the cards' codes are for the old victim",
+              rc == 1 and out.count("its codes are for avery.kim, marcus.bell") == 2, out)
+        rc, out = h.run("up")
+        rows = h.handout()
+        check("up re-issues every card for the new victim and the trusted personas",
+              rc == 0 and out.count("its codes are for other personas: 1 code each for jordan.reyes (victim)") == 2
+              and all(list(card_codes(r)) == ["jordan.reyes", "marcus.bell", "elena.sousa", "grace.lin"]
+                      for r in rows.values()), out)
+        check("... and the box allowlists follow the victim",
+              all("jordan.reyes" in (envfile.get(envfile.split_lines(envfile.decode(
+                  b.files["/home/splunk/DemoBot/.env"][0])), "IDENTITY_ALLOWED_USERS") or "").split(",")
+                  for b in h.world.boxes.values()))
+        auth = duo.AuthAPI(h.duo.transport("auth", *tls_vpn()), API_HOST)
+        check("the old victim's codes are left to expire (nothing deletes them), though no box allows it now",
+              auth.auth_passcode("avery.kim", old["l5-acme-01"]["avery.kim"][0], "198.51.100.200",
+                                 "ATTENDEE-LAPTOP")["result"] == "allow"
+              and not any(m == "DELETE" for _, m, _, _ in h.duo.calls))
+
+
+def json_dump(rec: Dict[str, Any]) -> str:
+    import json
+    return json.dumps(rec)
+
+
+def test_bypass_refusals() -> None:
+    print("== persona bypass codes: only the cast's personas, in range, within Duo's limits ==")
+    for extra, why in (("room:\n  victim: grace.lin\n  trusted: [marcus.bell, elena.sousa]\n",
+                        "a trusted persona as the victim"),
+                       ("room:\n  victim: avery.kim\n  trusted: [marcus.bell, jordan.reyes]\n",
+                        "a victim among the trusted"),
+                       ("room:\n  victim: myeack\n", "a victim that is not in the cast")):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(Path(tmp))
+            text = YAML.replace("room:\n  victim: avery.kim\n  fallback: jordan.reyes\n", extra)
+            assert text != YAML
+            (Path(tmp) / "workshop.yaml").write_text(text)
+            rc, out = h.run("up")
+            check(f"up refuses {why} before any box or Duo change (exit 2)",
+                  rc == 2 and "persona cast" in out and all(not b.mutations for b in h.world.boxes.values())
+                  and not h.duo.mutations(), out)
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        squat = h.duo.by_name("grace.lin")
+        squat["notes"] = "someone's own account"
+        rc, out = h.run("up")
+        check("a Duo user named like a persona but without the persona marker: no code for anyone, exit 1",
+              rc == 1 and "grace.lin" in out and "without the persona notes marker" in out and not bypass_posts(h)
+              and out.count("no bypass codes issued") == 2, out)
+        check("... while the boxes and the participant accounts are still set up",
+              h.duo.by_name("l5-acme-01") and h.duo.by_name("l5-acme-02")
+              and all(b.files.get(remote_unit()) for b in h.world.boxes.values()))
+        squat["notes"] = "lab5 persona (scripts/identity/provision_personas.py); role=trusted"
+        rc, out = h.run("up")
+        check("once fixed, a re-run issues the codes onto the existing cards",
+              rc == 0 and out.count("no persona codes on its card yet: 1 code each") == 2
+              and all(card_codes(r) for r in h.handout().values()), out)
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        del h.duo.users[h.duo.by_name("elena.sousa")["user_id"]]
+        rc, out = h.run("check")
+        check("check: a persona missing in Duo fails the check", rc == 1 and "elena.sousa" in out
+              and "missing in Duo" in out, out)
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        admin = duo.AdminAPI(h.duo.transport("admin", PROVISIONER["ikey"], PROVISIONER["skey"], API_HOST), API_HOST)
+        marcus = h.duo.by_name("marcus.bell")["user_id"]
+        for _ in range(10):
+            admin.create_bypass_codes(marcus, 10, 5, 86400)        # 100 codes, kept by preserve_existing
+        try:
+            admin.create_bypass_codes(marcus, 1, 5, 60)
+            refused = False
+        except duo.DuoError as exc:
+            refused = exc.status == 400
+        check("the fake Duo models the 100-codes-per-user limit (a 101st is a 400)",
+              refused and len(h.duo.live_codes("marcus.bell")) == 100)
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        admin = duo.AdminAPI(h.duo.transport("admin", PROVISIONER["ikey"], PROVISIONER["skey"], API_HOST), API_HOST)
+        marcus = h.duo.by_name("marcus.bell")["user_id"]
+        for _ in range(9):
+            admin.create_bypass_codes(marcus, 10, 5, 86400)        # another room's 90 codes, preserved
+        admin.create_bypass_codes(marcus, 9, 5, 86400)
+        calls = len(h.duo.calls)
+        rc, out = h.run("up")
+        check("a shared persona near Duo's 100-code limit: no code issued in that run, a clear reason, exit 1",
+              rc == 1 and "holds 99 unexpired bypass code(s) and this run needs 2 more" in out
+              and not bypass_posts_since(h, calls), out)
+        check("... and the other room's codes are untouched", len(h.duo.live_codes("marcus.bell")) == 99)
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        rc, out = h.run("up")
+        h.duo.fail[("POST", "/admin/v1/users/")] = DuoFailure(400, 40002, "Invalid request parameters")
+        h.clock.t += 13 * 3600
+        rc, out = h.run("handouts")
+        check("a Duo refusal while issuing: that card keeps its earlier codes, the run exits 1 with Duo's limit as a "
+              "hint", rc == 1 and "keeps its earlier codes" in out and "at most 100 bypass codes per user" in out
+              and all(card_codes(r) for r in h.handout().values()), out)
+        del h.duo.fail[("POST", "/admin/v1/users/")]
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        (Path(tmp) / "workshop.yaml").write_text(YAML + "bypass_codes:\n  enabled: false\n")
+        rc, out = h.run("up")
+        check("bypass_codes.enabled false: no code, no persona section on the cards", rc == 0 and not bypass_posts(h)
+              and not any(card_codes(r) for r in h.handout().values())
+              and "Room victim" not in (h.root / "workshops" / "acme" / "handout.html").read_text(), out)
+        rc, out = h.run("handouts")
+        check("... and handouts refuses (exit 2)", rc == 2 and "bypass_codes.enabled is false" in out, out)
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        (Path(tmp) / "workshop.yaml").write_text(
+            YAML + "bypass_codes:\n  count: 2\n  reuse_count: 3\n  valid_hours: 30\n")
+        rc, out = h.run("handouts")
+        check("handouts before up: no card to put codes on, every instance fails (exit 1)",
+              rc == 1 and out.count("no handout card for l5-acme-0") == 2 and not bypass_posts(h), out)
+        rc, out = h.run("up")
+        posts = bypass_posts(h)
+        check("bypass_codes settings reach Duo: count 2, reuse_count 3, valid_secs 30 h",
+              rc == 0 and posts and all(p == {"count": "2", "reuse_count": "3", "valid_secs": "108000",
+                                              "preserve_existing": "true"} for _, p in posts)
+              and all(len(v) == 2 for r in h.handout().values() for v in card_codes(r).values()), out)
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        (Path(tmp) / "workshop.yaml").write_text(tls.WORKSHOP_YAML)
+        rc, out = h.run("handouts")
+        check("participants.enabled false: handouts refuses (no handout exists)", rc == 2 and "no handout" in out, out)
+
+    import yaml
+    good = yaml.safe_load(YAML)
+    for section, why in (({"valid_hours": 0}, "valid_hours 0 (never expires in Duo)"),
+                         ({"valid_hours": 73}, "valid_hours past 72"),
+                         ({"valid_hours": "12h"}, "valid_hours '12h'"),
+                         ({"reuse_count": 0}, "reuse_count 0 (unlimited in Duo)"),
+                         ({"count": 11}, "count 11 (Duo makes at most 10 per call)"),
+                         ({"enabled": "yes"}, "enabled 'yes'"),
+                         ({"valid_secs": 43200}, "an unknown key")):
+        try:
+            ls.workshop_from_dict(dict(good, bypass_codes=section))
+            ok = False
+        except Lab5Error:
+            ok = True
+        check(f"workshop.yaml bypass_codes refused: {why}", ok)
+    ws = ls.workshop_from_dict(dict(good, bypass_codes={"valid_hours": "36", "reuse_count": 5}))
+    check("bypass_codes: whole numbers (also as strings) are taken; defaults count 1, reuse 5, 12 h",
+          ws.bypass_codes == lb.Settings(True, 1, 5, 36) and ls.workshop_from_dict(good).bypass_codes
+          == lb.Settings(True, 1, 5, 12) and lb.Settings().valid_secs == 43200)
+    ex = ls.load_workshop(ROOT / "deploy" / "lab5" / "workshop.example.yaml")
+    check("workshop.example.yaml sets the documented defaults", ex.bypass_codes == lb.Settings(True, 1, 5, 12))
+
+    admin = duo.AdminAPI(FakeDuo(Clock(time.time())).transport("admin", PROVISIONER["ikey"], PROVISIONER["skey"],
+                                                                 API_HOST), API_HOST)
+    for args, why in (((0, 5, 3600), "count 0"), ((11, 5, 3600), "count 11"), ((1, 0, 3600), "reuse_count 0"),
+                      ((1, 5, 0), "valid_secs 0")):
+        try:
+            admin.create_bypass_codes("DU0000000001", *args)
+            ok = False
+        except duo.DuoError:
+            ok = True
+        check(f"AdminAPI.create_bypass_codes refuses {why} before calling Duo", ok)
+    entries = [("victim", "avery.kim", ["123456789"]), ("trusted", "marcus.bell", ["234567890", "345678901"])]
+    check("the card's bypass field round-trips", lp.decode_bypass(lp.encode_bypass(entries)) == entries)
+    check("a malformed bypass word is ignored, never rendered",
+          lp.decode_bypass("victim:avery.kim=12ab trusted:<b>x</b>=123456789 admin:me=123456789") == [])
+
+
+def bypass_posts_since(h: Harness, start: int) -> List[Tuple[str, str]]:
+    return [(m, p) for _, m, p, _ in h.duo.calls[start:] if m == "POST" and p.endswith("/bypass_codes")]
+
+
+def remote_unit() -> str:
+    import lab5_remote as remote
+    return remote.UNIT_PATH
+
+
+def test_old_handout_gets_codes() -> None:
+    print("== a handout written before bypass codes existed: up adds them, the passcodes stay ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        (Path(tmp) / "workshop.yaml").write_text(YAML + "bypass_codes:\n  enabled: false\n")
+        rc, out = h.run("up")
+        csv_path = h.root / "workshops" / "acme" / "handout.csv"
+        header, *body = csv_path.read_text().splitlines()
+        old = ",".join(header.split(",")[:10])
+        csv_path.write_text("\n".join([old] + [",".join(line.split(",")[:10]) for line in body]) + "\n")
+        before = {n: r["passcodes"] for n, r in h.handout().items()}
+        (Path(tmp) / "workshop.yaml").write_text(YAML)
+        rc, out = h.run("up")
+        rows = h.handout()
+        check("an old ten-column handout loads, keeps its passcodes and gets the persona codes",
+              rc == 0 and {n: r["passcodes"] for n, r in rows.items()} == before
+              and all(list(card_codes(r)) == CARD_PERSONAS for r in rows.values()), out)
+
+
+def test_signin_policy_docs() -> None:
+    print("== the Sign-in policy allows bypass code + hardware token (plan 4.4) ==")
+    sys.path.insert(0, str(ROOT / "scripts" / "identity"))
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        rc, out = h.run("up")
+        check("up says the Sign-in policy must allow bypass code + hardware token, and why",
+              "Its policy (plan 4.4) must allow bypass code + hardware token" in out
+              and "A policy without hardware tokens refuses every participant" in out, out)
+    note = __import__("provision_personas").user_access_note("PseudoCo Workforce")
+    check("provision_personas says it when it creates the persona group",
+          "bypass code + hardware token" in note and "PseudoCo Lab: Sign-in admits PseudoCo Workforce and "
+          "CII Read-Only" in note, note)
+    stale = re.compile(r"bypass[ -]codes?[ -]only|methods: \*\*bypass code\*\*", re.I)
+    for path in ("deploy/lab5/README.md", "deploy/lab5/README.html", "docs/identity-lab-facilitator.md",
+                 "docs/identity-lab-facilitator.html", "deploy/lab5/lab5_setup.py", "deploy/lab5/lab5_bypass.py",
+                 "scripts/identity/provision_personas.py", "deploy/lab5/workshop.example.yaml"):
+        text = (ROOT / path).read_text()
+        check(f"{path}: never asks for a bypass-code-only Sign-in policy", not stale.search(text),
+              str(stale.findall(text)))
+    for path in ("deploy/lab5/README.md", "docs/identity-lab-facilitator.md"):
+        lines = [l for l in (ROOT / path).read_text().splitlines() if "bypass code + hardware token" in l]
+        check(f"{path}: describes the Sign-in policy as bypass code + hardware token",
+              any("PseudoCo Lab: Sign-in" in l or "Sign-in policy" in l for l in lines), str(lines))
+    readme = (ROOT / "deploy" / "lab5" / "README.md").read_text().replace("`", "")
+    check("README says valid_secs is the cutoff and why down and expire delete no bypass code",
+          "valid_secs is the cutoff" in readme and "returns only the code strings" in readme)
+    runbook = (ROOT / "docs" / "identity-lab-facilitator.md").read_text()
+    check("the runbook no longer leaves persona sign-in open",
+          "The tools build no persona bypass codes until this is decided" not in runbook
+          and "lab5-setup handouts" in runbook)
+
+
 def main() -> int:
     for test in (test_units, test_up_creates_participants, test_check_and_refusals, test_expire,
-                 test_expire_after_up_cleans_the_handout, test_signin_user_access_docs):
+                 test_expire_after_up_cleans_the_handout, test_signin_user_access_docs,
+                 test_bypass_codes_on_the_handout, test_bypass_victim_swap, test_bypass_refusals,
+                 test_old_handout_gets_codes,
+                 test_signin_policy_docs):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

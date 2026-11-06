@@ -23,7 +23,10 @@ kept on teardown, because the lab apps' User access names it: PseudoCo VPN
 admits only this group, and PseudoCo Lab: Sign-in admits it and CII Read-Only,
 the group every participant account is in (deploy/lab5/README.md, "Duo
 applications"). A Sign-in app that admits only this group, as plan 4.2 had it
-before the participant accounts (12.2), refuses every participant.
+before the participant accounts (12.2), refuses every participant. Sign-in's
+policy allows bypass code + hardware token, because the handout gives the
+personas bypass codes and the participants HOTP passcodes. This script
+creates no policy: the facilitator sets it once in the Admin Panel.
 
 No API clears a risk-based step-up or CII feedback: after --reset or
 --teardown, use Admin Panel > Users > Clear all step-ups, and CII Reset Feedback.
@@ -50,11 +53,15 @@ STEP_UP_NOTE = ("No API clears a risk-based step-up or CII feedback: Admin Panel
 
 
 def user_access_note(group: str) -> str:
-    """Which lab apps admit whom (deploy/lab5/README.md, "Duo applications").
-    Neither Admin API app here can read or set it, so it is a console step."""
+    """Which lab apps admit whom, and with which methods (deploy/lab5/README.md,
+    "Duo applications"). Neither Admin API app here can read or set an
+    application's User access, and this script creates no policy, so both are
+    console steps."""
     return (f"User access, once in the Duo Admin Panel: PseudoCo VPN admits only {group}; PseudoCo Lab: Sign-in "
             f"admits {group} and CII Read-Only, the group every participant account is in. Never limit Sign-in "
-            f"to {group} alone: Duo would refuse every participant (deploy/lab5/README.md, Duo applications)")
+            f"to {group} alone: Duo would refuse every participant. Sign-in's policy allows bypass code + hardware "
+            "token: the personas' handout bypass codes and the participants' HOTP passcodes "
+            "(deploy/lab5/README.md, Duo applications)")
 
 
 @dataclass

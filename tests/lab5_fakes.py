@@ -10,11 +10,19 @@ HOTP tokens like Duo does (a token's secret is kept to verify passcodes; HOTP
 accepts a code at or ahead of the token's counter within a look-ahead window,
 then moves the counter past it; 10 failures in a row lock a user out), and
 records every call so the tests can pin what was sent where.
+
+Bypass codes follow the Admin API page: a POST returns only the code strings
+(no ids), clears the user's other codes unless preserve_existing=true, makes at
+most 10 per call and refuses to pass 100 per user; reuse_count 0 and
+valid_secs 0 (the defaults) mean unlimited and never expiring; a GET returns
+metadata without the codes. The Auth API accepts a live code as a passcode,
+uses it up after reuse_count sign-ins, and refuses it once valid_secs passed.
 """
 from __future__ import annotations
 
 import itertools
 import json
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -42,6 +50,8 @@ KEYCHAIN_SECRETS = {
 }
 LOOKAHEAD = 10
 LOCKOUT = 10
+BYPASS_LIMIT = 100
+PERSONA_NOTES = "lab5 persona (scripts/identity/provision_personas.py); role={role}; created=2026-10-01T00:00:00+00:00"
 
 
 class DuoFailure(RuntimeError):
@@ -64,7 +74,10 @@ class FakeDuo:
         self.fail: Dict[Tuple[str, str], DuoFailure] = {}            # (method, path prefix) -> error
         self.pushes: Dict[str, Dict[str, Any]] = {}
         self.push_answer = "deny"
+        self.bypass: Dict[str, List[Dict[str, Any]]] = {}             # user_id -> its bypass codes
+        self.issued_codes: List[str] = []                              # every bypass code ever returned
         self._ids = itertools.count(1)
+        self._codes = random.Random(4026)
         self.add_group("CII Read-Only", "Identity Intelligence read-only (auto-created)")
 
     # ------------------------------------------------------------------ setup helpers
@@ -90,6 +103,25 @@ class FakeDuo:
 
     def by_name(self, username: str) -> Optional[Dict[str, Any]]:
         return next((u for u in self.users.values() if u["username"] == username), None)
+
+    def add_persona(self, username: str, role: str, secret_hex: str = "") -> Dict[str, Any]:
+        """A persona as provision_personas.py leaves it: persona notes, the
+        persona group, and its own (script-only) HOTP token."""
+        user = self.add_user(username, notes=PERSONA_NOTES.format(role=role), groups=("PseudoCo Workforce",),
+                             email=f"{username}@pseudocoassistant.com")
+        tid = self._id("DH")
+        self.tokens[tid] = {"token_id": tid, "type": "h6", "serial": f"pseudoco-persona-{username}",
+                            "secret_text": secret_hex or ("%040x" % self._codes.getrandbits(160)), "counter": 0,
+                            "user": user["user_id"]}
+        user["tokens"].append(tid)
+        return user
+
+    def live_codes(self, username: str) -> List[Dict[str, Any]]:
+        user = self.by_name(username)
+        return [c for c in self.bypass.get(user["user_id"], []) if self._live(c)] if user else []
+
+    def _live(self, code: Dict[str, Any]) -> bool:
+        return code["expiration"] is None or self.clock() < code["expiration"]
 
     def mutations(self) -> List[Tuple[str, str, str]]:
         return [(k, m, p) for k, m, p, _ in self.calls if m != "GET" and not p.startswith("/auth/")]
@@ -143,6 +175,7 @@ class FakeDuo:
             user = self._user(parts[1])
             if method == "DELETE":
                 del self.users[parts[1]]                 # tokens stay, unassigned (as in Duo)
+                self.bypass.pop(parts[1], None)
                 return ""
             if "status" in p:
                 user["status"] = p["status"]
@@ -167,6 +200,22 @@ class FakeDuo:
             if tid not in user["tokens"]:
                 user["tokens"].append(tid)
             self.tokens[tid]["user"] = user["user_id"]
+            return ""
+        if parts[:1] == ["users"] and parts[2:] == ["bypass_codes"]:
+            return self._user_bypass(self._user(parts[1]), method, p)
+        if parts[:1] == ["bypass_codes"]:
+            codes = [c for cs in self.bypass.values() for c in cs]
+            if len(parts) == 1 and method == "GET":
+                return [self._bypass_view(c) for c in codes]
+            found = next((c for c in codes if c["bypass_code_id"] == parts[1]), None)
+            if found is None:
+                raise DuoFailure(404, 40401, "Resource not found")
+            if method == "GET":
+                return self._bypass_view(found)
+            assert method == "DELETE", (method, path)
+            for cs in self.bypass.values():
+                if found in cs:
+                    cs.remove(found)
             return ""
         if parts == ["groups"]:
             if method == "GET":
@@ -205,6 +254,51 @@ class FakeDuo:
             raise DuoFailure(400, 40002, "Invalid request parameters (resync)")
         raise AssertionError(f"unexpected Admin API call {method} {path}")
 
+    # ------------------------------------------------------------------ bypass codes
+    def _bypass_view(self, code: Dict[str, Any]) -> Dict[str, Any]:
+        user = self.users.get(code["user_id"], {})
+        return {"bypass_code_id": code["bypass_code_id"], "admin_email": "", "created": code["created"],
+                "expiration": code["expiration"], "reuse_count": code["reuse_count"],
+                "user": {"user_id": code["user_id"], "username": user.get("username", "")}}
+
+    def _user_bypass(self, user: Dict[str, Any], method: str, p: Dict[str, str]) -> Any:
+        uid = user["user_id"]
+        mine = self.bypass.setdefault(uid, [])
+        mine[:] = [c for c in mine if self._live(c)]                  # expired codes are gone
+        if method == "GET":
+            return [self._bypass_view(c) for c in mine]
+        assert method == "POST", method
+        assert "codes" not in p, "the tools never choose their own codes"
+        count = int(p.get("count", "10"))
+        reuse, valid = int(p.get("reuse_count", "1")), int(p.get("valid_secs", "0"))
+        if not 1 <= count <= 10:
+            raise DuoFailure(400, 40002, "Invalid request parameters (count)")
+        keep = p.get("preserve_existing", "false") == "true"
+        if (len(mine) if keep else 0) + count > BYPASS_LIMIT:
+            raise DuoFailure(400, 40002, "Invalid request parameters (object limit reached)")
+        if not keep:
+            mine.clear()
+        now = int(self.clock())
+        made = []
+        for _ in range(count):
+            code = "%09d" % self._codes.randrange(10 ** 9)
+            mine.append({"bypass_code_id": self._id("DB"), "user_id": uid, "code": code, "created": now,
+                         "expiration": now + valid if valid else None, "reuse_count": reuse or None,
+                         "left": reuse or None})
+            made.append(code)
+            self.issued_codes.append(code)
+        return made                                    # the codes only: no ids, as in Duo
+
+    def _use_bypass(self, user: Dict[str, Any], passcode: str) -> bool:
+        for code in self.bypass.get(user["user_id"], []):
+            if code["code"] == passcode and self._live(code):
+                if code["left"] is not None:
+                    code["left"] -= 1
+                    if code["left"] <= 0:
+                        self.bypass[user["user_id"]].remove(code)
+                return True
+        return False
+
     # ------------------------------------------------------------------ auth
     def _auth_user(self, p: Dict[str, str]) -> Optional[Dict[str, Any]]:
         return self.by_name(p.get("username", ""))
@@ -232,6 +326,9 @@ class FakeDuo:
             self.pushes[txid] = {"result": self.push_answer, "status": self.push_answer, "status_msg": "pushed"}
             return {"txid": txid}
         assert p["factor"] == "passcode" and p.get("async") == "0"
+        if self._use_bypass(user, p["passcode"]):
+            user["fails"] = 0
+            return {"result": "allow", "status": "allow", "status_msg": "Success. Logging you in..."}
         for tid in user["tokens"]:
             token = self.tokens[tid]
             secret = duo.decode_secret(token["secret_text"], "hex")

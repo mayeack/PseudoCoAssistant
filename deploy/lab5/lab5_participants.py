@@ -6,7 +6,8 @@ Provisioner**, in **CII Read-Only** (Duo SSO into Identity Intelligence) and
 the per-workshop group ``l5-<workshop>``, with notes recording the workshop,
 the instance and the creation time. Its own API-created HOTP token is
 attached, the token's first 10 passcodes go on the handout, and the secret is
-discarded. The handout never carries a bypass code (12.4).
+discarded. The account itself never gets a bypass code (12.4); its card also
+carries the room personas' bypass codes for that team (lab5_bypass, plan 4.3).
 
 The Admin API cannot set a Duo Directory password: after ``up`` the
 facilitator opens each account (the links are printed) and clicks *Create
@@ -26,7 +27,8 @@ cannot read or set it.
 
 Files (no secret except in the handout): ``workshops/<ws>/participants/<nn>.json``
 records ids and times; ``workshops/<ws>/handout.csv`` and ``handout.html`` (0600)
-are the sign-in sheet: instance URL, access key, username and passcodes.
+are the sign-in sheet: instance URL, access key, username, passcodes and the
+team's persona bypass codes.
 """
 from __future__ import annotations
 
@@ -41,10 +43,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from lab5_common import Lab5Error, private_dir, read_json, utc_now, write_json_private
+from lab5_common import Lab5Error, file_lock, private_dir, read_json, utc_now, write_json_private
 from lab5_duo import (AdminAPI, DuoError, admin_panel_url, assigned_elsewhere, encode_secret, group_names, hotp,
                       new_hotp_secret)
-from lab5_personas import is_persona_notes
+from lab5_personas import Cast, is_persona_notes
 
 MARKER = "lab5-setup participant"
 CII_READ_ONLY = "CII Read-Only"
@@ -101,6 +103,11 @@ def day(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
 
 
+def minute(ts: float) -> str:
+    """A time as printed on the cards and in the reports: UTC, to the minute."""
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
 def age_text(seconds: float) -> str:
     return f"{max(0.0, seconds) / DAY:.1f} d"
 
@@ -142,8 +149,33 @@ def persona_group_note(markers: Dict[str, str]) -> str:
 
 
 # =========================================================================== handout
+# The persona bypass codes of a card (lab5_bypass, plan 4.3): ``bypass`` holds
+# "role:username=code[,code]" words, e.g. "victim:avery.kim=407176182
+# trusted:marcus.bell=016931781"; the other three say when they were issued,
+# when they expire and how many sign-ins each code allows.
+BYPASS_FIELDS = ["bypass", "bypass_issued_at", "bypass_valid_until", "bypass_reuse"]
 FIELDS = ["instance", "url", "access_key", "username", "email", "passcodes", "issued_at", "disable_on", "delete_on",
-          "cii_url"]
+          "cii_url"] + BYPASS_FIELDS
+_BYPASS_WORD_RE = re.compile(r"^(?P<role>victim|trusted):(?P<user>[a-z][a-z0-9._-]{0,63})="
+                             r"(?P<codes>[0-9]{6,20}(?:,[0-9]{6,20})*)$")
+
+
+def encode_bypass(entries: Iterable[Tuple[str, str, Sequence[str]]]) -> str:
+    return " ".join(f"{role}:{user}={','.join(codes)}" for role, user, codes in entries)
+
+
+def decode_bypass(text: Optional[str]) -> List[Tuple[str, str, List[str]]]:
+    """``[(role, username, codes)]`` from a card's ``bypass`` field."""
+    out: List[Tuple[str, str, List[str]]] = []
+    for word in str(text or "").split():
+        m = _BYPASS_WORD_RE.match(word)
+        if m:
+            out.append((m.group("role"), m.group("user"), m.group("codes").split(",")))
+    return out
+
+
+def parse_time(text: str) -> Optional[float]:
+    return _parse_time(text) if text else None
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -165,12 +197,17 @@ def _write_private(path: Path, text: str) -> None:
 class Handout:
     """The workshop's sign-in sheet: ``handout.csv`` (the source, also good
     for a mail merge) and ``handout.html`` (one printable card per instance).
-    Both 0600. A card leaves the sheet once its account is disabled."""
+    Both 0600. A card leaves the sheet once its account is disabled. Every
+    change re-reads the sheet under a lock, so `up`, `handouts` and the daily
+    `expire` never undo each other's cards."""
 
     def __init__(self, ws_dir: Path, workshop: str, cii_url: str = "") -> None:
         self.dir, self.workshop, self.cii_url = Path(ws_dir), workshop, cii_url
         self.csv_path = self.dir / "handout.csv"
         self.html_path = self.dir / "handout.html"
+
+    def _lock(self):
+        return file_lock(self.dir / ".handout.lock")
 
     def load(self) -> Dict[str, Dict[str, str]]:
         if not self.csv_path.exists():
@@ -194,16 +231,51 @@ class Handout:
         _write_private(self.html_path, self.render(ordered))
 
     def upsert(self, row: Dict[str, str]) -> None:
-        rows = self.load()
-        rows[row["username"]] = row
-        self.save(rows)
+        with self._lock():
+            rows = self.load()
+            rows[row["username"]] = row
+            self.save(rows)
+
+    def update(self, name: str, fields: Dict[str, str]) -> bool:
+        """Change some fields of one card. False if it has no card."""
+        with self._lock():
+            rows = self.load()
+            if name not in rows:
+                return False
+            rows[name].update(fields)
+            self.save(rows)
+            return True
 
     def remove(self, name: str) -> bool:
-        rows = self.load()
-        if rows.pop(name, None) is None:
+        if not self.csv_path.exists():
             return False
-        self.save(rows)
-        return True
+        with self._lock():
+            rows = self.load()
+            if rows.pop(name, None) is None:
+                return False
+            self.save(rows)
+            return True
+
+    @staticmethod
+    def _personas(r: Dict[str, str]) -> str:
+        """The card's persona bypass codes (plan 4.3), or nothing."""
+        entries = decode_bypass(r.get("bypass"))
+        if not entries:
+            return ""
+        e = html.escape
+        rows = "".join(f'<tr><th>{"Room victim" if role == "victim" else "Trusted"}</th>'
+                       f'<td><code>{e(user)}</code></td><td>{" ".join(f"<code>{e(c)}</code>" for c in codes)}</td></tr>'
+                       for role, user, codes in entries)
+        until = parse_time(r.get("bypass_valid_until") or "")
+        uses = r.get("bypass_reuse") or ""
+        terms = " ".join(filter(None, [f"is good for {e(uses)} sign-ins" if uses else "",
+                                       f"until {e(minute(until))}" if until else ""]))
+        return f"""<p class="label">Personas: your team's bypass codes</p>
+<table class="personas"><tbody>{rows}</tbody></table>
+<p class="fine">To sign in as one of them, choose <b>Sign in with Duo</b> with its username; in Duo, choose
+<b>Other options</b>, then <b>Bypass Code</b>, and enter its code. Each code {terms or "works a few times"}.
+Only your team has these codes: keep it that way.</p>
+"""
 
     def render(self, rows: Sequence[Dict[str, str]]) -> str:
         e = html.escape
@@ -231,7 +303,7 @@ password and the next passcode, then set a password of your own.</li>
 </ol>
 <p class="label">Passcodes: use each one once, in order</p>
 <ol class="codes">{codes}</ol>
-<p class="fine">This account is disabled on {e(r['disable_on'])} and deleted on {e(r['delete_on'])}.
+{self._personas(r)}<p class="fine">This account is disabled on {e(r['disable_on'])} and deleted on {e(r['delete_on'])}.
 Other participants with read-only access to Identity Intelligence can see this account's sign-ins,
 including the IP address you sign in from.</p>
 </section>""")
@@ -258,6 +330,9 @@ code{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--c
 .label{{margin:.6rem 0 .2rem;font-weight:600}}
 .codes{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.3rem 1rem;margin:0;padding-left:1.6rem;font-size:1.05rem}}
 .fine{{color:var(--muted);font-size:.78rem;margin:.6rem 0 0}}
+.personas{{border-collapse:collapse;margin:0;font-size:1rem}}
+.personas th{{text-align:left;font-weight:500;color:var(--muted);padding:.15rem 1rem .15rem 0;white-space:nowrap}}
+.personas td{{padding:.15rem 1rem .15rem 0;overflow-wrap:anywhere}}
 @media (max-width:480px){{.codes{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
 @media print{{body{{padding:0}} .note{{display:none}} .card{{margin-bottom:1rem}}}}
 </style></head>
@@ -283,6 +358,7 @@ class Env:
     secret_encoding: str = "hex"
     now: Callable[[], float] = None   # type: ignore[assignment]
     groups: Dict[str, str] = field(default_factory=dict)   # name -> group_id
+    cast: Optional[Cast] = None       # the persona cast, with roles (lab5_bypass)
 
     @property
     def ws_dir(self) -> Path:
@@ -377,8 +453,7 @@ def ensure(env: Env, nn: str, url: str, access_key: str, reissue: bool = False) 
         fresh = {"url": url, "access_key": access_key, "cii_url": env.cii_url}
         refreshed = any(card.get(k, "") != v for k, v in fresh.items())
         if refreshed:
-            card.update(fresh)
-            handout.upsert(card)
+            handout.update(name, fresh)
         row: Row = ("OK", name, "kept; its handout card keeps its passcodes"
                     + ("; its URL, access key or CII link refreshed" if refreshed else ""))
     elif mine and not reissue:
@@ -406,10 +481,14 @@ def ensure(env: Env, nn: str, url: str, access_key: str, reissue: bool = False) 
             raise
         codes = " ".join(hotp(secret, i) for i in range(PASSCODES))
         del secret
-        handout.upsert({"instance": nn, "url": url, "access_key": access_key, "username": name,
-                        "email": f"{name}@{env.email_domain}", "passcodes": codes, "issued_at": utc_now(),
-                        "disable_on": day(start + DISABLE_DAYS * DAY), "delete_on": day(start + DELETE_DAYS * DAY),
-                        "cii_url": env.cii_url})
+        # A reissued card keeps its persona bypass codes: they are the room
+        # personas', not this token's, and `lab5-setup handouts` replaces them.
+        kept = {k: card[k] for k in BYPASS_FIELDS if card and card.get(k)}
+        handout.upsert(dict(kept, **{
+            "instance": nn, "url": url, "access_key": access_key, "username": name,
+            "email": f"{name}@{env.email_domain}", "passcodes": codes, "issued_at": utc_now(),
+            "disable_on": day(start + DISABLE_DAYS * DAY), "delete_on": day(start + DELETE_DAYS * DAY),
+            "cii_url": env.cii_url}))
         _save_record(env, nn, token_id=token.get("token_id"), token_serial=name, issued_at=utc_now())
         what = "created" if created else ("passcodes reissued" if (reissue or card) else "finished")
         row = ("CHANGED", name, f"{what}: {CII_READ_ONLY} + {group_name(env.workshop)}, HOTP token attached, "

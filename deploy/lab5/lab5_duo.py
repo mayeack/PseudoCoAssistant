@@ -3,7 +3,8 @@
 Two Duo applications are used from the Mac, never from a box (plan 4.2, 12.4):
 
 * **PseudoCo Provisioner** (Admin API, Grant resource read + write): the
-  persona cast, the participant accounts, their groups and HOTP tokens.
+  persona cast, the participant accounts, their groups and HOTP tokens, and
+  the room personas' bypass codes for the handout (plan 4.3).
 * **PseudoCo VPN** (Auth API): the persona sign-ins (baseline, takeover,
   replay) and the self-check's preauth.
 
@@ -47,6 +48,9 @@ API_HOST_FALLBACK_ITEM = "pseudoco-lab5-duo-websdk-api-host"
 
 _HOST_RE = re.compile(r"^api-[a-z0-9]+(?:\.[a-z0-9-]+)+$")
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_BYPASS_CODE_RE = re.compile(r"^[0-9]{6,20}$")
+BYPASS_PER_REQUEST = 10      # Duo creates at most 10 bypass codes per call
+BYPASS_LIMIT = 100           # Duo's object limit: bypass codes per user
 
 
 class DuoError(Lab5Error):
@@ -251,6 +255,38 @@ class AdminAPI(_Api):
         code1, code2, code3 = list(codes)
         self.call("POST", f"/admin/v1/tokens/{_id(token_id)}/resync",
                   {"code1": code1, "code2": code2, "code3": code3})
+
+    # bypass codes: the room personas' handout codes (plan 4.3), never a participant's
+    def create_bypass_codes(self, user_id: str, count: int, reuse_count: int, valid_secs: int) -> List[str]:
+        """``POST /admin/v1/users/{id}/bypass_codes``, always with
+        ``preserve_existing=true``: Duo's default clears every code the user
+        already has, and a trusted persona carries other boxes' and other
+        rooms' codes. Duo's defaults for the other two, ``reuse_count`` 0
+        (unlimited) and ``valid_secs`` 0 (never expires), are refused.
+
+        Returns the codes. The response is the only place they ever appear,
+        and it carries no id for them; no error message here repeats one."""
+        count, reuse_count, valid_secs = int(count), int(reuse_count), int(valid_secs)
+        if not 1 <= count <= BYPASS_PER_REQUEST:
+            raise DuoError(f"refusing to create {count} bypass codes in one call: Duo creates 1 to "
+                           f"{BYPASS_PER_REQUEST}")
+        if reuse_count < 1:
+            raise DuoError("refusing bypass codes without a use limit (reuse_count 0 is unlimited in Duo)")
+        if valid_secs < 1:
+            raise DuoError("refusing bypass codes that never expire (valid_secs 0 in Duo)")
+        result = self.call("POST", f"/admin/v1/users/{_id(user_id)}/bypass_codes",
+                           {"count": str(count), "reuse_count": str(reuse_count), "valid_secs": str(valid_secs),
+                            "preserve_existing": "true"})
+        codes = result if isinstance(result, list) else []
+        if len(codes) != count or not all(isinstance(c, str) and _BYPASS_CODE_RE.match(c) for c in codes):
+            raise DuoError(f"Duo POST /admin/v1/users/{{id}}/bypass_codes: expected {count} numeric code(s) back")
+        return list(codes)
+
+    def user_bypass_codes(self, user_id: str) -> List[Dict[str, Any]]:
+        """The user's bypass codes as metadata only (``bypass_code_id``,
+        ``created``, ``expiration``, ``reuse_count``, ``admin_email``): Duo never
+        returns a code's value after creating it."""
+        return self.page(f"/admin/v1/users/{_id(user_id)}/bypass_codes")
 
 
 class AuthAPI(_Api):

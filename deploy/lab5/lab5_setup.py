@@ -3,8 +3,11 @@
 
     lab5-setup check  workshop.yaml   read-only: what `up` would change, per box
     lab5-setup up     workshop.yaml   version check, backup, Lab 5 .env keys,
-                                      tunnel + DNS, HEC host, restart, preflight
+                                      tunnel + DNS, HEC host, restart, preflight;
+                                      then the participant accounts and the handout
     lab5-setup status workshop.yaml   per-box preflight and Cloudflare state
+    lab5-setup handouts workshop.yaml a fresh batch of persona bypass codes on
+                                      each handout card (lab-day morning, a lost card)
     lab5-setup down   workshop.yaml   delete the workshop's tunnels and DNS
                                       records, revert the Lab 5 keys
     lab5-setup expire [workshop.yaml] participant accounts: disable at day 7,
@@ -41,6 +44,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import lab5_bypass as bypass  # noqa: E402
 import lab5_envfile as envfile  # noqa: E402
 from lab5_cloudflare import CloudflareAPI, urllib_transport  # noqa: E402
 from lab5_common import (Keychain, Lab5Error, Redactor, Reporter, StateStore, desktop_notify,  # noqa: E402
@@ -115,6 +119,37 @@ def identity_values(section: Any) -> Dict[str, str]:
     return out
 
 
+def _whole_number(value: Any) -> Optional[int]:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[0-9]{1,9}", value.strip()):
+        return int(value.strip())
+    return None
+
+
+def bypass_settings(section: Any) -> "bypass.Settings":
+    """workshop.yaml `bypass_codes:` (plan 4.3), refused unless every value is
+    in range. Duo's own defaults for an unset value (never expires, unlimited
+    uses) are never sent: the tool always sends its own."""
+    if section is None:
+        return bypass.Settings()
+    _require(isinstance(section, dict), "`bypass_codes` must be a mapping")
+    known = ("enabled",) + tuple(bypass.RANGES)
+    unknown = sorted(str(k) for k in section if k not in known)
+    _require(not unknown, f"`bypass_codes.{unknown[0] if unknown else ''}` is not a setting ({', '.join(known)})")
+    enabled = section.get("enabled", True)
+    _require(isinstance(enabled, bool), "`bypass_codes.enabled` must be true or false")
+    values: Dict[str, int] = {}
+    for key, (low, high, unit) in bypass.RANGES.items():
+        if section.get(key) is None:
+            continue
+        number = _whole_number(section[key])
+        _require(number is not None and low <= number <= high,
+                 f"`bypass_codes.{key}` must be a whole number of {unit} from {low} to {high}, not {section[key]!r}")
+        values[key] = number
+    return bypass.Settings(enabled=enabled, **values)
+
+
 # =========================================================================== config
 @dataclass
 class BoxSpec:
@@ -156,7 +191,8 @@ class Workshop:
     participants_enabled: bool = True  # 12.2: one Duo account per instance
     cii_url: str = ""                  # printed on the handout
     email_domain: str = ""             # participant emails; the zone when empty
-    personas_file: str = ""            # the cast that expire and up never touch
+    personas_file: str = ""            # the cast: expire never touches it, up only adds the room's bypass codes
+    bypass_codes: bypass.Settings = field(default_factory=bypass.Settings)   # 4.3: persona codes per card
 
     def tunnel_name(self, box: BoxSpec) -> str:
         return f"l5-{self.name}-{box.nn}"
@@ -242,6 +278,7 @@ def workshop_from_dict(doc: Dict[str, Any]) -> Workshop:
         concurrency=max(1, int(doc.get("concurrency") or 4)),
         participants_enabled=enabled, cii_url=cii_url, email_domain=email_domain,
         personas_file=str(doc.get("personas_file") or ""),
+        bypass_codes=bypass_settings(doc.get("bypass_codes")),
     )
 
 
@@ -291,20 +328,29 @@ def allowed_users(ws: Workshop, box: BoxSpec) -> List[str]:
     return list(dict.fromkeys(users))
 
 
-def create_participants(ctx: "Ctx", reports: List["BoxReport"]) -> List[str]:
-    """After the boxes: one account per box that came up, then the handout.
-    Returns the usernames that failed."""
+SIGNIN_POLICY_NOTE = ("Its policy (plan 4.4) must allow bypass code + hardware token, and no other method: the "
+                      "persona codes on the cards are bypass codes, and the participant passcodes come from a "
+                      "hardware (HOTP) token. A policy without hardware tokens refuses every participant, and one "
+                      "without bypass codes refuses the personas (deploy/lab5/README.md, Duo applications: the tools "
+                      "neither set nor check it)")
+
+
+def create_participants(ctx: "Ctx", reports: List["BoxReport"]) -> Tuple[List[str], int]:
+    """After the boxes: one account per box that came up, then the room
+    personas' bypass codes on each card (4.3), then the handout. Returns the
+    usernames that failed and the number of cards left without their codes."""
     env, failed, links = ctx.accounts, [], []
     ctx.out.line(f"== participant accounts (12.2): {len(reports)} instance(s) ==")
     if not reports:
         ctx.out.line("  SKIP     no box came up, so no participant account was created")
-        return failed
+        return failed, 0
     try:
         if participants.group_name(ctx.ws.name) not in env.groups:
             participants.preflight(env, create_missing=True)
     except Lab5Error as exc:
         ctx.out.line(f"  FAIL     groups       {exc}")
-        return [participants.username(ctx.ws.name, r.box.nn) for r in reports]
+        return [participants.username(ctx.ws.name, r.box.nn) for r in reports], 0
+    ready: List[str] = []
     for rep in reports:
         name = participants.username(ctx.ws.name, rep.box.nn)
         try:
@@ -315,12 +361,15 @@ def create_participants(ctx: "Ctx", reports: List["BoxReport"]) -> List[str]:
         ctx.out.line(f"  {status:<8} {name:<24} {detail}")
         if status == "FAIL":
             failed.append(name)
+        else:
+            ready.append(rep.box.nn)
         if link:
             links.append(f"{name}: {link}")
+    bad_cards = issue_bypass(ctx, ready, force=False) if ctx.ws.bypass_codes.enabled else 0
     handout = env.handout()
     if handout.csv_path.exists():
         ctx.out.line(f"handout: {handout.html_path} (and .csv), mode 0600. It holds each participant's access key "
-                     "and passcodes: print it, then delete it after the workshop")
+                     "and passcodes and the team's persona bypass codes: print it, then delete it after the workshop")
     if links:
         ctx.out.line("NEXT: the Admin API cannot set a password. In the Duo Admin Panel, open each account and click "
                      "Create temporary password (valid 30 days); write it on that participant's card:")
@@ -329,6 +378,22 @@ def create_participants(ctx: "Ctx", reports: List["BoxReport"]) -> List[str]:
     ctx.out.line(f"Participants reach their instance through the Web SDK app {participants.SIGNIN_APP}, whose User "
                  f"access must admit {participants.CII_READ_ONLY} as well as {env.persona_group}, or Duo refuses "
                  "every participant (deploy/lab5/README.md, Duo applications: only the Admin Panel can check it)")
+    ctx.out.line(SIGNIN_POLICY_NOTE)
+    return failed, bad_cards
+
+
+def issue_bypass(ctx: "Ctx", numbers: Sequence[str], force: bool) -> int:
+    """The room personas' bypass codes on each of these cards (4.3). Returns
+    the number of cards left without the batch they needed."""
+    codes = ctx.ws.bypass_codes
+    ctx.out.line(f"== persona bypass codes (4.3): {bypass.describe(ctx.personas, codes)}, valid {codes.valid_hours} h, "
+                 "one batch per instance ==")
+    if not numbers:
+        ctx.out.line("  SKIP     no card to put them on")
+        return 0
+    rows, failed = bypass.issue(ctx.accounts, numbers, ctx.personas, codes, ctx.redactor, force=force)
+    for status, name, detail in rows:
+        ctx.out.line(f"  {status:<8} {name:<24} {detail}")
     return failed
 
 
@@ -406,6 +471,7 @@ class Ctx:
     force_restart: bool = False
     accounts: Optional[participants.Env] = None   # the participant-account plumbing (12.2)
     reissue: bool = False
+    personas: List[Tuple[str, str]] = field(default_factory=list)   # 4.3: (victim|trusted, username) for the codes
 
 
 def lab5_values(ws: Workshop, box: BoxSpec, creds: Dict[str, str]) -> Dict[str, str]:
@@ -1153,18 +1219,24 @@ def _cast_file(ws: Optional[Workshop]) -> Path:
     return Path(ws.personas_file).expanduser() if ws and ws.personas_file else DEFAULT_CAST
 
 
-def participant_env(ctx: Ctx, deps: Deps) -> participants.Env:
+def accounts_env(ws: Workshop, keychain: Keychain, line: Callable[[str], None], root: Path,
+                 deps: Deps) -> participants.Env:
     """The Provisioner app and the persona cast. Local reads only: the
-    Keychain and personas.yaml (whose users these commands never touch)."""
-    ws = ctx.ws
+    Keychain and personas.yaml. A persona is never changed, disabled or
+    deleted here; the room's personas only get their handout bypass codes."""
     cast = load_cast(_cast_file(ws))
-    admin = duo.admin_api(ctx.keychain, deps.duo_transport)
-    ctx.out.line(f"Duo: Admin API app PseudoCo Provisioner on {admin.host}; persona cast of {len(cast.personas)} "
-                 f"({_cast_file(ws).name}) is never touched")
-    return participants.Env(admin=admin, line=ctx.out.line, root=ctx.state.root, workshop=ws.name,
+    admin = duo.admin_api(keychain, deps.duo_transport)
+    line(f"Duo: Admin API app PseudoCo Provisioner on {admin.host}; persona cast of {len(cast.personas)} "
+         f"({_cast_file(ws).name}): no persona is ever changed, disabled or deleted"
+         + ("; the room's personas get handout bypass codes" if ws.bypass_codes.enabled else ""))
+    return participants.Env(admin=admin, line=line, root=root, workshop=ws.name,
                             email_domain=ws.email_domain or ws.zone, personas=set(cast.usernames),
                             persona_group=cast.group, cii_url=ws.cii_url, secret_encoding=cast.secret_encoding,
-                            now=deps.now)
+                            now=deps.now, cast=cast)
+
+
+def participant_env(ctx: Ctx, deps: Deps) -> participants.Env:
+    return accounts_env(ctx.ws, ctx.keychain, ctx.out.line, ctx.state.root, deps)
 
 
 def connect_cloudflare(ctx: Ctx, transport: Callable[..., Tuple[int, bytes]]) -> None:
@@ -1235,7 +1307,8 @@ def run_expire(args: argparse.Namespace, deps: Deps) -> int:
         scope = f"workshop {ws.name}" if ws else "every workshop"
         reporter.line(f"lab5-setup expire{' --dry-run' if args.dry_run else ''}: {scope}; disable at day "
                       f"{participants.DISABLE_DAYS}, delete at day {participants.DELETE_DAYS}; the "
-                      f"{len(cast.personas)} personas of {_cast_file(ws).name} are never touched")
+                      f"{len(cast.personas)} personas of {_cast_file(ws).name} are never touched, and their "
+                      "bypass codes run out at their own valid_secs")
         counts, failed = participants.expire(admin, root, set(cast.usernames), cast.group, deps.now(),
                                              reporter.line, workshop=ws.name if ws else "", dry_run=args.dry_run)
         reporter.line(f"RESULT: expire: {counts['disabled']} disabled, {counts['deleted']} deleted, "
@@ -1253,6 +1326,65 @@ def run_expire(args: argparse.Namespace, deps: Deps) -> int:
         reporter.close()
 
 
+def select_boxes(ws: Workshop, only: str, yaml_path: Path) -> List[BoxSpec]:
+    if not only:
+        return list(ws.boxes)
+    try:
+        wanted = {int(n) for n in only.split(",") if n.strip()}
+    except ValueError:
+        raise Lab5Error("--only takes instance numbers, e.g. 1,3")
+    boxes = [b for b in ws.boxes if b.instance in wanted]
+    if not boxes:
+        raise Lab5Error(f"--only {only} matches no box in {yaml_path}")
+    return boxes
+
+
+def run_handouts(args: argparse.Namespace, deps: Deps) -> int:
+    """`lab5-setup handouts workshop.yaml [--only N]`: a fresh batch of the
+    room personas' bypass codes on each handout card (plan 4.3), for lab-day
+    morning or a lost card. It touches no box, tunnel or participant account,
+    and asks for no SSH password. The codes it replaces stay valid until
+    their own valid_secs: nothing can delete them cleanly (lab5_bypass)."""
+    out = deps.out or sys.stdout
+    redactor = Redactor()
+    try:
+        ws = load_workshop(args.workshop_yaml)
+        boxes = select_boxes(ws, args.only, args.workshop_yaml)
+    except Lab5Error as exc:
+        print(f"lab5-setup: {exc}", file=out)
+        return 2
+    if not ws.participants_enabled:
+        print("lab5-setup handouts: participants.enabled is false, so there is no handout to put codes on", file=out)
+        return 2
+    if not ws.bypass_codes.enabled:
+        print("lab5-setup handouts: bypass_codes.enabled is false in the workshop file", file=out)
+        return 2
+    state = StateStore(deps.state_root or StateStore.default_root(), ws.name)
+    state.ensure()
+    reporter = Reporter(redactor, out=out, log_path=state.run_log("handouts"))
+    keychain = Keychain(redactor, deps.keychain_runner) if deps.keychain_runner else Keychain(redactor)
+    try:
+        env = accounts_env(ws, keychain, reporter.line, state.root, deps)
+        personas = bypass.room_personas(ws.victim, ws.trusted, env.cast)
+        codes = ws.bypass_codes
+        reporter.line(f"lab5-setup handouts: workshop {ws.name}, {len(boxes)} card(s): a fresh batch each, "
+                      f"{bypass.describe(personas, codes)}, valid {codes.valid_hours} h")
+        rows, failed = bypass.issue(env, [b.nn for b in boxes], personas, codes, redactor, force=True)
+        for status, name, detail in rows:
+            reporter.line(f"  {status:<8} {name:<24} {detail}")
+        handout = env.handout()
+        if failed < len(boxes) and handout.csv_path.exists():
+            reporter.line(f"handout: {handout.html_path} (and .csv), mode 0600: print the changed cards. The codes "
+                          "they replace stay valid until they expire")
+        reporter.line(f"RESULT: handouts: {len(boxes) - failed} card(s) ok, {failed} failed")
+        return 1 if failed else 0
+    except Lab5Error as exc:
+        reporter.line(f"lab5-setup handouts: {exc}")
+        return 2
+    finally:
+        reporter.close()
+
+
 COMMANDS = {"check": check_box, "up": up_box, "status": status_box, "down": down_box}
 
 
@@ -1260,10 +1392,10 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
     deps = deps or Deps()
     ap = argparse.ArgumentParser(prog="lab5-setup", description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    ap.add_argument("command", choices=sorted(list(COMMANDS) + ["expire"]))
+    ap.add_argument("command", choices=sorted(list(COMMANDS) + ["expire", "handouts"]))
     ap.add_argument("workshop_yaml", type=Path, nargs="?",
                     help="the workshop file (optional for expire: without it, every workshop)")
-    ap.add_argument("--only", default="", help="comma list of instance numbers, e.g. 1,3")
+    ap.add_argument("--only", default="", help="comma list of instance numbers, e.g. 1,3 (not for expire)")
     ap.add_argument("--restart", action="store_true", help="up/down: restart the app even if .env is unchanged")
     ap.add_argument("--dry-run", action="store_true", help="expire: list what it would do, change nothing")
     ap.add_argument("--reissue-passcodes", action="store_true",
@@ -1279,24 +1411,16 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
     if args.dry_run:
         print("lab5-setup: --dry-run is for expire; check is the dry run of up", file=out)
         return 2
+    if args.command == "handouts":
+        return run_handouts(args, deps)
 
     redactor = Redactor()
     try:
         ws = load_workshop(args.workshop_yaml)
+        boxes = select_boxes(ws, args.only, args.workshop_yaml)
     except Lab5Error as exc:
         print(f"lab5-setup: {exc}", file=out)
         return 2
-    boxes = ws.boxes
-    if args.only:
-        try:
-            wanted = {int(n) for n in args.only.split(",") if n.strip()}
-        except ValueError:
-            print(f"lab5-setup: --only takes instance numbers, e.g. 1,3", file=out)
-            return 2
-        boxes = [b for b in ws.boxes if b.instance in wanted]
-        if not boxes:
-            print(f"lab5-setup: --only {args.only} matches no box in {args.workshop_yaml}", file=out)
-            return 2
     state = StateStore(deps.state_root or StateStore.default_root(), ws.name)
     state.ensure()
     reporter = Reporter(redactor, out=out, log_path=state.run_log(args.command))
@@ -1308,6 +1432,7 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
               app_wait_s=deps.app_wait_s, preflight_wait_s=deps.preflight_wait_s, force_restart=args.restart,
               reissue=args.reissue_passcodes)
     with_participants = ws.participants_enabled and args.command in ("check", "up", "status")
+    with_codes = with_participants and ws.bypass_codes.enabled      # 4.3: the room personas' handout codes
     try:
         reporter.line(f"lab5-setup {args.command}: workshop {ws.name}, {len(boxes)} box(es), "
                       f"required release {ws.required_version}, state {state.dir}")
@@ -1315,30 +1440,41 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
             load_creds(ctx)                 # local first: a missing item fails before any network call
         if with_participants:
             ctx.accounts = participant_env(ctx, deps)
+        if with_codes:
+            ctx.personas = bypass.room_personas(ws.victim, ws.trusted, ctx.accounts.cast)
         connect_cloudflare(ctx, deps.cloudflare_transport)
         if with_participants and args.command in ("check", "up"):
             participants.preflight(ctx.accounts, create_missing=False)   # before any box changes
         ctx.passwords = ask_passwords(boxes, deps.prompt, redactor)
         reports = run_parallel(ctx, boxes, COMMANDS[args.command])
         failed = [r.box.nn for r in reports if r.failed]
-        bad_accounts = 0
+        bad_accounts = bad_codes = 0
+        numbers = [b.nn for b in boxes]
         if with_participants and args.command == "up":
-            bad_accounts = len(create_participants(ctx, [r for r in reports if not r.failed]))
+            failed_accounts, bad_codes = create_participants(ctx, [r for r in reports if not r.failed])
+            bad_accounts = len(failed_accounts)
         if with_participants and args.command == "check":
             bad_accounts = _print_rows(ctx, "== participant accounts (12.2): what up would do ==",
-                                       participants.plan_rows(ctx.accounts, [b.nn for b in boxes]))
+                                       participants.plan_rows(ctx.accounts, numbers))
+            if with_codes:
+                bad_codes = _print_rows(ctx, "== persona bypass codes (4.3): what up would do ==",
+                                        bypass.plan_rows(ctx.accounts, numbers, ctx.personas, ws.bypass_codes))
         if args.command == "status":
             for status, name, detail in room_checks(ctx):
                 reporter.line(f"  {status:<8} {name:<12} {detail}")
             if with_participants:
                 bad_accounts = _print_rows(ctx, "== participant accounts (12.2) ==",
-                                           participants.status_rows(ctx.accounts, [b.nn for b in boxes]))
+                                           participants.status_rows(ctx.accounts, numbers))
+            if with_codes:
+                bad_codes = _print_rows(ctx, "== persona bypass codes (4.3) ==",
+                                        bypass.status_rows(ctx.accounts, numbers, ctx.personas))
         if args.command in ("status", "down"):
             for row in workshop_orphans(ctx):
                 reporter.line(f"  WARN     orphan       {row}")
         reporter.line(f"RESULT: {args.command}: {len(reports) - len(failed)} ok, {len(failed)} failed"
                       + (f" (box {', '.join(failed)})" if failed else "")
-                      + (f"; {bad_accounts} participant account(s) failed" if bad_accounts else ""))
+                      + (f"; {bad_accounts} participant account(s) failed" if bad_accounts else "")
+                      + (f"; persona bypass codes: {bad_codes} failed" if bad_codes else ""))
         if args.command == "down" and failed:
             only = ",".join(str(r.box.instance) for r in reports if r.failed)
             reporter.line(f"NEXT: re-run `lab5-setup down {args.workshop_yaml} --only {only}` once those boxes "
@@ -1346,7 +1482,10 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
         if args.command == "down" and ws.participants_enabled:
             reporter.line("Participant accounts stay until `lab5-setup expire` disables them at day "
                           f"{participants.DISABLE_DAYS} and deletes them at day {participants.DELETE_DAYS}")
-        return 1 if failed or bad_accounts else 0
+            note = bypass.down_note(state.root, ws.name, deps.now())
+            if note:
+                reporter.line(note)
+        return 1 if failed or bad_accounts or bad_codes else 0
     except Lab5Error as exc:
         reporter.line(f"lab5-setup: {exc}")
         return 2

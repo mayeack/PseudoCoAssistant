@@ -55,7 +55,7 @@ ul,ol{padding-left:1.4rem}
 <li><em>Identity Intelligence → SSO Access</em>: Duo Administrator SSO on, so you can open CII with full admin.</li>
 <li><em>Grant write resource</em> <strong>off</strong> in CII.</li>
 <li>Lockout <strong>auto-revert</strong> on (about 15 minutes), so one person's typos never lock an account for the day.</li>
-<li>The lab Sign-in policy must accept <strong>hardware-token passcodes</strong>. Participant handouts carry HOTP passcodes, not bypass codes (plan 12.4), so a &quot;bypass code only&quot; policy would refuse them.</li>
+<li>The <strong>PseudoCo Lab: Sign-in</strong> policy (plan 4.4) allows <strong>bypass code + hardware token</strong> and no other method: tick <em>Bypass code</em> and <em>Hardware tokens</em> under its authentication methods. Each handout card carries both: the room personas' bypass codes and the participant's HOTP passcodes. Without hardware tokens Duo refuses every participant, and without bypass codes every persona sign-in. <code>deploy/lab5/README.md</code> (&quot;Duo applications&quot;) has the rest of the policy.</li>
 </ul>
 <p><strong>Your Mac:</strong></p>
 <ol>
@@ -111,20 +111,21 @@ ul,ol{padding-left:1.4rem}
 <li>the room stack's <code>stack.hec_url</code>;</li>
 <li><code>room.victim</code> and <code>room.fallback</code>;</li>
 <li>one <code>boxes</code> row per box;</li>
-<li><code>participants.cii_url</code>, the link printed on the handouts.</li>
+<li><code>participants.cii_url</code>, the link printed on the handouts;</li>
+<li><code>bypass_codes.valid_hours</code> (default 12): the persona bypass codes that <code>up</code> puts on the cards stop working that many hours after <code>up</code> runs. If you run <code>up</code> the day before, raise it to reach the end of lab day.</li>
 </ul>
 </li>
-<li><code>deploy/lab5/lab5-setup check &lt;workshop.yaml&gt;</code>. Every box should say <strong>ready, nothing to upgrade</strong>, and every participant account <code>PLAN</code>. It changes nothing.</li>
-<li><code>deploy/lab5/lab5-setup up &lt;workshop.yaml&gt;</code>. The boxes get their Lab 5 keys, tunnel and DNS name, HEC host and restart. Then every box that came up gets its participant account <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code>, and the handout is written.</li>
-<li><strong>Temporary passwords.</strong> <code>up</code> prints an Admin Panel link per account. Open each one, click <em>Create temporary password</em> (valid 30 days) and write it on that participant's card. The Admin API cannot set passwords. While you are in the Admin Panel, check that <strong>PseudoCo Lab: Sign-in</strong> still admits <strong>CII Read-Only</strong> (step 4 of &quot;Once, before the first delivery&quot;). <code>up</code> reminds you, because it cannot check.</li>
+<li><code>deploy/lab5/lab5-setup check &lt;workshop.yaml&gt;</code>. Every box should say <strong>ready, nothing to upgrade</strong>, and every participant account and card <code>PLAN</code>. It changes nothing. A persona that is missing in Duo, or near Duo's 100 bypass codes, fails here.</li>
+<li><code>deploy/lab5/lab5-setup up &lt;workshop.yaml&gt;</code>. The boxes get their Lab 5 keys, tunnel and DNS name, HEC host and restart. Then every box that came up gets its participant account <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code>, its card gets the team's bypass codes for the room's victim and each trusted persona, and the handout is written.</li>
+<li><strong>Temporary passwords.</strong> <code>up</code> prints an Admin Panel link per account. Open each one, click <em>Create temporary password</em> (valid 30 days) and write it on that participant's card. The Admin API cannot set passwords. While you are in the Admin Panel, check that <strong>PseudoCo Lab: Sign-in</strong> still admits <strong>CII Read-Only</strong> (step 4 of &quot;Once, before the first delivery&quot;) and that its policy still allows bypass code + hardware token. <code>up</code> reminds you, because it cannot check either.</li>
 <li>Print <code>~/.pseudoco-lab5/workshops/&lt;workshop&gt;/handout.html</code> and cut the cards apart.</li>
-<li><code>deploy/lab5/lab5-setup status &lt;workshop.yaml&gt;</code>. Every box should be green. Participants show &quot;no password yet&quot; until they sign in to CII and set their own.</li>
+<li><code>deploy/lab5/lab5-setup status &lt;workshop.yaml&gt;</code>. Every box should be green. Participants show &quot;no password yet&quot; until they sign in to CII and set their own. Each card's persona codes show how long they have left.</li>
 </ol>
-<p>A box that <code>up</code> refused is reported with the reason. Fix it, then re-run with <code>--only &lt;n&gt;</code>. A re-run keeps the accounts and their cards. Passcodes are shown only once, so for a lost card use <code>up --only &lt;n&gt; --reissue-passcodes</code> (the old passcodes stop working).</p>
+<p>A box that <code>up</code> refused is reported with the reason. Fix it, then re-run with <code>--only &lt;n&gt;</code>. A re-run keeps the accounts and their cards. Passcodes are shown only once, so for a lost card use <code>up --only &lt;n&gt; --reissue-passcodes</code> (the old passcodes stop working), then <code>handouts --only &lt;n&gt;</code> for fresh persona codes. The lost card's persona codes keep working until they expire: nothing can delete them early.</p>
 <h2>Lab day</h2>
 <p><strong>Before attendees sit down (T-0):</strong></p>
 <ul>
-<li><code>lab5-setup status</code> again. Every tunnel should be healthy and <code>duo_signin</code> not gated.</li>
+<li><code>lab5-setup status</code> again. Every tunnel should be healthy and <code>duo_signin</code> not gated. If the cards' persona codes expire before the lab ends, run <code>deploy/lab5/lab5-setup handouts &lt;workshop.yaml&gt;</code> and print the cards again, with the temporary passwords copied over. The old codes stay valid until they expire.</li>
 <li><code>persona_activity.py selfcheck</code>. The trusted personas should pass. The room's victim should fail MFA Flood and Impossible Travel in CII.</li>
 <li>In the Admin Panel, <em>Users → Clear all step-ups</em>.</li>
 <li>In each instance's Demo Controls, turn <strong>Trigger Demo Incident</strong> off. Its synthetic incident would crowd the room stack.</li>
@@ -133,6 +134,7 @@ ul,ol{padding-left:1.4rem}
 <ul>
 <li><strong>Get off VPN.</strong> Sign in from the venue network. A VPN exit far from the room makes your own sign-ins, and any shared persona's, look like Impossible Travel.</li>
 <li><strong>Use each passcode once, in order.</strong> Skipping ahead works, but the codes before it then stop working.</li>
+<li><strong>The persona codes are your team's.</strong> To sign in as the room's victim or a trusted persona, choose <em>Sign in with Duo</em> with that persona's username, then <em>Other options</em> and <em>Bypass Code</em> in Duo, and enter the code from the card. Each code allows a few sign-ins (5 by default) until the time printed on the card.</li>
 <li><strong>Privacy.</strong> Read-only users in Identity Intelligence see every identity in the tenant, with emails and sign-in IP addresses, including each other's. They cannot change anything.</li>
 </ul>
 <p><strong>5.1, the Identity Intelligence walkthrough.</strong> You drive it on screen through Administrator SSO. Attendees follow along with their own read-only sign-in: their email, the temporary password and a passcode, then a password of their own.</p>
@@ -141,7 +143,7 @@ ul,ol{padding-left:1.4rem}
 <li>Then open the victim's page: its trust level has dropped, and it fails MFA Flood and Impossible Travel. The times line up with the takeover record.</li>
 </ul>
 <p>Don't mention Trust Monitor: it left the Admin Panel in July 2026.</p>
-<p><strong>5.2, your instance.</strong> Tell attendees: &quot;Open your instance's https URL from the card, enter the access key and pick your industry.&quot; The https name is a new origin, and browser storage is per origin. The industry and the Demo Controls start from their defaults there, and <strong>Cisco AI Defense starts off</strong>, so turn on what the lab step asks for. Then <em>Sign in with Duo</em> with the participant account and a passcode, and the identity badge shows who is signed in.</p>
+<p><strong>5.2, your instance.</strong> Tell attendees: &quot;Open your instance's https URL from the card, enter the access key and pick your industry.&quot; The https name is a new origin, and browser storage is per origin. The industry and the Demo Controls start from their defaults there, and <strong>Cisco AI Defense starts off</strong>, so turn on what the lab step asks for. Then <em>Sign in with Duo</em> with the participant account and a passcode, and the identity badge shows who is signed in. With the card's persona codes they can also sign in as a trusted persona or as the room's victim, whose turns the Identity Risk Gate refuses (claim 2).</p>
 <p><strong>The spray step.</strong> On the Prompt Injection Spray card:</p>
 <ul>
 <li>set <strong>Attacker identity</strong> to the room's victim;</li>
@@ -155,7 +157,7 @@ ul,ol{padding-left:1.4rem}
 </ul>
 <h2>After the workshop, in this order</h2>
 <ol>
-<li><code>deploy/lab5/lab5-setup down &lt;workshop.yaml&gt;</code>. On each reachable box it reverts the Lab 5 keys and the HEC host. Then it deletes the tunnels and DNS records. A box Show has already destroyed fails the run, which is expected: nothing is left on it.</li>
+<li><code>deploy/lab5/lab5-setup down &lt;workshop.yaml&gt;</code>. On each reachable box it reverts the Lab 5 keys and the HEC host. Then it deletes the tunnels and DNS records. A box Show has already destroyed fails the run, which is expected: nothing is left on it. It deletes no persona bypass code, because <code>valid_secs</code> is their cutoff, and its last line says when the last batch stops working.</li>
 <li>Rotate the credentials the boxes held: the Web SDK secret, the read-only Status Admin API key and the CII API client (I1).</li>
 <li>The room stack: run its Lab 5 teardown on the TA side, and confirm CII's webhook target is gone before the stack is destroyed.</li>
 <li>Personas: <code>py scripts/identity/provision_personas.py --reset</code>. It re-enables and unlocks the contained victim and resyncs every HOTP token. Then <em>Clear all step-ups</em> and CII <em>Reset Feedback</em>. The trusted personas' exclusions stay.</li>
@@ -165,7 +167,7 @@ ul,ol{padding-left:1.4rem}
 <h2>Open questions</h2>
 <ul>
 <li><strong>S1</strong> (marked for discussion): how the victim's <code>FAILED_CHECK</code> reaches a stack that only exists from T-1. It decides when the takeover runs.</li>
-<li><strong>How attendees sign in as the victim or a trusted persona.</strong> Section 4.3 gave teams bypass codes for the personas. Section 12.4 gave participant accounts HOTP passcodes instead, and the persona HOTP codes are for the scripts only. The tools build no persona bypass codes until this is decided.</li>
+<li><strong>A persona's bypass code in the Universal Prompt.</strong> Each persona also has a hardware token (script-only), which Duo may offer first. Attendees pick <em>Other options</em>, then <em>Bypass Code</em>. A code typed into the wrong method counts as a failed attempt toward the lockout. Check the flow in the dry run.</li>
 <li><strong>Spike S15</strong> has not run. It should prove three things: that API group membership grants CII Read-Only, that a password plus an HOTP passcode reaches CII, and what disabling does to a live CII session.</li>
 <li><strong>The victim checks in <code>status</code></strong> (victim blocked on each box, victim failing in CII, its events in the stack) arrive with the identity gate and the S1 decision.</li>
 </ul>
@@ -185,6 +187,10 @@ ul,ol{padding-left:1.4rem}
 <tr>
 <td>once</td>
 <td>Admin Panel User access: Sign-in admits PseudoCo Workforce and CII Read-Only; VPN admits PseudoCo Workforce</td>
+</tr>
+<tr>
+<td>once</td>
+<td>Admin Panel: the PseudoCo Lab: Sign-in policy allows bypass code + hardware token</td>
 </tr>
 <tr>
 <td>once</td>
@@ -208,7 +214,7 @@ ul,ol{padding-left:1.4rem}
 </tr>
 <tr>
 <td>T-0</td>
-<td><code>lab5-setup status</code>, <code>persona_activity.py selfcheck</code>, <em>Clear all step-ups</em></td>
+<td><code>lab5-setup status</code>, <code>persona_activity.py selfcheck</code>, <em>Clear all step-ups</em>; <code>lab5-setup handouts</code> if the cards' persona codes run out before the lab ends</td>
 </tr>
 <tr>
 <td>after</td>

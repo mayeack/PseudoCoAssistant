@@ -1,5 +1,5 @@
 #!/bin/bash
-# lab5-setup <check|up|status|down> workshop.yaml | expire [workshop.yaml]   (deploy/lab5/README.md)
+# lab5-setup <check|up|status|handouts|down> workshop.yaml | expire [workshop.yaml]   (deploy/lab5/README.md)
 #
 # Runs deploy/lab5/lab5_setup.py with an interpreter that has its
 # dependencies (paramiko, PyYAML, duo_client). LAB5_PYTHON picks one explicitly; otherwise

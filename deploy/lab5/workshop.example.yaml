@@ -33,7 +33,21 @@ participants:
   # cii_url: https://...      # the Identity Intelligence sign-in link printed on the handout
   # email_domain: pseudocoassistant.com   # defaults to `zone`
 
-# personas_file: scripts/identity/personas.yaml   # the cast up and expire never touch (default)
+# Persona bypass codes (plan 4.3): `up` puts one small batch per box on that
+# box's handout card, for room.victim and each room.trusted persona, so a team
+# can sign in as them (their HOTP tokens stay script-only). `lab5-setup
+# handouts` issues a fresh batch, e.g. on lab-day morning when `up` ran the day
+# before. Nothing deletes them early: they stop at valid_hours (Duo's
+# valid_secs), so cover lab day from the time they are issued. Needs
+# participants.enabled (the codes ride on its handout).
+bypass_codes:
+  enabled: true
+  count: 1                   # codes per persona per box, 1-10
+  reuse_count: 5             # sign-ins each code allows, 1-20
+  valid_hours: 12            # from the time they are issued, 1-72
+
+# personas_file: scripts/identity/personas.yaml   # the cast (default): expire never touches it, up only
+#                                                 # gives the room's personas their bypass codes
 
 # Optional 12.1 settings. Leave a key out to keep the app default. Checked
 # before anything connects: the app cannot start with a value like "12h".
