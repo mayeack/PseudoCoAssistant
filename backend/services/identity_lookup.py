@@ -459,7 +459,9 @@ def _cii_not_found(body: Any) -> bool:
     ``data`` and no error at all, whose ``getEndUser`` is null or holds a
     present, null ``endUserDetails``. The second is the published schema's
     answer for a user CII has no record of yet (``GetEndUserOutput!`` with a
-    nullable ``endUserDetails``).
+    nullable ``endUserDetails``). No error at all is ``errors`` absent, null
+    or an empty list; any other value carries one, a falsy one (``{}``,
+    ``""``, 0, false) included, here and in ``_cii_parse``.
 
     An answer that carries any error is never this answer, whatever the error
     says or where it sits. Telling a missing user from a missing permission,

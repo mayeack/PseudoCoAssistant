@@ -63,7 +63,10 @@ def not_found(doc: Any) -> bool:
     """Is this GraphQL answer CII's "no such user"? The gate's rule
     (``identity_lookup._cii_not_found``): an answer with ``data`` and no error
     at all, whose ``getEndUser`` is null or holds a present, null
-    ``endUserDetails``. An answer with any error never is, whatever it says."""
+    ``endUserDetails``. An answer with any error never is, whatever it says.
+    No error at all is ``errors`` absent, null or an empty list; any other
+    value carries one, a falsy one (``{}``, ``""``, 0, false) included, here
+    and in ``parse_end_user``."""
     if not isinstance(doc, dict) or doc.get("errors") not in (None, []) or "data" not in doc:
         return False
     data = doc.get("data")

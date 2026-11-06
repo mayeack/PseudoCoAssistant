@@ -1,5 +1,5 @@
 {
-  "_about": "getEndUser answers that the app's gate (backend/services/identity_lookup._cii_parse) and the Mac's persona self-check (deploy/lab5/lab5_cii.parse_end_user) must read the same way. expect: found (details, no error), not_found (CII's 'no such user': no error at all, and getEndUser null or a present, null endUserDetails), unavailable (anything else, every answer that carries an error included, whatever the error says). An unavailable case may carry trust, failing and reasons: what a partial answer did say, which the gate keeps and still blocks on (reasons: its block; none: nothing against the user), while the self-check reads every unavailable answer as a failed query. If spikes S5/S6 show CII answers a login it has no record of with an error, that exact answer is added here as not_found and matched exactly in both copies, never by its words. Run by tests/test_identity_gate.py and tests/test_identity_personas.py.",
+  "_about": "getEndUser answers that the app's gate (backend/services/identity_lookup._cii_parse) and the Mac's persona self-check (deploy/lab5/lab5_cii.parse_end_user) must read the same way. expect: found (details, no error), not_found (CII's 'no such user': no error at all, and getEndUser null or a present, null endUserDetails), unavailable (anything else, every answer that carries an error included, whatever the error says). No error at all is errors absent, null or an empty list; any other errors value carries one, an empty object, an empty string, 0 or false included. An unavailable case may carry trust, failing and reasons: what a partial answer did say, which the gate keeps and still blocks on (reasons: its block; none: nothing against the user), while the self-check reads every unavailable answer as a failed query. If spikes S5/S6 show CII answers a login it has no record of with an error, that exact answer is added here as not_found and matched exactly in both copies, never by its words. Run by tests/test_identity_gate.py and tests/test_identity_personas.py.",
   "login": "avery.kim@pseudocoassistant.com",
   "cases": [
     {
@@ -622,6 +622,178 @@
           "getEndUser": null
         },
         "errors": "boom"
+      }
+    },
+    {
+      "name": "errors an empty object, with details (an errors value that is not a list is never 'no error')",
+      "expect": "unavailable",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [],
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": {}
+      }
+    },
+    {
+      "name": "errors an empty object, getEndUser null (an errors value that is not a list is never 'no error', so never 'no such user')",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": {}
+      }
+    },
+    {
+      "name": "errors an empty string, with details (an errors value that is not a list is never 'no error')",
+      "expect": "unavailable",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [],
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": ""
+      }
+    },
+    {
+      "name": "errors an empty string, getEndUser null (an errors value that is not a list is never 'no error', so never 'no such user')",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": ""
+      }
+    },
+    {
+      "name": "errors 0, with details (an errors value that is not a list is never 'no error')",
+      "expect": "unavailable",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [],
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": 0
+      }
+    },
+    {
+      "name": "errors 0, getEndUser null (an errors value that is not a list is never 'no error', so never 'no such user')",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": 0
+      }
+    },
+    {
+      "name": "errors false, with details (an errors value that is not a list is never 'no error')",
+      "expect": "unavailable",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [],
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": false
+      }
+    },
+    {
+      "name": "errors false, getEndUser null (an errors value that is not a list is never 'no error', so never 'no such user')",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": false
+      }
+    },
+    {
+      "name": "errors an empty list, getEndUser null (no error at all)",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": []
+      }
+    },
+    {
+      "name": "errors null, endUserDetails null (no error at all)",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": null
+          }
+        },
+        "errors": null
+      }
+    },
+    {
+      "name": "errors an empty list, with details (no error at all)",
+      "expect": "found",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [],
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": []
       }
     }
   ],
