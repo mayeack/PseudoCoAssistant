@@ -120,23 +120,17 @@ before any screen or model.
      of yet, such as a new participant account, gets `identity_check="ok"`
      and, with nothing against it, is allowed. The badge shows no trust
      level for it.
-   - CII's "no such user" is read from the answer's shape, never from the
-     wording of just any error. The user's details stop at `endUserDetails`
-     (present and null: the published `GetEndUserOutput!` answer for a user
-     CII has no record of), at `getEndUser`, or at `data` (a non-null field
-     failed). Any error sits on `getEndUser` or its `endUserDetails`, at or
-     below where the details stop, says the user was not found, and carries
-     no other code. Its words must be about the user itself ("End user …
-     not found", "User does not exist", "No such user"): "No user
-     permissions are granted" or "User pool not found" is about something
-     else, so it is an error, never that answer. So are "No user
-     permissions.", "Token has no user.", "No user (or group) permission
-     granted" and "Required scope user:read.all not found". A login is an
-     address: an "@" with a word character after it and no space in it,
-     bare, quoted or in parentheses. A word that ends a sentence, a scope,
-     or a quoted or parenthesized word is never one, and a bare "no user"
-     counts only as the whole message.
-   - Any other answer that carries an error is `unavailable`, details or not:
+   - CII's "no such user" is read from the answer's shape alone: an answer
+     with no error at all, whose `getEndUser` is null or holds a present,
+     null `endUserDetails` (the published `GetEndUserOutput!` answer for a
+     user CII has no record of). No error is ever that answer, whatever it
+     says or where it sits: telling "User … not found" from "Permission
+     read:user not found" or "Role end-user does not exist" by their words is
+     a guess, and a wrong guess turns a CII failure into a clean check.
+     Spikes S5/S6 capture CII's real answer for a login it has no record of;
+     if it is an error, that exact answer is added to the rule and the shared
+     table, matched exactly.
+   - Any answer that carries an error is `unavailable`, details or not:
      a request-level error (no `data`), an error elsewhere or without a path,
      or a partial answer (say, `failingChecks` failed and came back null), so
      it can never pass for a clean check.

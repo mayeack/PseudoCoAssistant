@@ -550,9 +550,9 @@ def test_cii_client() -> None:
           selection(cii.END_USER_QUERY) == selection(app_query), f"{cii.END_USER_QUERY!r} vs {app_query!r}")
 
     # CII's "no such user" is one rule in two copies (the Mac's tool cannot
-    # import the app). Pin them together: the rule's code, modulo names, and
-    # every constant it reads, so a one-sided edit fails here even where the
-    # shared answers below do not reach it.
+    # import the app). Pin them together: the rule's code, modulo names, so a
+    # one-sided edit fails here even where the shared answers below do not
+    # reach it. The rule reads no constant: it is the answer's shape alone.
     app_tree, mac_tree = ast.parse(app_src), ast.parse((ROOT / "deploy" / "lab5" / "lab5_cii.py").read_text())
 
     def assigned(tree, name):
@@ -577,20 +577,9 @@ def test_cii_client() -> None:
 
         return ast.dump(ast.Module(body=[Rename().visit(copy.deepcopy(s)) for s in body], type_ignores=[]))
 
-    app_re = assigned(app_tree, "_CII_USER_NOT_FOUND_RE")
     pins = [
-        ("the not-found codes", ast.literal_eval(assigned(app_tree, "CII_NOT_FOUND_CODES").args[0]),
-         set(cii.NOT_FOUND_CODES)),
-        ("the wording pattern", ast.literal_eval(app_re.args[0]), cii._USER_NOT_FOUND_RE.pattern),
-        ("the pattern's flags", [ast.unparse(a) for a in app_re.args[1:]],
-         ["re.IGNORECASE"] if cii._USER_NOT_FOUND_RE.flags & ~re.UNICODE == re.IGNORECASE else ["?"]),
-        ("where the error may sit", ast.literal_eval(assigned(app_tree, "_CII_NOT_FOUND_PATHS")), cii.NOT_FOUND_PATHS),
-        ("how much of a message is read", ast.literal_eval(assigned(app_tree, "CII_MESSAGE_SCAN_MAX")),
-         cii.MESSAGE_SCAN_MAX),
         ("the rule's code (_cii_not_found / not_found)", canonical(function(app_tree, "_cii_not_found")),
          canonical(function(mac_tree, "not_found"))),
-        ("how an error's codes are read (_cii_error_codes / _error_codes)",
-         canonical(function(app_tree, "_cii_error_codes")), canonical(function(mac_tree, "_error_codes"))),
     ]
     for what, app_value, mac_value in pins:
         check(f"CII 'no such user', {what}: the self-check's copy is the gate's (identity_lookup)",
@@ -637,22 +626,22 @@ def test_cii_client() -> None:
         else:
             check(f"{case['name']}: the user's details", got is not None and got["found"] is True
                   and got["trust"] == case["trust"] and got["failing_checks"] == sorted(case["failing"]), str(got))
-    # The wording half of the rule, on both places the error may sit (the gate runs the same table).
+    # No error is ever "not in CII yet", whatever it says (the gate runs the same table).
     shapes = (("on getEndUser", {"getEndUser": None}, ["getEndUser"]),
               ("on endUserDetails", {"getEndUser": {"endUserDetails": None}}, ["getEndUser", "endUserDetails"]))
-    for expect, what in (("not_found", "not in CII yet"), ("unavailable", "a failed query (Lab5Error), never not in CII yet")):
-        misread = []
-        for message in table["wording"][expect]:
-            for where, data, path in shapes:
-                try:
-                    got = cii.parse_end_user({"data": data, "errors": [{"message": message, "path": path}]})
-                except Lab5Error:
-                    got = None
-                if (got == {"trust": "UNKNOWN", "failing_checks": [], "found": False}) != (expect == "not_found") \
-                        or (expect == "unavailable" and got is not None):
-                    misread.append(f"{message!r} {where}: {got}")
-        check(f"every {expect} wording of the shared table, on getEndUser and on endUserDetails: {what}",
-              not misread, "; ".join(misread))
+    misread = []
+    for message in table["error_messages"]["messages"]:
+        for where, data, path in shapes:
+            try:
+                got = cii.parse_end_user({"data": data, "errors": [{"message": message, "path": path}]})
+            except Lab5Error as exc:
+                got = None
+                if "never read as" not in str(exc):
+                    misread.append(f"{message!r} {where}: the error does not say why ({exc})")
+            if got is not None:
+                misread.append(f"{message!r} {where}: {got}")
+    check("every error message of the shared table, on getEndUser and on endUserDetails: a failed query "
+          "(Lab5Error), never 'not in CII yet'", not misread, "; ".join(misread)[:600])
 
 
 # =========================================================================== launchd

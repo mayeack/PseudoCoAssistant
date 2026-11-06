@@ -43,10 +43,10 @@ answered about this user, where "no such user" (``not_found``) is an answer:
 a user CII has no record of yet (a new participant account) is not an
 outage. ``sources`` says what each one actually answered; a source that could
 not be asked (no CII login known) is ``unavailable`` (error ``no_login``),
-never ``not_found``. CII's "no such user" is read from the answer's shape,
-never from the wording of just any error (``_cii_not_found``): a failure
-taken for one would make the check "ok" and let the turn through even with
-``IDENTITY_FAIL_OPEN`` off.
+never ``not_found``. CII's "no such user" is read from the answer's shape
+alone, an answer with no error at all (``_cii_not_found``): a failure taken
+for one would make the check "ok" and let the turn through even with
+``IDENTITY_FAIL_OPEN`` off, so no error ever counts as one, whatever it says.
 """
 from __future__ import annotations
 
@@ -100,57 +100,6 @@ CII_END_USER_QUERY = (
 TOKEN_REFRESH_MARGIN_S = 300.0
 #: The token's life when the token endpoint does not say (CII documents 10 h).
 TOKEN_DEFAULT_LIFETIME_S = 10 * 3600.0
-
-#: GraphQL error codes that may sit on CII's "no such user" error, compared
-#: upper-cased with everything but letters and digits removed (``NOT_FOUND``,
-#: ``NotFound``, ``not-found`` all read NOTFOUND). Every code the error carries
-#: (``extensions.code``, ``extensions.errorType``, AppSync's ``errorType``) must
-#: be one of these: any other code is not that answer.
-CII_NOT_FOUND_CODES = frozenset({"NOTFOUND", "USERNOTFOUND", "ENDUSERNOTFOUND"})
-#: How much of an error's message the wording is looked for in.
-CII_MESSAGE_SCAN_MAX = 1000
-#: The wording of a "no such user" error: a sentence about the user itself (an
-#: end user, or its record, account, profile or details, with its login if
-#: any) that is not found or does not exist; "no such user" at the end of a
-#: sentence or before a colon; "no user" as the whole message; or "no [such]
-#: user" before "found" or "exists", or before a login, after "with", "for",
-#: "by", "matching" or "named" (and "login", "email", "username" or "id") or
-#: not. A login is an address: an "@" with a word character after it and no
-#: space in it, bare, quoted, in backticks or in parentheses. So a word that
-#: ends a sentence, a scope ("user:read.all") and a quoted or parenthesized
-#: word ("no user 'read' scope", "no user (or group)") are never one.
-#: Anything else is not the user: other words between "user" and the verb
-#: ("user pool", "user permission", "scope user.read"), or after "no user"
-#: ("no user permissions.", "no user, group or role", "no user:read", "no
-#: user for id token"), or a "no user" that ends a sentence about something
-#: else ("Token has no user.").
-#: Checked only on an error that sits on ``getEndUser`` or its
-#: ``endUserDetails`` (``_CII_NOT_FOUND_PATHS``, see ``_cii_not_found``).
-#: ``deploy/lab5/lab5_cii.py`` holds the same pattern (test_identity_personas pins it).
-_CII_USER_NOT_FOUND_RE = re.compile(
-    # A sentence whose subject is the user itself: "<end> user [record|account|...] [with login] [<login>]
-    # [is|was|has] not (been) found / does not exist". A login is an address, bare or quoted.
-    r"\b(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
-    r"(?:\s+(?:with|for|having|by)\s+(?:login|email|username|id))?"
-    r"(?:(?:\s*:\s*|\s+)(?:\"[^\s\"@]{1,200}@(?=\w)[^\s\"]{0,200}\"|'[^\s'@]{1,200}@(?=\w)[^\s']{0,200}'"
-    r"|`[^\s`@]{1,200}@(?=\w)[^\s`]{0,200}`|\([^\s()@]{1,200}@(?=\w)[^\s()]{0,200}\)"
-    r"|[^\s\"'`()@]{1,200}@(?=\w)[^\s\"'`()]{0,200}))?"
-    r"(?:\s*:\s*|\s+)(?:(?:is|was|has|had)\s+)?(?:not\s+(?:been\s+)?found"
-    r"|(?:(?:does|did)\s+not|doesn't|didn't|not)\s+exist|(?:could|can)\s*not\s+be\s+found|can't\s+be\s+found)\b"
-    # "No such user" at the end of a sentence (a mark before a space or the end), or before a colon.
-    r"|\bno\s+such\s+(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
-    r"\s*(?:$|[.;!?](?=\s|$)|:(?=\s|$))"
-    # "No user" as the whole message.
-    r"|^\s*no\s+(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?\s*[.!]?\s*$"
-    # "No [such] user" found / exists, or before a login (an address, bare or quoted), after "with login"
-    # (for, by, matching, named; email, username, id) or not.
-    r"|\bno\s+(?:such\s+)?(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
-    r"(?:\s+(?:found|exists?)\b"
-    r"|(?:\s+(?:with|for|by|matching|named)(?:\s+(?:login|email|username|id))?)?(?:\s*:\s*|\s+)"
-    r"(?:\"[^\s\"@]{1,200}@(?=\w)[^\s\"]{0,200}\"|'[^\s'@]{1,200}@(?=\w)[^\s']{0,200}'"
-    r"|`[^\s`@]{1,200}@(?=\w)[^\s`]{0,200}`|\([^\s()@]{1,200}@(?=\w)[^\s()]{0,200}\)"
-    r"|[^\s\"'`()@]{1,200}@(?=\w)[^\s\"'`()]{0,200}))",
-    re.IGNORECASE)
 
 _CACHE_MAX = 2048
 _FAILING_CHECKS_MAX = 32
@@ -505,75 +454,34 @@ def _cii_query(login: str, token: str) -> Tuple[Optional[httpx.Response], Option
     return response, None
 
 
-def _cii_error_codes(error: Mapping[str, Any]) -> List[str]:
-    """Every code a GraphQL error carries (``extensions.code``,
-    ``extensions.errorType``, AppSync's ``errorType``), normalized as
-    ``CII_NOT_FOUND_CODES`` is."""
-    extensions = error.get("extensions") if isinstance(error.get("extensions"), Mapping) else {}
-    codes = (extensions.get("code"), extensions.get("errorType"), error.get("errorType"))
-    return [re.sub(r"[^A-Z0-9]+", "", str(code).upper()) for code in codes if code]
-
-
-#: Where a CII "no such user" error may sit: on ``getEndUser`` itself, or on
-#: its ``endUserDetails`` (the published ``GetEndUserOutput!`` keeps the
-#: wrapper and nulls the details).
-_CII_NOT_FOUND_PATHS = (["getEndUser"], ["getEndUser", "endUserDetails"])
-
-
 def _cii_not_found(body: Any) -> bool:
-    """Whether a GraphQL answer is CII's own "no such user".
-
-    The user's details must stop at one of three places, and nowhere deeper:
-    ``data`` is null (a non-null field failed and GraphQL nulled its parent),
-    ``getEndUser`` is null, or ``getEndUser`` is an object whose
-    ``endUserDetails`` is present and null. The last is the published schema's
+    """Whether a GraphQL answer is CII's own "no such user": an answer with
+    ``data`` and no error at all, whose ``getEndUser`` is null or holds a
+    present, null ``endUserDetails``. The second is the published schema's
     answer for a user CII has no record of yet (``GetEndUserOutput!`` with a
-    nullable ``endUserDetails``). With no error, a null ``getEndUser`` or null
-    details is the answer; a null ``data`` is not. With errors, every one must
-    sit on ``getEndUser`` or its ``endUserDetails`` (``_CII_NOT_FOUND_PATHS``),
-    at or below where the details stop, say that the user was not found
-    (``_CII_USER_NOT_FOUND_RE``, on its first ``CII_MESSAGE_SCAN_MAX``
-    characters), and carry no code other than ``CII_NOT_FOUND_CODES``.
-    Anything else is not an answer: a request-level
-    error (no ``data``: a query the schema rejects), an error at another path
-    or none (a deeper partial failure, a tenant or permission problem), or
-    other wording.
+    nullable ``endUserDetails``).
 
-    ``deploy/lab5/lab5_cii.py`` applies the same rule on the Mac, and
-    tests/test_identity_personas.py pins the two copies (code and constants)
-    together; ``tests/fixtures/cii_end_user_answers.json`` holds the cases
-    both must read the same way."""
-    if not isinstance(body, Mapping) or "data" not in body:
+    An answer that carries any error is never this answer, whatever the error
+    says or where it sits. Telling a missing user from a missing permission,
+    scope, role or tenant by the words of a message is a guess, and a wrong
+    guess turns a CII failure into a clean check (an allow under
+    IDENTITY_FAIL_OPEN=false). Spikes S5/S6 capture CII's real answer for a
+    login it has no record of; if that answer is an error, it is added here
+    and to the shared table matched exactly, never by its wording.
+
+    ``deploy/lab5/lab5_cii.py`` applies the same rule on the Mac,
+    tests/test_identity_personas.py pins the two copies' code together, and
+    ``tests/fixtures/cii_end_user_answers.json`` holds the answers both must
+    read the same way."""
+    if not isinstance(body, Mapping) or body.get("errors") not in (None, []) or "data" not in body:
         return False
-    data, errors = body.get("data"), body.get("errors")
-    if data is None:
-        stop = 0
-    elif isinstance(data, Mapping) and "getEndUser" in data:
-        end_user = data.get("getEndUser")
-        if end_user is None:
-            stop = 1
-        elif (isinstance(end_user, Mapping) and "endUserDetails" in end_user
-              and end_user.get("endUserDetails") is None):
-            stop = 2
-        else:
-            return False
-    else:
+    data = body.get("data")
+    if not isinstance(data, Mapping) or "getEndUser" not in data:
         return False
-    if not errors:
-        return stop > 0
-    if not isinstance(errors, list):
-        return False
-    for error in errors:
-        if not isinstance(error, Mapping):
-            return False
-        path = error.get("path")
-        if path not in _CII_NOT_FOUND_PATHS or len(path) < stop:
-            return False
-        if not _CII_USER_NOT_FOUND_RE.search(str(error.get("message") or "")[:CII_MESSAGE_SCAN_MAX]):
-            return False
-        if any(code not in CII_NOT_FOUND_CODES for code in _cii_error_codes(error)):
-            return False
-    return True
+    end_user = data.get("getEndUser")
+    if end_user is None:
+        return True
+    return isinstance(end_user, Mapping) and "endUserDetails" in end_user and end_user.get("endUserDetails") is None
 
 
 def _cii_details(details: Mapping[str, Any]) -> Dict[str, Any]:
@@ -588,7 +496,7 @@ def _cii_parse(body: Any) -> Dict[str, Any]:
     """One GraphQL answer to ``{state, trust_level, failing_checks, [error], fetched_at}``.
 
     CII's "no such user" (``_cii_not_found``) is ``not_found``. Details with no
-    error are ``ok``. Any other answer that carries errors is ``unavailable``,
+    error are ``ok``. Any answer that carries an error is ``unavailable``,
     details or not: a partial answer (say, ``failingChecks`` failed and came
     back null) would otherwise read as a user with no failing checks. What a
     partial answer did say is kept, though: GraphQL nulls only the fields that
@@ -604,7 +512,7 @@ def _cii_parse(body: Any) -> Dict[str, Any]:
     end_user = data.get("getEndUser") if isinstance(data, Mapping) else None
     details = end_user.get("endUserDetails") if isinstance(end_user, Mapping) else None
     learned = _cii_details(details) if isinstance(details, Mapping) else {}
-    if body.get("errors"):
+    if body.get("errors") not in (None, []):
         return {**_unavailable("graphql_error"), "trust_level": None, "failing_checks": [], **learned}
     if not learned:
         return _unavailable("bad_response")

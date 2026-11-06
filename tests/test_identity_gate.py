@@ -446,22 +446,24 @@ def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
                   st["sources"] == {"duo": "ok", "cii": "ok"} and st["available"] is True
                   and st["trust_level"] == case["trust"]
                   and sorted(st["failing_checks"]) == sorted(case["failing"]), str(st))
-    # The wording half of the rule, on both places the error may sit.
+    # No error is ever "no such user", whatever it says: every message of the
+    # shared table, on both places such an error could sit, is unavailable.
     shapes = (("on getEndUser", {"getEndUser": None}, ["getEndUser"]),
               ("on endUserDetails", {"getEndUser": {"endUserDetails": None}}, ["getEndUser", "endUserDetails"]))
-    for expect, what in (("not_found", "CII's 'no such user' (an answer: check ok, allowed)"),
-                         ("unavailable", "never 'no such user': unavailable, and fail-closed blocks it")):
-        misread = []
-        for message in table["wording"][expect]:
-            for where, data, path in shapes:
-                fake.cii_body = {"data": data, "errors": [{"message": message, "path": path}]}
-                lookup.clear_cache()
-                st = lookup.lookup("avery.kim")
-                closed = gate.decide(st, fail_open=False)
-                if st["sources"]["cii"] != expect or (closed["verdict"] == "allow") != (expect == "not_found"):
-                    misread.append(f"{message!r} {where}: {st['sources']['cii']}, {closed['verdict']}")
-        check(f"every {expect} wording of the shared table, on getEndUser and on endUserDetails: {what}",
-              not misread, "; ".join(misread))
+    misread = []
+    for message in table["error_messages"]["messages"]:
+        for where, data, path in shapes:
+            fake.cii_body = {"data": data, "errors": [{"message": message, "path": path}]}
+            lookup.clear_cache()
+            st = lookup.lookup("avery.kim")
+            closed = gate.decide(st, fail_open=False)
+            opened = gate.decide(st, fail_open=True)
+            if (st["sources"]["cii"] != "unavailable" or closed["reasons"] != ["identity_unavailable"]
+                    or opened["check"] != "unavailable"):
+                misread.append(f"{message!r} {where}: {st['sources']['cii']}, {closed['verdict']}")
+    check("every error message of the shared table, on getEndUser and on endUserDetails: unavailable, never "
+          "'no such user' (fail-closed blocks it as not verifiable, fail-open says unavailable)",
+          not misread, "; ".join(misread))
     fake.cii_body = None
     lookup.clear_cache()
 
@@ -518,15 +520,20 @@ def test_victim_self_check_on_a_partial_answer() -> None:
 
 
 def test_victim_self_check_on_a_refused_client() -> None:
-    print("lab5-setup status: a code-less permission or scope error is 'cannot verify', never 'not in CII yet'")
+    print("lab5-setup status: an error on getEndUser is 'cannot verify', never 'not in CII yet', whatever it says")
     _configure(True)
     fake = _fresh_fake()
     fake.set_user("avery.kim", trust="NEUTRAL")
-    # Each once read as CII's "no such user" (a quoted or parenthesized word, or a
-    # scope, taken for the login), so the row said WARN "trust no record in CII yet".
+    # Each once read as CII's "no such user" through the wording rule (a scope,
+    # a role, a quoted word or another principal taken for the user or its
+    # login), so the row said WARN "trust no record in CII yet".
     for message in ("No user (or group) permission granted to this API client",
                     "No user 'read' scope granted to this API client",
-                    "Required scope user:read.all not found in access token"):
+                    "Required scope user:read.all not found in access token",
+                    "Permission read:user not found for this API client",
+                    "Role end-user does not exist",
+                    "No user for abc123XYZ@clients",
+                    "User abc123XYZ@clients not found"):
         for where, data, path in (("on getEndUser", {"getEndUser": None}, ["getEndUser"]),
                                   ("on endUserDetails", {"getEndUser": {"endUserDetails": None}},
                                    ["getEndUser", "endUserDetails"])):
