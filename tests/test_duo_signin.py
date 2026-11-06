@@ -1913,6 +1913,112 @@ def test_redaction_bounded_and_safe() -> None:
           and any(l.endswith("outer chatty ?code=[REDACTED]") for _, l in cap.lines))
 
 
+_MB = 1 << 20
+_BUDGET_PER_MB = 0.050          # seconds per MB of input, for any one rule
+
+
+def _timed_sub(pattern, text: str) -> float:
+    started = time.perf_counter()
+    pattern.sub("X", text)
+    return time.perf_counter() - started
+
+
+def test_redaction_linear_time() -> None:
+    print("redaction: every rule and the secrets pattern stay linear on 1 MB adversarial inputs (<= 50 ms per MB)")
+    from urllib.parse import quote
+
+    from backend.logging import redaction
+
+    secrets = redaction.secrets_pattern()
+    check("the configured secrets are compiled (the Web SDK secret, ACCESS_KEY)", secrets is not None)
+    patterns = list(dict.fromkeys([p for p, _ in redaction._FULL + redaction._COMMON] + [secrets]))
+    # Repeated to 1 MB each: the shapes the finding named, runs of token
+    # characters, and near misses of every rule (a name with no value, a
+    # value with no end, a secret one character short).
+    units = ["eyJ", "-eyJ", "eyJ-", ".eyJ", "eyJ.", "eyJaaaa.", "eyJaaaa.aaaa", "a=", "%3D", "Bearer ", "bearer\t",
+             "Basic ", "a", "A9_-", "-", "_", ".", "=", "?", "&", "?a=", "'", '"', "\\", "\\'", "'a", "'c", '"x',
+             " ", "\t", "\n", "\na", " c", ";", "%", "?code", "&code=", "?client_", "'Cookie': ", "'Cookie': '",
+             '"access_token":"', "\nAuthorization", "\nSet-Cookie:", " md_access", " md_access=", " client_secret",
+             " code=", "(b'Set-Cookie', b", "Bearer abc ", CLIENT_SECRET[:-1], KEY[:-1], quote(KEY + "/")[:-1]]
+    slow = []
+    for pattern in patterns:
+        for unit in units:
+            text = (unit * (_MB // len(unit) + 1))[:_MB]
+            # 64 KB first: a super-linear rule fails here in seconds instead
+            # of running for minutes on the full megabyte.
+            if _timed_sub(pattern, text[:64 * 1024]) > _BUDGET_PER_MB:
+                slow.append((pattern.pattern[:60], unit, "64 KB over the 1 MB budget"))
+                continue
+            # The best of three: only a slow run is measured again (noise).
+            took = _timed_sub(pattern, text)
+            for _ in range(2):
+                if took <= _BUDGET_PER_MB:
+                    break
+                took = min(took, _timed_sub(pattern, text))
+            if took > _BUDGET_PER_MB:
+                slow.append((pattern.pattern[:60], unit, f"{took * 1000:.0f} ms"))
+    check(f"{len(patterns)} patterns x {len(units)} inputs of 1 MB: each within {_BUDGET_PER_MB * 1000:.0f} ms",
+          not slow and len(patterns) >= 14, str(slow[:5]))
+
+    jwt = r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,}+\.[A-Za-z0-9_-]{4,}+\.[A-Za-z0-9_-]*+"
+    check("the JWT rule starts only where a run of base64url characters starts, each segment one possessive class",
+          any(p.pattern == jwt for p, _ in redaction._COMMON))
+    check("...and still takes a JWT after '=', a space or a quote, never one glued to a longer token",
+          redaction.redact_common("t=eyJhbGci.eyJzdWIi.c2ln 'eyJhbGci.eyJzdWIi.c2ln' x-eyJhbGci.eyJzdWIi.c2ln")
+          == "t=[REDACTED] '[REDACTED]' x-eyJhbGci.eyJzdWIi.c2ln")
+    check("the docstring's linear-time claim names this test",
+          "test_redaction_linear_time" in (redaction.__doc__ or ""))
+
+
+def test_redaction_cap() -> None:
+    print("redaction: a text over 64 KB is cut first, with a marker, and the cut never keeps half a credential")
+    from backend.logging import redaction
+
+    cap = redaction.MAX_SCAN_CHARS
+    marker = re.compile(r" \[TRUNCATED: (\d+) more characters\]$")
+    check("MAX_SCAN_CHARS is 64 KB", cap == 64 * 1024)
+    started = time.perf_counter()
+    out = redaction.redact("-eyJ" * (_MB // 4))
+    took = time.perf_counter() - started
+    check("1 MB of '-eyJ' (one token) through the full treatment: fast, and only the marker is kept",
+          took < 0.5 and out == redaction.TRUNCATED_MARKER.format(_MB), f"{took:.3f} s, {out[:80]!r}")
+    head = "x" * (cap - 25) + " "
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJuaW5hLm9zZWkifQ.c2lnbmF0dXJlLXNpZ25hdHVyZQ"
+    for name, text, gone in (
+        ("a JWT", head + jwt + " tail ", "eyJ"),
+        ("the Web SDK secret", head + "secret=" + CLIENT_SECRET + " tail ", CLIENT_SECRET[:12]),
+        ("a quoted cookie value", "x" * (cap - 60) + " {'Cookie': 'sid=SID-VALUE-1; other=" + "z" * 70000 + "'} ",
+         "SID-VALUE-1"),
+    ):
+        text += "y" * 100000
+        got = redaction.redact_common(text)
+        m = marker.search(got)
+        check(f"{name} split by the cut: none of it kept, the marker counts what went",
+              gone not in got and got.startswith("x" * 1000) and m is not None
+              and len(text) - cap < int(m.group(1)) < len(text) - cap + 200
+              and len(got) <= cap + len(redaction.TRUNCATED_MARKER) + 10, got[-120:])
+    check("a text under the cap is untouched by it",
+          redaction.redact_common("Cookie: a=b; " + "y" * 1000) == "Cookie: [REDACTED]")
+
+    lines = _Capture()
+    root = logging.getLogger()
+    root.addHandler(lines)
+    saved_level = root.level
+    root.setLevel(logging.DEBUG)
+    try:
+        started = time.perf_counter()
+        logging.getLogger("backend.routers.chat").info("chat message: %s", "-eyJ " * (_MB // 5))
+        took = time.perf_counter() - started
+    finally:
+        root.removeHandler(lines)
+        root.setLevel(saved_level)
+    line = lines.lines[-1][1] if lines.lines else ""
+    m = marker.search(line)
+    check("a 1 MB chat message logged by any module: logged at once, cut to 64 KB and marked",
+          took < 1.0 and "chat message: -eyJ -eyJ" in line and m is not None and len(line) < cap + 200,
+          f"{took:.3f} s, {len(line)} chars")
+
+
 def test_health_gate_three_failures() -> None:
     print("the duo_signin gate closes only after 3 failed health checks in a row")
     failing = DuoException({"stat": "FAIL", "code": 40301, "message": "access_denied"})
@@ -2053,6 +2159,8 @@ def main() -> int:
         test_signin_link_follows_gate()
         test_redaction_by_pattern_only()
         test_redaction_bounded_and_safe()
+        test_redaction_linear_time()
+        test_redaction_cap()
         test_health_gate_three_failures()
         test_callback_not_gated()
         test_no_leaks()

@@ -33,7 +33,7 @@ Every logger's records lose:
   credential anywhere;
 - the value of a ``name=value`` pair of one of this app's cookies
   (``APP_COOKIES``);
-- anything shaped like a JWT;
+- anything shaped like a JWT that starts a token (not ``x-eyJ...``);
 - the configured secrets' exact values (below).
 
 ``REDACTED_LOGGERS`` (the HTTP clients, the Duo SDK and the identity modules)
@@ -58,8 +58,36 @@ from. That is the only cache, and it holds one pattern.
 
 Safe inside logging: the record factory takes no lock (a log call made while
 redacting, or while ``install()`` holds its lock, cannot deadlock), compiles
-nothing per record, and never raises into the code that logs. Every pattern
-runs in linear time (no nested quantifier over the same characters).
+nothing per record, and never raises into the code that logs.
+
+**Linear time, bounded input.** Redaction runs on every record of every
+logger, Duo on or off, so one rule that backtracks lets a single long line (a
+1 MB chat message, a pasted run of token characters) stall whatever thread
+logs it. So:
+
+- each text a record carries (its message, a traceback, the stack info) is
+  cut to ``MAX_SCAN_CHARS`` (64 KB) before any rule runs, and keeps
+  ``TRUNCATED_MARKER`` after the cut. A token the cut splits is dropped whole:
+  half a secret, JWT or query value matches no rule, so it is never kept. A
+  quoted credential value still open at the end of the text (the cut ended
+  it, or it never closed) is redacted to the end;
+- every repeated item is one character class (in a quoted value, also an
+  escape pair) whose characters cannot begin what follows it, and is written
+  possessive (``*+``, ``++``, ``{n,}+``; Python 3.11, which the app requires):
+  the engine never gives characters back, so a failed attempt costs one pass
+  over the run;
+- a rule that could start anywhere inside a run of the characters it repeats
+  starts only at the run's first one: the JWT rule refuses an ``eyJ`` preceded
+  by a base64url character (``(?<![A-Za-z0-9_-])eyJ``), so a run is scanned
+  once, not once per ``eyJ`` in it (unanchored, 60 KB of ``-eyJ`` repeats took
+  2.29 s);
+- a list of names is one branch per first letter, that letter a plain
+  literal the engine skips on one comparison, and the rest a prefix tree
+  (``_alt``), so a position costs a few steps however many names there are.
+
+``tests/test_duo_signin.py`` ``test_redaction_linear_time`` runs every rule
+and the secrets pattern over 1 MB adversarial inputs and fails any that takes
+more than 50 ms per MB.
 """
 from __future__ import annotations
 
@@ -107,62 +135,110 @@ APP_COOKIES: Tuple[str, ...] = (
 _ARGS_KEPT = frozenset({"uvicorn.access"})
 
 _MIN_SECRET_LEN = 8          # shorter values would match ordinary text
+#: The most characters of one text (a record's message, its traceback, its
+#: stack info) the rules scan; the rest is cut first (module docstring).
+MAX_SCAN_CHARS = 64 * 1024
+#: What a cut text ends with: how many characters were cut.
+TRUNCATED_MARKER = " [TRUNCATED: {} more characters]"
 
 Rules = Tuple[Tuple[Pattern[str], str], ...]
 
 
-def _alt(names: Sequence[str]) -> str:
-    return "|".join(re.escape(n) for n in names)
+def _trie(words: Sequence[str]) -> str:
+    """Sorted lower-case ``words`` as a prefix tree: ``code|client_secret``
+    -> ``c(?:lient_secret|ode)``."""
+    branches: dict = {}
+    complete = False
+    for word in words:
+        if word:
+            branches.setdefault(word[0], []).append(word[1:])
+        else:
+            complete = True
+    if not branches:
+        return ""
+    alts = [re.escape(ch) + _trie(rest) for ch, rest in sorted(branches.items())]
+    body = alts[0] if len(alts) == 1 else "(?:" + "|".join(alts) + ")"
+    return "(?:" + body + ")?" if complete else body
+
+
+def _alt(names: Sequence[str], after: str = "") -> str:
+    """``names`` matched case-insensitively, as one branch per first letter
+    in each case. The first letter is a plain literal, so the engine skips a
+    branch on one comparison (and, when a pattern starts here, jumps between
+    candidate letters with its fast scan); the rest of the name is a
+    ``(?i:...)`` prefix tree. ``after`` goes right after the first letter: a
+    two-character lookbehind such as ``(?<![A-Za-z0-9_-].)`` refuses a name
+    that continues a longer word. Patterns using this carry no global
+    ``(?i)``: it would turn those literals into case-folding ones."""
+    branches: dict = {}
+    for word in sorted({n.lower() for n in names}):
+        branches.setdefault(word[0], []).append(word[1:])
+    alts = []
+    for first, rests in sorted(branches.items()):
+        rest = _trie(rests)
+        tail = after + ("(?i:" + rest + ")" if rest else "")
+        alts += [re.escape(ch) + tail for ch in sorted({first, first.upper()})]
+    return "(?:" + "|".join(alts) + ")"
 
 
 _PARAMS = _alt(SENSITIVE_PARAMS)
 _HEADERS = _alt(SENSITIVE_HEADERS)
-_COOKIES = _alt(APP_COOKIES)
 # Keys whose quoted value is a credential in a dict or JSON, in every logger.
 _CREDENTIAL_KEYS = _alt(SENSITIVE_HEADERS + APP_COOKIES + (
     "access_token", "id_token", "refresh_token", "client_secret", "client_assertion", "duo_code", "password"))
 # The full treatment's sensitive pair keys (REDACTED_LOGGERS only: in other
 # loggers "code=" or "state=" can be ordinary text).
-_KEYS = (r"client_secret|client_assertion|assertion|duo_code|code|state|id_token|access_token"
-         r"|refresh_token|password|passwd|skey|secret|token|api_key|apikey")
+_PAIR_KEYS: Tuple[str, ...] = (
+    "client_secret", "client_assertion", "assertion", "duo_code", "code", "state", "id_token", "access_token",
+    "refresh_token", "password", "passwd", "skey", "secret", "token", "api_key", "apikey")
+_KEYS = _alt(_PAIR_KEYS)
 
 
-def _quoted_value(prefix: str) -> Tuple[Tuple[Pattern[str], str], ...]:
-    """``<prefix>'value'`` and ``<prefix>"value"``: the value goes, its quotes stay.
-    ``prefix`` holds one ``{q}`` per quote around the key."""
+def _quoted_value(prefix: str) -> Rules:
+    """``<prefix>'value'`` and ``<prefix>"value"``: the value goes, its quotes
+    stay. ``prefix`` holds one ``{q}`` per quote around the key. The value is
+    plain runs and backslash escapes, unrolled (``[^q\\]*+(?:\\.[^q\\]*+)*+``)
+    so nothing is ever given back; a value still open at the end of the text
+    (one the 64 KB cut ended) goes to the end."""
     return tuple(
-        (re.compile("(?i)(" + prefix.format(q=q) + ")(?:\\\\.|[^" + q + "\\\\])*" + q), r"\1" + REDACTED + q)
+        (re.compile("(" + prefix.format(q=q) + ")[^" + q + "\\\\]*+(?:\\\\[\\s\\S][^" + q + "\\\\]*+)*+"
+                    "(?:(" + q + ")|\\\\?\\Z)"),
+         r"\1" + REDACTED + r"\2")
         for q in ("'", '"'))
 
 
 _COMMON: Rules = (
     # A credential query parameter: ?code=x&state=y -> ?code=[REDACTED]&state=[REDACTED].
-    (re.compile(r"(?i)([?&](?:" + _PARAMS + r"))=[^&#\s\"'<>]*"), r"\1=" + REDACTED),
+    (re.compile(r"([?&]" + _PARAMS + r")=[^&#\s\"'<>]*+"), r"\1=" + REDACTED),
     # httpcore's / hpack's header tuples: (b'Set-Cookie', b'...'), ('authorization', '...').
-    *_quoted_value(r"b?{q}(?:" + _HEADERS + r"){q}\s*,\s*b?{q}"),
+    # (A leading b stays outside the match: it is kept either way.)
+    *_quoted_value(r"{q}" + _HEADERS + r"{q}\s*+,\s*+[bB]?{q}"),
     # A dict or JSON entry: 'Cookie': '...', "access_token": "...".
-    *_quoted_value(r"{q}(?:" + _CREDENTIAL_KEYS + r"){q}\s*:\s*b?{q}"),
+    *_quoted_value(r"{q}" + _CREDENTIAL_KEYS + r"{q}\s*+:\s*+[bB]?{q}"),
     # A header line: "Set-Cookie: ..." ([ \t], never \s: linear on blank lines).
-    (re.compile(r"(?im)^([ \t]*(?:" + _HEADERS + r")[ \t]*:[ \t]*)\S.*$"), r"\1" + REDACTED),
+    (re.compile(r"(?m)^([ \t]*+" + _HEADERS + r"[ \t]*+:[ \t]*+)\S.*+$"), r"\1" + REDACTED),
     # One of this app's cookies as name=value (a raw Cookie header, a cookie jar).
-    (re.compile(r"(?i)(?<![A-Za-z0-9_-])(" + _COOKIES + r")=[^;,\s\"'&]+"), r"\1=" + REDACTED),
+    (re.compile(r"(" + _alt(APP_COOKIES, after=r"(?<![A-Za-z0-9_-].)") + r")=[^;,\s\"'&]++"),
+     r"\1=" + REDACTED),
     # A Bearer credential anywhere.
-    (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 " + REDACTED),
-    # Anything shaped like a JWT.
-    (re.compile(r"\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*"), REDACTED),
+    (re.compile(r"(?i)\b(bearer)\s++[A-Za-z0-9._~+/=-]{8,}+"), r"\1 " + REDACTED),
+    # Anything shaped like a JWT: three base64url segments, starting only where
+    # a run of base64url characters starts (so each run is scanned once).
+    (re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,}+\.[A-Za-z0-9_-]{4,}+\.[A-Za-z0-9_-]*+"), REDACTED),
 )
 
 _FULL: Rules = (
     # Every value of a query string: keys stay, values go.
-    (re.compile(r"([?&])([^=&#\s\"'<>?]+)=([^&#\s\"'<>]*)"), r"\1\2=" + REDACTED),
+    (re.compile(r"([?&])([^=&#\s\"'<>?]++)=([^&#\s\"'<>]*+)"), r"\1\2=" + REDACTED),
     *_COMMON,
     # A dict or JSON entry of any sensitive key: 'token': '...', "code": "...".
-    *_quoted_value(r"{q}(?:" + _KEYS + r"){q}\s*:\s*b?{q}"),
+    *_quoted_value(r"{q}" + _KEYS + r"{q}\s*+:\s*+[bB]?{q}"),
     # A form or free-text pair: client_secret=..., code=... (not status_code=).
-    (re.compile(r"(?i)(?<![A-Za-z0-9_.-])(" + _KEYS + r")=(?!\[REDACTED\])([^&\s\"'<>,;)\]}]+)"),
+    (re.compile(r"(" + _alt(_PAIR_KEYS, after=r"(?<![A-Za-z0-9_.-].)") + r")=(?!\[REDACTED\])"
+                r"([^&\s\"'<>,;)\]}]++)"),
      r"\1=" + REDACTED),
     # Basic (and Bearer) credentials.
-    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{6,}"), r"\1 " + REDACTED),
+    (re.compile(r"(?i)\b(bearer|basic)\s++[A-Za-z0-9._~+/=-]{6,}+"), r"\1 " + REDACTED),
 )
 
 _install_lock = threading.RLock()
@@ -213,27 +289,46 @@ def secrets_pattern() -> Optional[Pattern[str]]:
 
 
 # --------------------------------------------------------------------------- text
+_TOKEN_RUN = re.compile(r"\S*+")     # matched at the start of a reversed text: one pass
+
+
+def _cap(text: str) -> Tuple[str, int]:
+    """``text`` cut to ``MAX_SCAN_CHARS``, and how many characters went. A
+    token the cut splits goes whole: half a secret, JWT or query value
+    matches no rule, so it must not be kept."""
+    if len(text) <= MAX_SCAN_CHARS:
+        return text, 0
+    kept = text[:MAX_SCAN_CHARS]
+    if not text[MAX_SCAN_CHARS].isspace():
+        kept = kept[:MAX_SCAN_CHARS - _TOKEN_RUN.match(kept[::-1]).end()]
+    return kept, len(text) - len(kept)
+
+
 def _apply(text: str, rules: Rules, secrets: Optional[Pattern[str]]) -> str:
     if not text:
         return text
+    text, cut = _cap(text)
     if secrets is not None:
         text = secrets.sub(REDACTED, text)
     for pattern, replacement in rules:
         text = pattern.sub(replacement, text)
-    return text
+    # The marker goes on after the rules ran, so no rule can take it for a value.
+    return text + TRUNCATED_MARKER.format(cut) if cut else text
 
 
 def redact(text: str) -> str:
     """``text`` as a ``REDACTED_LOGGERS`` record keeps it: every query value,
     sensitive pair, credential header, Bearer / Basic credential, JWT and
-    configured secret replaced by ``[REDACTED]``."""
+    configured secret replaced by ``[REDACTED]``, after the ``MAX_SCAN_CHARS``
+    cut."""
     return _apply(text, _FULL, secrets_pattern())
 
 
 def redact_common(text: str) -> str:
     """``text`` as every other logger's record keeps it: credential query
     parameters, credential headers, this app's cookies, Bearer credentials,
-    JWTs and the configured secrets replaced by ``[REDACTED]``."""
+    JWTs and the configured secrets replaced by ``[REDACTED]``, after the
+    ``MAX_SCAN_CHARS`` cut."""
     return _apply(text, _COMMON, secrets_pattern())
 
 
