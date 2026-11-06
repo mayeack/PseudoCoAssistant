@@ -13,7 +13,6 @@ removed. Pure functions, no I/O.
 """
 from __future__ import annotations
 
-import difflib
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -135,6 +134,9 @@ class EnvPlan:
     changes: List[KeyChange] = field(default_factory=list)
     eol_added: bool = False
     warnings: List[str] = field(default_factory=list)
+    # Every line in file order, as _apply handled it: (old line, new line),
+    # (old line, None) for a removed line, (None, new line) for an added one.
+    edits: List[Tuple[Optional[str], Optional[str]]] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
@@ -142,21 +144,47 @@ class EnvPlan:
 
     def diff(self, path: str = ".env") -> str:
         """Zero-context unified diff of the Lab 5 lines, credentials masked.
-        A line outside the Lab 5 keys can never be printed: if one ever
-        differs, that is a bug and the plan is refused instead."""
-        old = [_masked(line) for line in split_lines(self.old_text)]
-        new = [_masked(line) for line in split_lines(self.new_text)]
-        out = []
-        for row in difflib.unified_diff(old, new, f"{path} (box)", f"{path} (after)", n=0, lineterm=""):
-            if row.startswith(("---", "+++", "@@")):
-                out.append(row)
+
+        Rendered from the plan's own edits, never re-derived by a diff
+        algorithm: difflib's matcher can pair an unchanged line with the wrong
+        copy of itself (blank lines in a long file, a duplicate key between
+        blank lines) and report it as changed. A line outside the Lab 5 keys
+        is never printed: if an edit ever touched one, that is a bug and the
+        plan is refused instead."""
+        hunks: List[Tuple[int, int, List[str], List[str]]] = []
+        old_no = new_no = 0
+        for old, new in self.edits:
+            if old is not None and new is not None and _masked(old) == _masked(new):
+                old_no, new_no = old_no + 1, new_no + 1
                 continue
-            if row[1:].startswith("\x00"):
-                raise Lab5Error("internal error: a non-Lab-5 .env line would change; refusing")
-            out.append(row)
+            for line in (old, new):
+                if line is not None and key_of(line) not in LAB5_KEYS:
+                    raise Lab5Error("internal error: a non-Lab-5 .env line would change; refusing")
+            last = hunks[-1] if hunks else None
+            if not last or last[0] + len(last[2]) != old_no or last[1] + len(last[3]) != new_no:
+                hunks.append((old_no, new_no, [], []))
+            if old is not None:
+                hunks[-1][2].append("-" + _masked(old))
+                old_no += 1
+            if new is not None:
+                hunks[-1][3].append("+" + _masked(new))
+                new_no += 1
+        if not hunks:
+            return ""
+        out = [f"--- {path} (box)", f"+++ {path} (after)"]
+        for old_start, new_start, minus, plus in hunks:
+            out.append(f"@@ -{_range(old_start, len(minus))} +{_range(new_start, len(plus))} @@")
+            out.extend(minus + plus)
         if self.eol_added:
             out.append("(the file's last line gains its missing final newline)")
         return "\n".join(out)
+
+
+def _range(start: int, length: int) -> str:
+    """A unified-diff range: 1-based, and an empty one names the line before it."""
+    if length == 1:
+        return str(start + 1)
+    return f"{start + 1 if length else start},{length}"
 
 
 def _masked(line: str) -> str:
@@ -198,33 +226,44 @@ def _apply(text: str, targets: Dict[str, Target]) -> EnvPlan:
             raise Lab5Error(f"internal error: {key} is not a Lab 5 key")
     lines = split_lines(text)
     out: List[str] = []
+    # (old line or None, index of its line in `out` or None), turned into
+    # EnvPlan.edits once `out` is final (the last line may still gain "\n").
+    placed: List[Tuple[Optional[str], Optional[int]]] = []
+
+    def emit(old: Optional[str], new: Optional[str]) -> None:
+        if new is not None:
+            out.append(new)
+        placed.append((old, len(out) - 1 if new is not None else None))
+
     seen: Dict[str, bool] = {}
     changes: List[KeyChange] = []
     for line in lines:
         key = key_of(line)
         if key not in targets:
-            out.append(line)
+            emit(line, line)
             continue
         kind, payload = targets[key]
         if seen.get(key):
             changes.append(KeyChange(key, "dedupe", display(key, value_of(line)), None))
+            emit(line, None)
             continue
         seen[key] = True
         old_value = value_of(line)
         if kind == "absent":
             changes.append(KeyChange(key, "remove", display(key, old_value), None))
+            emit(line, None)
             continue
         if kind == "raw":
             body = payload.rstrip("\n")
             if body != line.rstrip("\n"):
                 changes.append(KeyChange(key, "change", display(key, old_value), display(key, value_of(payload))))
-            out.append(body + _terminator(line))   # the line keeps its own terminator
+            emit(line, body + _terminator(line))   # the line keeps its own terminator
             continue
         if old_value == payload:
-            out.append(line)          # already right: keep the line exactly as written
+            emit(line, line)          # already right: keep the line exactly as written
             continue
         changes.append(KeyChange(key, "change", display(key, old_value), display(key, payload)))
-        out.append(render(key, payload) + (_terminator(line) or ""))
+        emit(line, render(key, payload) + (_terminator(line) or ""))
     eol_added = False
     for key, (kind, payload) in targets.items():
         if seen.get(key) or kind == "absent":
@@ -238,8 +277,9 @@ def _apply(text: str, targets: Dict[str, Target]) -> EnvPlan:
         else:
             new_line = render(key, payload) + "\n"
             changes.append(KeyChange(key, "add", None, display(key, payload)))
-        out.append(new_line)
-    return EnvPlan(old_text=text, new_text="".join(out), changes=changes, eol_added=eol_added)
+        emit(None, new_line)
+    edits = [(old, out[i] if i is not None else None) for old, i in placed]
+    return EnvPlan(old_text=text, new_text="".join(out), changes=changes, eol_added=eol_added, edits=edits)
 
 
 def plan_up(text: str, values: Dict[str, str]) -> EnvPlan:

@@ -267,6 +267,14 @@ class ParamikoBox:
 
 
 # --------------------------------------------------------------------------- app API
+class AppHttpError(Lab5Error):
+    """The app answered, with a non-2xx status (as opposed to not answering)."""
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 class AppClient:
     """The box's own PseudoCo Assistant API, authenticated with the box's own
     ACCESS_KEY (read from its .env over SSH)."""
@@ -283,9 +291,9 @@ class AppClient:
             headers["Content-Type"] = "application/json"
         res = self.box.http(method, path, headers=headers, body=body, port=self.port)
         if res.status == 401:
-            raise Lab5Error(f"{method} {path}: 401, the box rejected its own ACCESS_KEY")
+            raise AppHttpError(f"{method} {path}: 401, the box rejected its own ACCESS_KEY", 401)
         if not 200 <= res.status < 300:
-            raise Lab5Error(f"{method} {path}: HTTP {res.status}")
+            raise AppHttpError(f"{method} {path}: HTTP {res.status}", res.status)
         try:
             return res.json()
         except ValueError:

@@ -20,7 +20,7 @@ deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the
 | `check` | Connects to each box and reads its version, `.env` and HEC destinations. Prints the exact `.env` diff, the HEC host change, the tunnel and DNS plan, and a verdict per box. A box that `up` would accept says **ready, nothing to upgrade**. It changes nothing on the boxes or in Cloudflare. |
 | `up` | Runs each box in parallel, in this order: version check, backup, Lab 5 `.env` keys, tunnel and DNS, HEC host, restart, preflight. Any refusal happens before the first change. |
 | `status` | Checks each box's tunnel health, DNS record, connector unit and `.env` drift, then runs the preflight. It also lists `l5-<workshop>-*` tunnels and DNS records that no box record owns. |
-| `down` | Removes the connector, reverts the Lab 5 keys and the HEC host on every reachable box, then deletes the DNS records and tunnels that `up` recorded. Running it twice is safe: the second run changes nothing. |
+| `down` | Removes the connector, reverts the Lab 5 keys and the HEC host on every reachable box, then deletes the DNS records and tunnels that `up` recorded. A box it cannot reach or cannot finish fails the run, and the last line says how to re-run it. Running it twice is safe: the second run changes nothing. |
 | `expire` | Not built yet. It comes with the participant accounts (12.2). |
 
 Exit codes: `0` means every box is fine. `1` means at least one box failed or was refused; its report says why. `2` means a usage, configuration or Keychain error.
@@ -64,6 +64,10 @@ Copy `deploy/lab5/workshop.example.yaml`, one per delivery. It holds no secrets:
 - `stack.hec_url` is the room's Splunk stack. `up` looks for the box's existing destination with that URL.
 - `room.victim` goes on every box's `IDENTITY_ALLOWED_USERS`, together with the trusted personas. To swap to `room.fallback`, change `victim` and re-run `up`.
 - `boxes` has one row per Show box: `instance` and `host`. Port `2222`, user `splunk`, checkout `/home/splunk/DemoBot`, unit `demobot-app` and app port `8001` come from `defaults:`.
+- `identity:` is optional and overrides the 12.1 defaults. The app reads these values as numbers and a boolean when it starts, so a value like `12h` would stop it from starting. The tool therefore checks them before it connects to anything, and refuses the file otherwise:
+  - `session_ttl_minutes`: a whole number from 1 to 10080 (7 days), the range the app uses;
+  - `status_ttl_seconds`: a whole number from 0 to 3600;
+  - `fail_open`: `true` or `false`.
 
 ## What `up` does to a box
 
@@ -76,7 +80,7 @@ Copy `deploy/lab5/workshop.example.yaml`, one per delivery. It holds no secrets:
 
    `cloudflared` runs as `pseudoco-assistant-lab5-tunnel.service`. Its token sits in `/etc/pseudoco-assistant/lab5-tunnel.env` (root, 0600) and reaches cloudflared as `TUNNEL_TOKEN`, never on a command line.
 5. **HEC host.** The tool reads the destination through the box's Settings API, authenticated with the box's own `ACCESS_KEY`. It sends a `PUT` that carries only `host`, then reads the destination back and checks that every other field is unchanged. The other labs' destinations are never touched.
-6. **Restart.** `sudo systemctl restart demobot-app`, only when `.env` changed.
+6. **Restart.** `sudo systemctl restart demobot-app`, only when `.env` changed. If the app does not answer `/health` within 120 s, `up` puts back the `.env` this run started from, restarts the app again and fails the box, so Labs 0–4 keep running. Fix the cause (the box's `journalctl -u demobot-app` says what it is), then re-run `up`.
 7. **Preflight**, through the public name:
    - the name resolves;
    - `https://<host>/health` reports at least the required release;
@@ -92,10 +96,14 @@ Participant accounts and the handout sheet are the next stage (12.2). `up` alrea
 - Each Lab 5 key is put back the way the first `up` found it. A replaced line goes back in place, and an appended key is removed. Lines outside the Lab 5 keys stay as they are now, even if another lab changed them during the workshop.
   - The state directory never stores a credential. A credential that existed before `up` is restored from the box's first backup.
   - A box with no record of `up` gets every Lab 5 key that holds a value removed, which is the app default and the template state.
-- The destination's host goes back to its prior value. If someone changed it after `up`, it is left alone, with a warning.
 - `.env` backups that hold Lab 5 credentials (made by a re-run of `up`) are deleted. The first backup is kept.
-- The app restarts if `.env` changed.
-- The DNS record and tunnel that `up` recorded are deleted, even when the box itself is unreachable (Show may already have destroyed it). Anything named `l5-<workshop>-*` that the tool did not create is only reported.
+- The app restarts if `.env` changed, and `down` waits for it to answer `/health`.
+- The destination's host then goes back to its prior value, through the restarted app. If someone changed it after `up`, it is left alone, with a warning. If the destination no longer exists, there is nothing to revert.
+- The DNS record and tunnel that `up` recorded are deleted, even when the box itself is unreachable. Anything named `l5-<workshop>-*` that the tool did not create is only reported.
+- A box that `down` cannot reach (a wrong password, a changed host key, a timeout) or cannot finish (for example, the app does not answer, so the HEC host stays) fails the run with exit 1:
+  - its report says what is still on the box, and the run ends with a `NEXT:` line that names the `--only` re-run;
+  - its record keeps a pending revert, which `status` shows, until a `down` finishes on the box;
+  - if Show has already destroyed the box, the failure is expected: nothing is left on it to revert.
 
 Participant accounts stay until `expire` disables them (next stage). Rotate the Duo and CII credentials after the workshop (I1).
 
@@ -125,6 +133,9 @@ An `APP_VERSION` line left in the template's `.env` overrides what `/health` rep
 - `up` on a box with Labs 0–4 settings keeps every other `.env` line and every other destination field;
 - `check` changes nothing;
 - `down` restores the original bytes, and a second `down` is a no-op;
+- a `down` that cannot reach or finish a box exits 1, keeps it pending, and a re-run finishes it;
+- `identity:` values the app could not start with are refused, and an app that does not come back after `up` gets its `.env` rolled back;
+- `check` renders its diff on long and repetitive `.env` files, `.env.example` included;
 - no secret reaches argv, a URL, the output, the run log or the state directory.
 
 It is registered in `tests/run_all.sh` and runs with the app's venv: it never imports paramiko, and it fails if anything does.

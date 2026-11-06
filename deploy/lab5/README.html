@@ -66,7 +66,7 @@ deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the
 </tr>
 <tr>
 <td><code>down</code></td>
-<td>Removes the connector, reverts the Lab 5 keys and the HEC host on every reachable box, then deletes the DNS records and tunnels that <code>up</code> recorded. Running it twice is safe: the second run changes nothing.</td>
+<td>Removes the connector, reverts the Lab 5 keys and the HEC host on every reachable box, then deletes the DNS records and tunnels that <code>up</code> recorded. A box it cannot reach or cannot finish fails the run, and the last line says how to re-run it. Running it twice is safe: the second run changes nothing.</td>
 </tr>
 <tr>
 <td><code>expire</code></td>
@@ -163,6 +163,13 @@ deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the
 <li><code>stack.hec_url</code> is the room's Splunk stack. <code>up</code> looks for the box's existing destination with that URL.</li>
 <li><code>room.victim</code> goes on every box's <code>IDENTITY_ALLOWED_USERS</code>, together with the trusted personas. To swap to <code>room.fallback</code>, change <code>victim</code> and re-run <code>up</code>.</li>
 <li><code>boxes</code> has one row per Show box: <code>instance</code> and <code>host</code>. Port <code>2222</code>, user <code>splunk</code>, checkout <code>/home/splunk/DemoBot</code>, unit <code>demobot-app</code> and app port <code>8001</code> come from <code>defaults:</code>.</li>
+<li><code>identity:</code> is optional and overrides the 12.1 defaults. The app reads these values as numbers and a boolean when it starts, so a value like <code>12h</code> would stop it from starting. The tool therefore checks them before it connects to anything, and refuses the file otherwise:
+<ul>
+<li><code>session_ttl_minutes</code>: a whole number from 1 to 10080 (7 days), the range the app uses;</li>
+<li><code>status_ttl_seconds</code>: a whole number from 0 to 3600;</li>
+<li><code>fail_open</code>: <code>true</code> or <code>false</code>.</li>
+</ul>
+</li>
 </ul>
 <h2>What <code>up</code> does to a box</h2>
 <ol>
@@ -187,7 +194,7 @@ deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the
 <p><strong>HEC host.</strong> The tool reads the destination through the box's Settings API, authenticated with the box's own <code>ACCESS_KEY</code>. It sends a <code>PUT</code> that carries only <code>host</code>, then reads the destination back and checks that every other field is unchanged. The other labs' destinations are never touched.</p>
 </li>
 <li>
-<p><strong>Restart.</strong> <code>sudo systemctl restart demobot-app</code>, only when <code>.env</code> changed.</p>
+<p><strong>Restart.</strong> <code>sudo systemctl restart demobot-app</code>, only when <code>.env</code> changed. If the app does not answer <code>/health</code> within 120 s, <code>up</code> puts back the <code>.env</code> this run started from, restarts the app again and fails the box, so Labs 0–4 keep running. Fix the cause (the box's <code>journalctl -u demobot-app</code> says what it is), then re-run <code>up</code>.</p>
 </li>
 <li>
 <p><strong>Preflight</strong>, through the public name:</p>
@@ -209,10 +216,17 @@ deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the
 <li>A box with no record of <code>up</code> gets every Lab 5 key that holds a value removed, which is the app default and the template state.</li>
 </ul>
 </li>
-<li>The destination's host goes back to its prior value. If someone changed it after <code>up</code>, it is left alone, with a warning.</li>
 <li><code>.env</code> backups that hold Lab 5 credentials (made by a re-run of <code>up</code>) are deleted. The first backup is kept.</li>
-<li>The app restarts if <code>.env</code> changed.</li>
-<li>The DNS record and tunnel that <code>up</code> recorded are deleted, even when the box itself is unreachable (Show may already have destroyed it). Anything named <code>l5-&lt;workshop&gt;-*</code> that the tool did not create is only reported.</li>
+<li>The app restarts if <code>.env</code> changed, and <code>down</code> waits for it to answer <code>/health</code>.</li>
+<li>The destination's host then goes back to its prior value, through the restarted app. If someone changed it after <code>up</code>, it is left alone, with a warning. If the destination no longer exists, there is nothing to revert.</li>
+<li>The DNS record and tunnel that <code>up</code> recorded are deleted, even when the box itself is unreachable. Anything named <code>l5-&lt;workshop&gt;-*</code> that the tool did not create is only reported.</li>
+<li>A box that <code>down</code> cannot reach (a wrong password, a changed host key, a timeout) or cannot finish (for example, the app does not answer, so the HEC host stays) fails the run with exit 1:
+<ul>
+<li>its report says what is still on the box, and the run ends with a <code>NEXT:</code> line that names the <code>--only</code> re-run;</li>
+<li>its record keeps a pending revert, which <code>status</code> shows, until a <code>down</code> finishes on the box;</li>
+<li>if Show has already destroyed the box, the failure is expected: nothing is left on it to revert.</li>
+</ul>
+</li>
 </ul>
 <p>Participant accounts stay until <code>expire</code> disables them (next stage). Rotate the Duo and CII credentials after the workshop (I1).</p>
 <h2>Secrets</h2>
@@ -238,6 +252,9 @@ deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the
 <li><code>up</code> on a box with Labs 0–4 settings keeps every other <code>.env</code> line and every other destination field;</li>
 <li><code>check</code> changes nothing;</li>
 <li><code>down</code> restores the original bytes, and a second <code>down</code> is a no-op;</li>
+<li>a <code>down</code> that cannot reach or finish a box exits 1, keeps it pending, and a re-run finishes it;</li>
+<li><code>identity:</code> values the app could not start with are refused, and an app that does not come back after <code>up</code> gets its <code>.env</code> rolled back;</li>
+<li><code>check</code> renders its diff on long and repetitive <code>.env</code> files, <code>.env.example</code> included;</li>
 <li>no secret reaches argv, a URL, the output, the run log or the state directory.</li>
 </ul>
 <p>It is registered in <code>tests/run_all.sh</code> and runs with the app's venv: it never imports paramiko, and it fails if anything does.</p>

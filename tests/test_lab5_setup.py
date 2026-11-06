@@ -725,8 +725,21 @@ def test_preflight_gate_and_unreachable() -> None:
         check("status fails on a gated duo_signin, with the reason", rc == 1 and "Duo sign-in is disabled" in out, out)
         del world.boxes["02"]                             # Show already destroyed box 02
         rc, out = run_cli(world, tmp, "down")
-        check("down: unreachable box is reported, the run continues", "left as they are" in out, out)
+        check("down: an unreachable box FAILs the run (exit 1), never 'ok'",
+              rc == 1 and "RESULT: down: 1 ok, 1 failed (box 02)" in out, out)
+        check("down: it says what was not reverted and how to finish",
+              "Nothing on the box was reverted" in out and "--only 2" in out and "NEXT: re-run" in out, out)
+        check("down: the reachable box is still reverted",
+              box.files["/home/splunk/DemoBot/.env"][0] == labs_env("01") and remote.UNIT_PATH not in box.files)
         check("down: its tunnel and DNS record are still deleted", not world.cf._live() and not world.cf.records)
+        rec = json.loads((tmp / "state/workshops/acme/boxes/02.json").read_text())
+        check("down: the record keeps a pending revert for the skipped box", bool(rec.get("revert_pending")), str(rec))
+        rec1 = json.loads((tmp / "state/workshops/acme/boxes/01.json").read_text())
+        check("down: none for the box it finished", "revert_pending" not in rec1, str(rec1))
+        rc, out = run_cli(world, tmp, "status", "--only", "2")
+        check("status names the skipped box's pending down, not 'run up'",
+              "an earlier down could not revert this box" in out and "deleted by down" in out
+              and "no tunnel recorded" not in out, out)
 
 
 def test_failed_up_resumes() -> None:
@@ -827,10 +840,214 @@ def test_remote_helpers() -> None:
     check("header injection refused", ok)
 
 
+def _host(box: FakeBox) -> str:
+    return next(d["host"] for d in box.destinations if d["id"] == "show-stack")
+
+
+def test_down_failures_are_failures() -> None:
+    print("== down: a box it could not finish FAILs, stays pending, and a re-run finishes it ==")
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        run_cli(world, tmp, "up")
+        good_prompt = world.prompt
+        world.prompt = lambda text: "typo-password-1"     # mistyped, or box 02's differs
+        rc, out = run_cli(world, tmp, "down")
+        check("wrong SSH password: down exits 1, no box 'ok'", rc == 1 and "0 ok, 2 failed" in out, out)
+        check("wrong SSH password: nothing on the boxes changed",
+              all(b.files["/home/splunk/DemoBot/.env"][0] != labs_env(nn) and remote.UNIT_PATH in b.files
+                  for nn, b in world.boxes.items()))
+        world.prompt = good_prompt
+        rc, out = run_cli(world, tmp, "down")
+        check("the re-run with the right password exits 0 and says it is finishing a revert",
+              rc == 0 and out.count("finishing the revert an earlier down could not") == 2, out)
+        check("the re-run restores every box",
+              all(b.files["/home/splunk/DemoBot/.env"][0] == labs_env(nn) and _host(b) == "medadvice"
+                  and remote.UNIT_PATH not in b.files for nn, b in world.boxes.items()))
+        recs = [json.loads((tmp / f"state/workshops/acme/boxes/{nn}.json").read_text()) for nn in ("01", "02")]
+        check("the pending marker is cleared", all("revert_pending" not in r for r in recs), str(recs))
+
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        run_cli(world, tmp, "up", "--only", "1")
+        box = world.boxes["01"]
+        real_app = box.app
+
+        def broken_settings(method, path, headers, body):
+            if path.startswith("/api/hec/destinations"):
+                return 500, {"detail": "internal error"}
+            return real_app(method, path, headers, body)
+
+        box.app = broken_settings
+        rc, out = run_cli(world, tmp, "down", "--only", "1")
+        check("HEC host not revertible: down exits 1 and names the host the room still sees",
+              rc == 1 and "HEC host of destination show-stack not reverted" in out
+              and "l5-acme-01.pseudocoassistant.com" in out, out)
+        rec = json.loads((tmp / "state/workshops/acme/boxes/01.json").read_text())
+        check("HEC host not revertible: still recorded as to revert",
+              rec["hec"]["reverted"] is False and rec.get("revert_pending"), str(rec))
+        box.app = real_app
+        rc, out = run_cli(world, tmp, "down", "--only", "1")
+        check("the re-run reverts the HEC host and exits 0", rc == 0 and _host(box) == "medadvice", out)
+
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        run_cli(world, tmp, "up", "--only", "1")
+        box = world.boxes["01"]
+        box.app_up = False                                # e.g. it crashed after up
+        real_dispatch = box._dispatch
+
+        def restart_brings_it_back(argv, stdin, sudo):
+            res = real_dispatch(argv, stdin, sudo)
+            if argv[:2] == ["systemctl", "restart"] and argv[-1] == "demobot-app":
+                box.app_up = True
+            return res
+
+        box._dispatch = restart_brings_it_back
+        rc, out = run_cli(world, tmp, "down", "--only", "1")
+        check("app down before down: the restart brings it back and the HEC host is reverted after it",
+              rc == 0 and _host(box) == "medadvice" and box.files["/home/splunk/DemoBot/.env"][0] == labs_env("01"),
+              out)
+
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        run_cli(world, tmp, "up", "--only", "1")
+        world.boxes["01"].destinations = [lab2_destination()]   # someone deleted the room destination
+        rc, out = run_cli(world, tmp, "down", "--only", "1")
+        check("a destination deleted since up is a warning, not a failure",
+              rc == 0 and "no longer exists; nothing to revert" in out, out)
+
+
+class StrictBox(FakeBox):
+    """Its app refuses to start when `refuse(env lines)` says so, as pydantic
+    does on a value it cannot parse."""
+
+    refuse = staticmethod(lambda lines: False)
+
+    def _load_running_env(self) -> None:
+        super()._load_running_env()
+        lines = envfile.split_lines(envfile.decode(self.files["/home/splunk/DemoBot/.env"][0]))
+        self.app_up = not self.refuse(lines)
+
+
+def test_identity_values_and_rollback() -> None:
+    print("== identity: values the app cannot start with are refused; an app that does not come back is rolled back ==")
+    import yaml
+    good = yaml.safe_load(WORKSHOP_YAML)
+    for bad, why in (({"session_ttl_minutes": "12h"}, "a TTL with a unit"),
+                     ({"session_ttl_minutes": 1.5}, "a fractional TTL"),
+                     ({"session_ttl_minutes": True}, "a bool for a number"),
+                     ({"session_ttl_minutes": 0}, "a TTL below the app's 1 minute"),
+                     ({"session_ttl_minutes": 20000}, "a TTL above the app's 7 days"),
+                     ({"status_ttl_seconds": -1}, "a negative status TTL"),
+                     ({"status_ttl_seconds": "²"}, "a non-ASCII digit"),
+                     ({"fail_open": "maybe"}, "fail_open that is not a bool"),
+                     ({"fail_open": 1}, "fail_open as a number"),
+                     ({"session_ttl": 600}, "an unknown key"),
+                     ("720", "identity that is not a mapping")):
+        try:
+            ls.workshop_from_dict(dict(good, identity=bad))
+            ok = False
+        except Lab5Error:
+            ok = True
+        check(f"identity rejected: {why}", ok)
+    ws = ls.workshop_from_dict(dict(good, identity={"session_ttl_minutes": "600", "status_ttl_seconds": 0,
+                                                    "fail_open": "False"}))
+    check("identity values are normalized for .env",
+          ws.identity == {"IDENTITY_SESSION_TTL_MINUTES": "600", "IDENTITY_STATUS_TTL_SECONDS": "0",
+                          "IDENTITY_FAIL_OPEN": "false"}, str(ws.identity))
+    try:
+        ls.workshop_from_dict(dict(good, zone="pseudoco assistant.com"))
+        ok = False
+    except Lab5Error:
+        ok = True
+    check("zone rejected unless it is a DNS name", ok)
+
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "workshop.yaml").write_text(WORKSHOP_YAML + "identity:\n  session_ttl_minutes: 12h\n")
+        rc, out = run_cli(world, tmp, "check")
+        check("check refuses the bad value before connecting", rc == 2 and "session_ttl_minutes" in out
+              and not world.connects, out)
+        rc, out = run_cli(world, tmp, "up")
+        check("up refuses it too and changes nothing", rc == 2 and all(not b.mutations for b in world.boxes.values())
+              and not world.cf.mutations, out)
+
+    world = FakeWorld()
+    world.boxes = {nn: StrictBox(world, nn) for nn in ("01", "02")}
+    StrictBox.refuse = staticmethod(lambda lines: envfile.get(lines, "DUO_ENABLED") == "true")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rc, out = run_cli(world, tmp, "up")
+            check("app does not start with the Lab 5 keys: up exits 1", rc == 1, out)
+            check("its .env is rolled back byte-for-byte and the app answers again",
+                  all(b.files["/home/splunk/DemoBot/.env"][0] == labs_env(nn) and b.app_up and b.restarts == 2
+                      for nn, b in world.boxes.items()), out)
+            check("the report says it rolled back and what to do",
+                  out.count("rolled back to the .env this run started from") == 2 and "then re-run up" in out, out)
+            StrictBox.refuse = staticmethod(lambda lines: False)    # the cause is fixed
+            rc, out = run_cli(world, tmp, "up")
+            check("the re-run of up is not blocked and succeeds", rc == 0 and out.count("not gated") == 2, out)
+    finally:
+        StrictBox.refuse = staticmethod(lambda lines: False)
+
+
+def test_diff_on_long_env() -> None:
+    print("== check's .env diff on long and repetitive files ==")
+    vals = {"PUBLIC_BASE_URL": "https://l5-acme-01.pseudocoassistant.com", "DUO_ENABLED": "true",
+            "DUO_CLIENT_SECRET": "s3cr3t-value-abcdef", "HEC_HOST": "l5-acme-01.pseudocoassistant.com"}
+    filler = "".join(f"# setting {i}\nOTHER_{i}=v{i}\n\n" for i in range(80))
+    example = ROOT / ".env.example"
+    cases = {
+        "240-line file, the empty key then a trailing blank line (difflib autojunk)": filler + "PUBLIC_BASE_URL=\n\n",
+        "a duplicate key between blank lines (difflib pairs the wrong blank line)":
+            "DUO_ENABLED=false\n\nDUO_ENABLED=false\n\n\n",
+        "the same between bare '#' lines": "# a\nDUO_ENABLED=false\n#\nDUO_ENABLED=false\n#\n#\n",
+    }
+    if example.exists():
+        cases[".env.example plus the 12.6 empty key and a blank line"] = example.read_text() + "PUBLIC_BASE_URL=\n\n"
+    for name, text in cases.items():
+        plan = envfile.plan_up(text, vals)
+        try:
+            diff = plan.diff()
+        except Lab5Error as exc:
+            diff = f"RAISED {exc}"
+        rows = [r for r in diff.splitlines() if r[:1] in "+-" and not r.startswith(("---", "+++"))]
+        check(f"{name}: diff renders, only Lab 5 rows",
+              rows and all(envfile.key_of(r[1:]) in envfile.LAB5_KEYS for r in rows)
+              and envfile.other_lines(plan.new_text) == envfile.other_lines(text), diff)
+        check(f"{name}: one + row per key set or added, credentials masked",
+              sum(r.startswith("+") for r in rows) == len([c for c in plan.changes if c.action != "dedupe"])
+              and "s3cr3t-value-abcdef" not in diff, diff)
+    plan = envfile.plan_up("A=1\nPUBLIC_BASE_URL=\nB=2\nDUO_ENABLED=false\nDUO_ENABLED=x\nC=3", vals)
+    check("hunk headers match a unified diff",
+          plan.diff().splitlines()[2:] == ["@@ -2 +2 @@", "-PUBLIC_BASE_URL=(empty)",
+                                           "+PUBLIC_BASE_URL=https://l5-acme-01.pseudocoassistant.com",
+                                           "@@ -4,2 +4 @@", "-DUO_ENABLED=false", "-DUO_ENABLED=x", "+DUO_ENABLED=true",
+                                           "@@ -6,0 +6,2 @@", "+DUO_CLIENT_SECRET=<...cdef>",
+                                           "+HEC_HOST=l5-acme-01.pseudocoassistant.com",
+                                           "(the file's last line gains its missing final newline)"], plan.diff())
+
+    world = FakeWorld()
+    box = world.boxes["01"]
+    long_env = labs_env("01").decode("latin-1").replace("PUBLIC_BASE_URL=\n", "") + filler + "PUBLIC_BASE_URL=\n\n"
+    box.files["/home/splunk/DemoBot/.env"] = (long_env.encode("latin-1"), 0o600)
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, out = run_cli(world, Path(tmp), "check", "--only", "1")
+        check("check on a long template .env: ready, with the diff, and agrees with up",
+              rc == 0 and "ready, nothing to upgrade" in out and "+PUBLIC_BASE_URL=https://" in out, out)
+
+
 def main() -> int:
     for test in (test_envfile, test_check_is_read_only, test_up_status_down, test_refusals,
                  test_down_without_record, test_preflight_gate_and_unreachable, test_failed_up_resumes,
-                 test_wrong_password_and_cli,
+                 test_wrong_password_and_cli, test_down_failures_are_failures, test_identity_values_and_rollback,
+                 test_diff_on_long_env,
                  test_example_yaml, test_cloudflare_client, test_remote_helpers):
         try:
             test()

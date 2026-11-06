@@ -69,6 +69,45 @@ SECRET_KEYS = ("DUO_CLIENT_SECRET", "DUO_ADMIN_SKEY", "CII_CLIENT_SECRET")
 
 _WORKSHOP_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?$")
 _USER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_ZONE_RE = re.compile(r"^(?=.{4,180}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$")
+# The `identity:` settings take whole numbers in these ranges. The app reads
+# them as int / bool at startup, so a value like "12h" would stop it from
+# starting at all; IDENTITY_SESSION_TTL_MINUTES is the app's own clamp
+# (backend/services/identity_store.ttl_minutes: 1 minute to 7 days).
+IDENTITY_RANGES = {"session_ttl_minutes": (1, 7 * 24 * 60, "minutes"),
+                   "status_ttl_seconds": (0, 3600, "seconds")}
+
+
+def identity_values(section: Any) -> Dict[str, str]:
+    """workshop.yaml `identity:` -> the .env values, refused unless the app
+    can start with them: every check happens here, before any box is touched."""
+    if section is None:
+        return {}
+    _require(isinstance(section, dict), "`identity` must be a mapping")
+    unknown = sorted(str(k) for k in section if k not in IDENTITY_KEYS)
+    _require(not unknown, f"`identity.{unknown[0] if unknown else ''}` is not a Lab 5 setting "
+                          f"(use {', '.join(IDENTITY_KEYS)})")
+    out: Dict[str, str] = {}
+    for yaml_key, env_key in IDENTITY_KEYS.items():
+        value = section.get(yaml_key)
+        if value is None:
+            continue
+        if yaml_key == "fail_open":
+            if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+                value = value.strip().lower() == "true"
+            _require(isinstance(value, bool), f"`identity.fail_open` must be true or false, not {value!r}")
+            out[env_key] = "true" if value else "false"
+            continue
+        low, high, unit = IDENTITY_RANGES[yaml_key]
+        number: Optional[int] = None
+        if isinstance(value, int) and not isinstance(value, bool):
+            number = value
+        elif isinstance(value, str) and re.fullmatch(r"[0-9]{1,9}", value.strip()):
+            number = int(value.strip())
+        _require(number is not None and low <= number <= high,
+                 f"`identity.{yaml_key}` must be a whole number of {unit} from {low} to {high}, not {value!r}")
+        out[env_key] = str(number)
+    return out
 
 
 # =========================================================================== config
@@ -163,11 +202,10 @@ def workshop_from_dict(doc: Dict[str, Any]) -> Workshop:
         _require(key in DEFAULT_KEYCHAIN, f"`keychain.{key}` is not a Lab 5 credential key")
         keychain[key] = str(item)
 
-    identity: Dict[str, str] = {}
-    for yaml_key, env_key in IDENTITY_KEYS.items():
-        value = (doc.get("identity") or {}).get(yaml_key)
-        if value is not None:
-            identity[env_key] = ("true" if value else "false") if isinstance(value, bool) else str(value)
+    identity = identity_values(doc.get("identity"))
+    zone = str(doc.get("zone") or DEFAULT_ZONE)
+    _require(bool(_ZONE_RE.match(zone)), "`zone` must be a DNS zone such as pseudocoassistant.com "
+                                         "(it becomes PUBLIC_BASE_URL and HEC_HOST)")
 
     cloudflare = doc.get("cloudflare") or {}
     required = str(doc.get("required_version") or DEFAULT_REQUIRED_VERSION)
@@ -176,7 +214,7 @@ def workshop_from_dict(doc: Dict[str, Any]) -> Workshop:
     _require(protocol in ("", "auto", "http2", "quic"), "`cloudflare.tunnel_protocol` is auto, http2 or quic")
     return Workshop(
         name=name, hec_url=hec_url, victim=victim, boxes=sorted(boxes, key=lambda b: b.instance),
-        zone=str(doc.get("zone") or DEFAULT_ZONE), required_version=required,
+        zone=zone, required_version=required,
         hec_token_item=str(stack.get("hec_token_item") or ""), fallback=fallback, trusted=trusted,
         identity=identity, keychain=keychain, cloudflare_item=cloudflare_item,
         account_id=str(cloudflare.get("account_id") or ""), zone_id=str(cloudflare.get("zone_id") or ""),
@@ -527,7 +565,9 @@ def _write_env(rem: Any, box: BoxSpec, facts: Facts, new_text: str) -> None:
 
 
 def apply_env(ctx: Ctx, rem: Any, box: BoxSpec, facts: Facts, record: Dict[str, Any],
-              backup: Dict[str, str], rep: BoxReport) -> bool:
+              backup: Dict[str, str], rep: BoxReport) -> Optional[str]:
+    """Merge the Lab 5 keys. Returns the text written, or None if .env
+    already matched."""
     plan = envfile.plan_up(facts.env_text or "", lab5_values(ctx.ws, box, ctx.creds))
     env_rec = record.get("env") or {}
     if not env_rec.get("baseline") or env_rec.get("reverted"):
@@ -537,11 +577,34 @@ def apply_env(ctx: Ctx, rem: Any, box: BoxSpec, facts: Facts, record: Dict[str, 
         ctx.state.save_box(box.nn, record)
     if not plan.changed:
         rep.add("OK", ".env", "the Lab 5 keys already match workshop.yaml")
-        return False
+        return None
     _write_env(rem, box, facts, plan.new_text)
     rep.add("CHANGED", ".env", ", ".join(f"{c.action} {c.key}" for c in plan.changes)
             + "; every other line unchanged")
-    return True
+    return plan.new_text
+
+
+def roll_back_env(ctx: Ctx, rem: Any, box: BoxSpec, facts: Facts, written: str,
+                  backup: Dict[str, str], rep: BoxReport, why: str) -> None:
+    """The app did not come back after `up` changed .env: put this run's
+    starting .env back and restart once more, so Labs 0-4 keep working. The
+    box is reported FAIL either way; a rollback that cannot finish raises."""
+    env_path = f"{box.checkout}/.env"
+    rep.add("FAIL", "restart", why)
+    current = rem.read_file(env_path)
+    if current is None or envfile.decode(current) != written:
+        raise Lab5Error(f"{env_path} changed after lab5-setup wrote it, so it was not rolled back; "
+                        f"`down --only {box.instance}` puts the pre-Lab-5 .env back")
+    rem.write_file_atomic(env_path, envfile.encode(facts.env_text or ""), facts.env_mode or 0o600)
+    rep.add("CHANGED", ".env", f"rolled back to the .env this run started from (backup {backup['env']})")
+    try:
+        restart_app(ctx, rem, box, facts.app, rep)
+    except Lab5Error as exc:
+        raise Lab5Error(f"the app does not answer even with the previous .env ({exc}); "
+                        f"`down --only {box.instance}` puts the pre-Lab-5 .env back")
+    rep.add("FAIL", "up", "the app did not start with the Lab 5 keys, so they were rolled back and it runs "
+                          f"as before this run; check workshop.yaml and `journalctl -u {box.app_unit}` on "
+                          "the box, then re-run up")
 
 
 def _ingress_ok(ingress: List[Dict[str, Any]], hostname: str, service: str) -> bool:
@@ -695,6 +758,10 @@ def up_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
         for note in getattr(rem, "notes", []):
             rep.add("OK", "host key", note)
         facts = inspect_box(ctx, rem, box, rep)
+        env_rec = record.get("env") or {}
+        if facts.env_text is not None and facts.health_version is None and env_rec and not env_rec.get("reverted"):
+            rep.add("WARN", "hint", f"this box's .env holds the Lab 5 keys from an earlier up: "
+                                    f"`down --only {box.instance}` puts the pre-Lab-5 .env back and restarts the app")
         view = cloudflare_view(ctx, box, record) if not rep.blockers else {"conflicts": []}
         for conflict in view["conflicts"]:
             rep.block(conflict)
@@ -704,13 +771,22 @@ def up_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
         backup = make_backup(ctx, rem, box, facts, rep)
         record.setdefault("backups", []).append(backup)
         ctx.state.save_box(box.nn, record)
-        if apply_env(ctx, rem, box, facts, record, backup, rep):
+        written = apply_env(ctx, rem, box, facts, record, backup, rep)
+        if written is not None:
             record["restart_pending"] = True      # survives a failure below: the next run restarts
             ctx.state.save_box(box.nn, record)
         apply_tunnel(ctx, rem, box, facts, record, view, rep)
         apply_hec_host(ctx, box, facts, record, rep)
         if record.get("restart_pending") or ctx.force_restart:
-            restart_app(ctx, rem, box, facts.app, rep)
+            try:
+                restart_app(ctx, rem, box, facts.app, rep)
+            except Lab5Error as exc:
+                if written is None:
+                    raise
+                roll_back_env(ctx, rem, box, facts, written, backup, rep, str(exc))
+                record["restart_pending"] = False      # it runs the .env on disk again
+                ctx.state.save_box(box.nn, record)
+                return rep
             record["restart_pending"] = False
             ctx.state.save_box(box.nn, record)
         else:
@@ -721,6 +797,8 @@ def up_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
     finally:
         rem.close()
         if record.get("tunnel") or record.get("env") or record.get("backups"):
+            if not rep.failed:
+                record.pop("revert_pending", None)     # the box is a Lab 5 box again, on purpose
             record.setdefault("history", []).append({"at": utc_now(), "command": "up", "ok": not rep.failed})
             ctx.state.save_box(box.nn, record)
     return rep
@@ -732,10 +810,16 @@ def status_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
     rep = BoxReport(box, ws.hostname(box))
     record = ctx.state.load_box(box.nn)
     rec_t, rec_d = record.get("tunnel") or {}, record.get("dns") or {}
+    if record.get("revert_pending"):
+        rep.add("FAIL", "down", f"an earlier down could not revert this box ({record['revert_pending'].get('since')}): "
+                                f"its .env may still hold the Lab 5 credentials; re-run `down --only {box.instance}`")
     if rec_t.get("id") and not rec_t.get("deleted"):
         tunnel = cf.get_tunnel(ctx.account_id, rec_t["id"])
         state = (tunnel or {}).get("status") or "missing"
         rep.add("OK" if state == "healthy" else "FAIL", "tunnel", f"{rec_t.get('name')} ({rec_t['id']}): {state}")
+    elif rec_t.get("deleted"):
+        rep.add("FAIL", "tunnel", f"{rec_t.get('name')} was deleted by down ({rec_t.get('deleted_at')}); "
+                                  "up sets the box up again")
     else:
         rep.add("FAIL", "tunnel", "no tunnel recorded for this box (run up)")
     if rec_d.get("id") and not rec_d.get("deleted"):
@@ -796,18 +880,33 @@ def down_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
     rep = BoxReport(box, ws.hostname(box))
     record = ctx.state.load_box(box.nn)
     had_record = bool(record)
+    if record.get("revert_pending"):
+        rep.add("OK", "retry", f"finishing the revert an earlier down could not ({record['revert_pending'].get('since')})")
+    box_done = False
     try:
         rem = ctx.connect(box, ctx.passwords.get(box.nn, ""))
     except Lab5Error as exc:
-        rep.add("WARN", "ssh", f"{exc}: the box's .env, HEC host and connector are left as they are")
+        rep.add("FAIL", "ssh", f"{exc}. Nothing on the box was reverted: its .env still holds the Lab 5 keys "
+                               "and credentials, and its HEC host and connector are unchanged")
         rem = None
     if rem is not None:
+        first = len(rep.steps)
         try:
             _down_on_box(ctx, rem, box, record, rep)
+            box_done = not any(status == "FAIL" for status, _, _ in rep.steps[first:])
         except Lab5Error as exc:
             rep.add("FAIL", "box", str(exc))
         finally:
             rem.close()
+    if not box_done:
+        rep.add("FAIL", "re-run", f"the box is not reverted: re-run `down --only {box.instance}` once it is "
+                                  "reachable (if Show has destroyed it, nothing is left on it to revert)")
+    if had_record:
+        if box_done:
+            record.pop("revert_pending", None)
+        else:
+            record.setdefault("revert_pending", {"since": utc_now()})   # status and the next down say so
+        ctx.state.save_box(box.nn, record)
     rec_d = record.get("dns") or {}
     if rec_d.get("id") and not rec_d.get("deleted"):
         gone = cf.delete_record(ctx.zone_id, rec_d["id"])
@@ -865,28 +964,9 @@ def _down_on_box(ctx: Ctx, rem: Any, box: BoxSpec, record: Dict[str, Any], rep: 
         if env_rec:
             env_rec["reverted"] = True
             ctx.state.save_box(box.nn, record)
-    hec = record.get("hec") or {}
     key = envfile.get(envfile.split_lines(facts.env_text or ""), "ACCESS_KEY") or ""
     ctx.redactor.add(key)
-    if hec.get("destination_id") and not hec.get("reverted"):
-        app = remote.AppClient(rem, key, box.app_port)
-        dest_id = hec["destination_id"]
-        try:
-            current = app.destination(dest_id).get("host")
-        except Lab5Error as exc:
-            rep.add("WARN", "HEC host", f"destination {dest_id}: {exc}; left as it is")
-        else:
-            if current == hec.get("set_host"):
-                app.set_destination_host(dest_id, str(hec.get("prior_host") or ""))
-                rep.add("CHANGED", "HEC host", f"destination {dest_id}: {current!r} -> {hec.get('prior_host')!r}")
-            elif current == hec.get("prior_host"):
-                rep.add("OK", "HEC host", f"destination {dest_id} already back to {current!r}")
-            else:
-                rep.add("WARN", "HEC host", f"destination {dest_id} now says {current!r}, set after up; left as it is")
-            hec["reverted"] = True
-            ctx.state.save_box(box.nn, record)
-    else:
-        rep.add("OK", "HEC host", "already reverted" if hec else "no record of up setting it")
+    app = remote.AppClient(rem, key, box.app_port)
     scrubbed = []
     for backup in record.get("backups") or []:
         path = backup.get("env")
@@ -901,11 +981,39 @@ def _down_on_box(ctx: Ctx, rem: Any, box: BoxSpec, record: Dict[str, Any], rep: 
         ctx.state.save_box(box.nn, record)
         rep.add("CHANGED", "backups", f"removed {len(scrubbed)} .env backup(s) that held Lab 5 credentials")
     if env_changed or record.get("restart_pending") or ctx.force_restart:
-        rem.run(["systemctl", "restart", box.app_unit], sudo=True, check=True)
-        rep.add("CHANGED", "restart", f"{box.app_unit} restarted")
+        # Waits for /health: the HEC host below needs the app, and down is
+        # only done once the box answers with its Labs 0-4 .env.
+        restart_app(ctx, rem, box, app, rep)
         if record:
             record["restart_pending"] = False
             ctx.state.save_box(box.nn, record)
+    hec = record.get("hec") or {}
+    if hec.get("destination_id") and not hec.get("reverted"):
+        dest_id = hec["destination_id"]
+        try:
+            current = app.destination(dest_id).get("host")
+        except remote.AppHttpError as exc:
+            if exc.status != 404:
+                raise Lab5Error(f"HEC host of destination {dest_id} not reverted ({exc}): the room's "
+                                f"events still carry host {hec.get('set_host')!r}")
+            rep.add("WARN", "HEC host", f"destination {dest_id} no longer exists; nothing to revert")
+            hec["reverted"] = True
+            ctx.state.save_box(box.nn, record)
+        except Lab5Error as exc:
+            raise Lab5Error(f"HEC host of destination {dest_id} not reverted, the app does not answer ({exc}): "
+                            f"the room's events still carry host {hec.get('set_host')!r}")
+        else:
+            if current == hec.get("set_host"):
+                app.set_destination_host(dest_id, str(hec.get("prior_host") or ""))
+                rep.add("CHANGED", "HEC host", f"destination {dest_id}: {current!r} -> {hec.get('prior_host')!r}")
+            elif current == hec.get("prior_host"):
+                rep.add("OK", "HEC host", f"destination {dest_id} already back to {current!r}")
+            else:
+                rep.add("WARN", "HEC host", f"destination {dest_id} now says {current!r}, set after up; left as it is")
+            hec["reverted"] = True
+            ctx.state.save_box(box.nn, record)
+    else:
+        rep.add("OK", "HEC host", "already reverted" if hec else "no record of up setting it")
 
 
 def workshop_orphans(ctx: Ctx) -> List[str]:
@@ -1077,6 +1185,10 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
         failed = [r.box.nn for r in reports if r.failed]
         reporter.line(f"RESULT: {args.command}: {len(reports) - len(failed)} ok, {len(failed)} failed"
                       + (f" (box {', '.join(failed)})" if failed else ""))
+        if args.command == "down" and failed:
+            only = ",".join(str(r.box.instance) for r in reports if r.failed)
+            reporter.line(f"NEXT: re-run `lab5-setup down {args.workshop_yaml} --only {only}` once those boxes "
+                          "are reachable; until then they keep the Lab 5 keys and credentials")
         return 1 if failed else 0
     except Lab5Error as exc:
         reporter.line(f"lab5-setup: {exc}")

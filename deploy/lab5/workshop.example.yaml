@@ -24,11 +24,12 @@ room:
   fallback: jordan.reyes     # untouched; to swap, set victim: jordan.reyes and re-run up
   trusted: [marcus.bell, elena.sousa, grace.lin]
 
-# Optional 12.1 settings. Leave a key out to keep the app default.
+# Optional 12.1 settings. Leave a key out to keep the app default. Checked
+# before anything connects: the app cannot start with a value like "12h".
 # identity:
-#   session_ttl_minutes: 720
-#   status_ttl_seconds: 10
-#   fail_open: true
+#   session_ttl_minutes: 720   # whole minutes, 1-10080
+#   status_ttl_seconds: 10     # whole seconds, 0-3600
+#   fail_open: true            # true or false
 
 # Keychain item (service) names. These are the defaults; list only the ones you
 # changed. Add an item with: security add-generic-password -s ITEM -a "$USER" -w
