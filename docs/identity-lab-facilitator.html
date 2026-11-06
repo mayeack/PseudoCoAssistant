@@ -35,7 +35,7 @@ ul,ol{padding-left:1.4rem}
 </style></head>
 <body><main>
 <h1>Lab 5 facilitator runbook: Verify with Cisco Identity Intelligence</h1>
-<p><strong>For:</strong> Splunk Show deliveries set up with <code>lab5-setup</code> from your Mac. <strong>Design:</strong> <code>docs/identity-intelligence-lab-plan.md</code> section 12 (sections 4.3–4.6 and 9 for the background). <strong>Tools:</strong> <code>deploy/lab5/README.md</code>.</p>
+<p><strong>For:</strong> Splunk Show deliveries set up with <code>lab5-setup</code> from your Mac. <strong>Tools:</strong> <code>deploy/lab5/README.md</code>. <strong>Design:</strong> <code>docs/identity-intelligence-lab-plan.md</code>, a planning note kept outside the repository (a fresh clone does not have it). You do not need it: &quot;Terms used here&quot;, below, defines every spike, decision, plan section and date this runbook and the README rely on.</p>
 <p>Lab 5 makes four claims:</p>
 <ol>
 <li>Identity Intelligence (CII) catches a takeover of a PseudoCo employee account and drops its trust level.</li>
@@ -170,6 +170,36 @@ ul,ol{padding-left:1.4rem}
 <li><strong>A persona's bypass code in the Universal Prompt.</strong> Each persona also has a hardware token (script-only), which Duo may offer first. Attendees pick <em>Other options</em>, then <em>Bypass Code</em>. A code typed into the wrong method counts as a failed attempt toward the lockout. Check the flow in the dry run.</li>
 <li><strong>Spike S15</strong> has not run. It should prove three things: that API group membership grants CII Read-Only, that a password plus an HOTP passcode reaches CII, and what disabling does to a live CII session.</li>
 <li><strong>The room checks in <code>status</code></strong> (the victim's events in the stack) wait on the S1 decision. The per-box check that each box's gate blocks the victim is in <code>status</code> already.</li>
+</ul>
+<h2>Terms used here</h2>
+<p><strong>Dates.</strong> T is the first Lab 5 delivery, and T-<em>n</em> is <em>n</em> days before it. T-18 is the persona trust gate (every persona out of &quot;Unknown&quot;, or the date moves). T-2 is the earliest takeover (S1's first option). T-1 is when the Show boxes arrive and <code>lab5-setup up</code> runs. T-0 is lab day.</p>
+<p><strong>Spikes</strong> are one-off tests on the Duo tenant, with the spike persona <code>nina.osei</code>. The baseline starts only after S1, S2 and S7 pass.</p>
+<ul>
+<li><strong>S1, the spike:</strong> does the Auth API's <code>ipaddr</code> reach <code>access_device.ip</code> and its GeoIP in Duo's authentication log, and does CII use it? Until it answers, <code>personas.yaml</code> holds no real addresses and the scripts refuse to sign in.</li>
+<li><strong>S1, the decision:</strong> how the victim's failed checks reach a room stack that only exists from T-1. The options, tried in order: CII's <em>Send notification</em> after a T-2 takeover, a Near Time takeover at T-1, a labelled backfill. Still open.</li>
+<li><strong>S2:</strong> does Impossible Travel fire on Auth API sign-ins, does a new <code>hostname</code> count as a new device, and do two venue addresses trip it?</li>
+<li><strong>S5, S6:</strong> how a persona's trust moves over time, and the exact check names CII returns (they confirm the <code>getEndUser</code> query and the check IDs).</li>
+<li><strong>S7:</strong> how Duo encodes an API-created HOTP secret (hex or base32), and how far ahead of its counter it accepts a passcode.</li>
+<li><strong>S15:</strong> that group membership set through the API grants CII Read-Only, that a password plus an HOTP passcode reaches CII, and what disabling does to a live CII session.</li>
+</ul>
+<p><strong>Decisions</strong> (2026-11-05):</p>
+<ul>
+<li><strong>A1:</strong> one participant account per instance, disabled after 7 days and deleted after 14.</li>
+<li><strong>A3:</strong> the Identity Risk Gate fails open: if Duo or CII cannot answer, the turn is allowed and the event says <code>identity_check=&quot;unavailable&quot;</code>.</li>
+<li><strong>A4:</strong> revocation is pulled from Duo by each instance, plus an <strong>Unblock me</strong> toggle in the banner.</li>
+<li><strong>I1:</strong> Duo only, no broker and no AWS. Each box holds the Duo Web SDK keys, a read-only Status Admin API key and a read-only CII API client for the workshop, and they are rotated afterwards.</li>
+<li><strong>I4:</strong> one setup command on your Mac, which never overwrites another lab's settings.</li>
+<li><strong>I5:</strong> no code upgrade at setup. The Show template is re-baked on the release instead (12.6).</li>
+</ul>
+<p><strong>Plan sections the tools cite:</strong></p>
+<ul>
+<li><strong>4.2:</strong> which groups each lab app admits (see &quot;Duo applications&quot; in <code>deploy/lab5/README.md</code>; Sign-in also admits CII Read-Only).</li>
+<li><strong>4.3:</strong> the persona cast. Every room gets its own victim and an untouched fallback, the handouts carry per-team bypass codes, and no persona ever gets bypass status or a bypass group.</li>
+<li><strong>4.4:</strong> the Sign-in policy (bypass code + hardware token) and the scripted policy, and lockout auto-revert, which unlocks an account after about 15 minutes.</li>
+<li><strong>4.5:</strong> the persona activity: the daily baseline sign-ins, the self-check, the T-18 gate, the takeover and the replay.</li>
+<li><strong>4.6:</strong> the per-delivery preflight and the ordered teardown, as in this runbook.</li>
+<li><strong>12.1</strong> to <strong>12.4:</strong> the app's configuration, the participant accounts, <code>lab5-setup</code>, and the research behind them, as <code>docs/identity.md</code> and <code>deploy/lab5/README.md</code> describe them.</li>
+<li><strong>12.6:</strong> the Show template checklist (&quot;Show template&quot; in <code>deploy/lab5/README.md</code>).</li>
 </ul>
 <h2>Quick reference</h2>
 <table>

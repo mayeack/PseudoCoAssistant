@@ -35,7 +35,7 @@ ul,ol{padding-left:1.4rem}
 </style></head>
 <body><main>
 <h1>lab5-setup: Show boxes in, Lab 5 out</h1>
-<p><code>lab5-setup</code> turns the Splunk Show boxes of one workshop into Lab 5 (&quot;Verify: Cisco Identity Intelligence&quot;) instances, and puts them back afterwards. It runs on the facilitator's Mac. The design is section 12.3 of <code>docs/identity-intelligence-lab-plan.md</code>; section 12.1 lists the keys it writes.</p>
+<p><code>lab5-setup</code> turns the Splunk Show boxes of one workshop into Lab 5 (&quot;Verify: Cisco Identity Intelligence&quot;) instances, and puts them back afterwards. It runs on the facilitator's Mac. The design is section 12.3 of <code>docs/identity-intelligence-lab-plan.md</code>, a planning note kept outside the repository; section 12.1 lists the keys it writes. The plan sections, spikes (S1, S7, ...) and decisions (I1, I5, ...) cited here are defined in &quot;Terms used here&quot; in <code>docs/identity-lab-facilitator.md</code>, so this README does not need the plan.</p>
 <p>There is no broker and no AWS. Secrets come from the Mac's Keychain. What <code>up</code> created is recorded under <code>~/.pseudoco-lab5/</code>. Everything else lives on the boxes, in Duo and in Cloudflare.</p>
 <p>The same Mac runs the persona scripts (<code>scripts/identity/</code>, below) and two daily launchd jobs (<code>deploy/launchd/install-lab5.sh</code>). The lab-day runbook is <code>docs/identity-lab-facilitator.md</code>.</p>
 <h2>Commands</h2>

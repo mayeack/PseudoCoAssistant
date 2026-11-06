@@ -1,6 +1,6 @@
 # lab5-setup: Show boxes in, Lab 5 out
 
-`lab5-setup` turns the Splunk Show boxes of one workshop into Lab 5 ("Verify: Cisco Identity Intelligence") instances, and puts them back afterwards. It runs on the facilitator's Mac. The design is section 12.3 of `docs/identity-intelligence-lab-plan.md`; section 12.1 lists the keys it writes.
+`lab5-setup` turns the Splunk Show boxes of one workshop into Lab 5 ("Verify: Cisco Identity Intelligence") instances, and puts them back afterwards. It runs on the facilitator's Mac. The design is section 12.3 of `docs/identity-intelligence-lab-plan.md`, a planning note kept outside the repository; section 12.1 lists the keys it writes. The plan sections, spikes (S1, S7, ...) and decisions (I1, I5, ...) cited here are defined in "Terms used here" in `docs/identity-lab-facilitator.md`, so this README does not need the plan.
 
 There is no broker and no AWS. Secrets come from the Mac's Keychain. What `up` created is recorded under `~/.pseudoco-lab5/`. Everything else lives on the boxes, in Duo and in Cloudflare.
 

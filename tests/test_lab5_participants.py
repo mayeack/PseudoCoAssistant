@@ -2060,6 +2060,27 @@ def test_expire_crash_notifies() -> None:
               and "crashed (RuntimeError)" in h.notes[-1][1], str(h.notes))
 
 
+def test_docs_define_their_terms() -> None:
+    print("== the runbook defines every spike, decision and plan section the docs act on (the plan is not in git) ==")
+    runbook = (ROOT / "docs" / "identity-lab-facilitator.md").read_text()
+    try:
+        terms = runbook[runbook.index("## Terms used here"):runbook.index("## Quick reference")]
+    except ValueError:
+        terms = ""
+    defined = {t for span in re.findall(r"\*\*([^*]+)\*\*", terms) for t in re.findall(r"\b(S\d{1,2}|[AI]\d)\b", span)}
+    texts = [runbook.replace(terms, ""), (ROOT / "deploy" / "lab5" / "README.md").read_text(),
+             (ROOT / "docs" / "identity.md").read_text(), (ROOT / "scripts" / "identity" / "personas.yaml").read_text()]
+    cited = {t for text in texts for t in re.findall(r"\b(S\d{1,2}|[AI]\d)\b", text)}
+    check("every spike (S1, S7, ...) and decision (A3, I5, ...) the docs cite is defined in 'Terms used here'",
+          terms and cited and cited <= defined, f"undefined: {sorted(cited - defined)}")
+    sections = set(re.findall(r"\b(?:plan |section )?(4\.[2-6]|12\.[1-6])\b", "\n".join(texts)))
+    check("...and so is every plan section they cite (4.2-4.6, 12.1-12.6)",
+          all(f"**{sec}" in terms or (sec in ("12.2", "12.3") and "**12.1** to **12.4" in terms)
+              for sec in sections), str(sorted(sections)))
+    check("the docs say the plan is kept outside the repository, so nobody follows a link that is not there",
+          "kept outside the repository" in runbook and "kept outside the repository" in texts[1])
+
+
 def main() -> int:
     for test in (test_units, test_up_creates_participants, test_check_and_refusals, test_expire,
                  test_expire_after_up_cleans_the_handout, test_signin_user_access_docs,
@@ -2069,7 +2090,7 @@ def main() -> int:
                  test_handouts_revoke_waits_for_the_new_batch, test_duo_transport_errors, test_contained_victim,
                  test_bypass_locked_out_is_temporary, test_bypass_lost_create_answer, test_signin_policy_docs,
                  test_bypass_down_then_up, test_bypass_unreadable_record, test_bypass_valid_until_after_creates,
-                 test_half_made_participant, test_expire_crash_notifies):
+                 test_half_made_participant, test_expire_crash_notifies, test_docs_define_their_terms):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

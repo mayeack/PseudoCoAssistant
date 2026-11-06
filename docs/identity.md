@@ -36,7 +36,10 @@ regression):
 
 There is no identity broker. Each instance holds its own Duo and Cisco
 Identity Intelligence (CII) credentials in `.env` for the workshop's lifetime,
-and they are rotated afterwards (plan section 12.1).
+and they are rotated afterwards (plan section 12.1). The plan,
+`docs/identity-intelligence-lab-plan.md`, is a planning note kept outside the
+repository; "Terms used here" in `docs/identity-lab-facilitator.md` defines
+the sections and decisions (A3, A4, ...) cited on this page.
 
 ## The pieces
 

@@ -16,7 +16,9 @@
                                       delete at day 14 (daily from launchd)
 
 Design: docs/identity-intelligence-lab-plan.md section 12.3 (and 12.1 for the
-keys); operator guide: deploy/lab5/README.md. Runs on the facilitator's Mac.
+keys), a planning note kept outside the repository; operator guide:
+deploy/lab5/README.md, and docs/identity-lab-facilitator.md "Terms used here"
+for the plan sections, spikes and decisions cited. Runs on the facilitator's Mac.
 There is no broker and no AWS: secrets come from the Mac's Keychain, what `up`
 created is recorded under ~/.pseudoco-lab5/, and everything else lives in the
 boxes, Duo and Cloudflare.
