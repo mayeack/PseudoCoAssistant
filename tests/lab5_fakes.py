@@ -15,8 +15,12 @@ Bypass codes follow the Admin API page: a POST returns only the code strings
 (no ids), clears the user's other codes unless preserve_existing=true, makes at
 most 10 per call and refuses to pass 100 per user; reuse_count 0 and
 valid_secs 0 (the defaults) mean unlimited and never expiring; a GET returns
-metadata without the codes. The Auth API accepts a live code as a passcode,
-uses it up after reuse_count sign-ins, and refuses it once valid_secs passed.
+metadata without the codes, and DELETE /admin/v1/bypass_codes/{id} deletes
+one (404 when there is none). ``add_bypass`` gives a user another room's codes,
+and ``bypass_hooks`` run after every create, so a test can have another room
+issue codes for the same persona between the tool's two listings. The Auth
+API accepts a live code as a passcode, uses it up after reuse_count sign-ins,
+and refuses it once valid_secs passed.
 """
 from __future__ import annotations
 
@@ -76,6 +80,7 @@ class FakeDuo:
         self.push_answer = "deny"
         self.bypass: Dict[str, List[Dict[str, Any]]] = {}             # user_id -> its bypass codes
         self.issued_codes: List[str] = []                              # every bypass code ever returned
+        self.bypass_hooks: List[Callable[[str], None]] = []            # run with the user_id after each create
         self._ids = itertools.count(1)
         self._codes = random.Random(4026)
         self.add_group("CII Read-Only", "Identity Intelligence read-only (auto-created)")
@@ -115,6 +120,18 @@ class FakeDuo:
                             "user": user["user_id"]}
         user["tokens"].append(tid)
         return user
+
+    def add_bypass(self, user_id: str, count: int = 1, valid: int = 86400) -> List[str]:
+        """Another room's codes for this user (no API call recorded). Returns their ids."""
+        now = int(self.clock())
+        made = []
+        for _ in range(count):
+            code = {"bypass_code_id": self._id("DB"), "user_id": user_id,
+                    "code": "%09d" % self._codes.randrange(10 ** 9),
+                    "created": now, "expiration": now + valid, "reuse_count": 5, "left": 5}
+            self.bypass.setdefault(user_id, []).append(code)
+            made.append(code["bypass_code_id"])
+        return made
 
     def live_codes(self, username: str) -> List[Dict[str, Any]]:
         user = self.by_name(username)
@@ -287,6 +304,8 @@ class FakeDuo:
                          "left": reuse or None})
             made.append(code)
             self.issued_codes.append(code)
+        for hook in list(self.bypass_hooks):
+            hook(uid)
         return made                                    # the codes only: no ids, as in Duo
 
     def _use_bypass(self, user: Dict[str, Any], passcode: str) -> bool:

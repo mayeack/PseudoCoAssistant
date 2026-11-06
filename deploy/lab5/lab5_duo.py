@@ -288,6 +288,18 @@ class AdminAPI(_Api):
         returns a code's value after creating it."""
         return self.page(f"/admin/v1/users/{_id(user_id)}/bypass_codes")
 
+    def delete_bypass_code(self, code_id: str) -> bool:
+        """``DELETE /admin/v1/bypass_codes/{bypass_code_id}`` (no parameters,
+        *Grant resource - Write*). True when Duo deleted it, False when Duo has
+        no such code (404: used up, expired or deleted already)."""
+        try:
+            self.call("DELETE", f"/admin/v1/bypass_codes/{_id(code_id)}")
+        except DuoError as exc:
+            if exc.status == 404:
+                return False
+            raise
+        return True
+
 
 class AuthAPI(_Api):
     """The Auth API endpoints the PseudoCo VPN app is used for. Every sign-in

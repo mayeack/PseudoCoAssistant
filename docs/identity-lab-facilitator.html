@@ -115,17 +115,17 @@ ul,ol{padding-left:1.4rem}
 <li><code>bypass_codes.valid_hours</code> (default 12): the persona bypass codes that <code>up</code> puts on the cards stop working that many hours after <code>up</code> runs. If you run <code>up</code> the day before, raise it to reach the end of lab day.</li>
 </ul>
 </li>
-<li><code>deploy/lab5/lab5-setup check &lt;workshop.yaml&gt;</code>. Every box should say <strong>ready, nothing to upgrade</strong>, and every participant account and card <code>PLAN</code>. It changes nothing. A persona that is missing in Duo, or near Duo's 100 bypass codes, fails here.</li>
+<li><code>deploy/lab5/lab5-setup check &lt;workshop.yaml&gt;</code>. Every box should say <strong>ready, nothing to upgrade</strong>, and every participant account and card <code>PLAN</code>. It changes nothing. A room persona that is missing in Duo, not active there (bypass status, disabled or locked out), or near Duo's 100 bypass codes fails every card here, and <code>up</code> would issue no persona codes. For a persona that is not active, run <code>py scripts/identity/provision_personas.py --reset --only &lt;persona&gt;</code>. Bypass status is never acceptable (plan 4.3): Duo then skips the second factor for that persona, so anyone with an instance's access key could sign in as it.</li>
 <li><code>deploy/lab5/lab5-setup up &lt;workshop.yaml&gt;</code>. The boxes get their Lab 5 keys, tunnel and DNS name, HEC host and restart. Then every box that came up gets its participant account <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code>, its card gets the team's bypass codes for the room's victim and each trusted persona, and the handout is written.</li>
 <li><strong>Temporary passwords.</strong> <code>up</code> prints an Admin Panel link per account. Open each one, click <em>Create temporary password</em> (valid 30 days) and write it on that participant's card. The Admin API cannot set passwords. While you are in the Admin Panel, check that <strong>PseudoCo Lab: Sign-in</strong> still admits <strong>CII Read-Only</strong> (step 4 of &quot;Once, before the first delivery&quot;) and that its policy still allows bypass code + hardware token. <code>up</code> reminds you, because it cannot check either.</li>
 <li>Print <code>~/.pseudoco-lab5/workshops/&lt;workshop&gt;/handout.html</code> and cut the cards apart.</li>
-<li><code>deploy/lab5/lab5-setup status &lt;workshop.yaml&gt;</code>. Every box should be green. Participants show &quot;no password yet&quot; until they sign in to CII and set their own. Each card's persona codes show how long they have left.</li>
+<li><code>deploy/lab5/lab5-setup status &lt;workshop.yaml&gt;</code>. Every box should be green. Participants show &quot;no password yet&quot; until they sign in to CII and set their own. Each room persona shows its Duo status, and each card's persona codes show how long they have left.</li>
 </ol>
-<p>A box that <code>up</code> refused is reported with the reason. Fix it, then re-run with <code>--only &lt;n&gt;</code>. A re-run keeps the accounts and their cards. Passcodes are shown only once, so for a lost card use <code>up --only &lt;n&gt; --reissue-passcodes</code> (the old passcodes stop working), then <code>handouts --only &lt;n&gt;</code> for fresh persona codes. The lost card's persona codes keep working until they expire: nothing can delete them early.</p>
+<p>A box that <code>up</code> refused is reported with the reason. Fix it, then re-run with <code>--only &lt;n&gt;</code>. A re-run keeps the accounts and their cards. A card whose persona codes failed (a Duo error, say) is named in the <code>RESULT</code> line, and a re-run of <code>up</code> finishes it. Passcodes are shown only once, so for a lost card use <code>up --only &lt;n&gt; --reissue-passcodes</code> (the old passcodes stop working), then <code>handouts --only &lt;n&gt; --revoke</code>. That puts fresh persona codes on the card and deletes the lost card's.</p>
 <h2>Lab day</h2>
 <p><strong>Before attendees sit down (T-0):</strong></p>
 <ul>
-<li><code>lab5-setup status</code> again. Every tunnel should be healthy and <code>duo_signin</code> not gated. If the cards' persona codes expire before the lab ends, run <code>deploy/lab5/lab5-setup handouts &lt;workshop.yaml&gt;</code> and print the cards again, with the temporary passwords copied over. The old codes stay valid until they expire.</li>
+<li><code>lab5-setup status</code> again. Every tunnel should be healthy and <code>duo_signin</code> not gated. If the cards' persona codes expire before the lab ends, run <code>deploy/lab5/lab5-setup handouts &lt;workshop.yaml&gt;</code> and print the cards again, with the temporary passwords copied over. The old codes stay valid until they expire, unless you add <code>--revoke</code>.</li>
 <li><code>persona_activity.py selfcheck</code>. The trusted personas should pass. The room's victim should fail MFA Flood and Impossible Travel in CII.</li>
 <li>In the Admin Panel, <em>Users → Clear all step-ups</em>.</li>
 <li>In each instance's Demo Controls, turn <strong>Trigger Demo Incident</strong> off. Its synthetic incident would crowd the room stack.</li>
@@ -152,12 +152,12 @@ ul,ol{padding-left:1.4rem}
 <p>That way the AI Defense blocks in the room stack belong to the victim alone, and the Lab 5 join finds one user.</p>
 <p><strong>When to cue containment.</strong> Cue it only after the room has seen two things: the Identity Risk Gate refusing the victim (claim 2), and the Splunk finding that joins CII's failed checks with AI Defense blocks (claim 3). The detection fires while the latest block is under 5 minutes old, so wait until every team has its finding. Then the response agent disables the victim in Duo (claim 4), and the victim's PseudoCo Assistant sessions end within 10 to 20 seconds with a banner.</p>
 <ul>
-<li>The victim is shared by the whole room, so disable it once.</li>
+<li>The victim is shared by the whole room, so disable it once. From then on <code>lab5-setup status</code> fails on the disabled victim, and <code>handouts</code> issues no persona codes until the victim is active again (<code>provision_personas.py --reset</code>, after the workshop).</li>
 <li><strong>Unblock me</strong> in the banner restores an attendee's session for the rest of the lab. It never re-enables the Duo account, so the evidence stays intact for the debrief.</li>
 </ul>
 <h2>After the workshop, in this order</h2>
 <ol>
-<li><code>deploy/lab5/lab5-setup down &lt;workshop.yaml&gt;</code>. On each reachable box it reverts the Lab 5 keys and the HEC host. Then it deletes the tunnels and DNS records. A box Show has already destroyed fails the run, which is expected: nothing is left on it. It deletes no persona bypass code, because <code>valid_secs</code> is their cutoff, and its last line says when the last batch stops working.</li>
+<li><code>deploy/lab5/lab5-setup down &lt;workshop.yaml&gt;</code>. On each reachable box it reverts the Lab 5 keys and the HEC host. Then it deletes the tunnels and DNS records. A box Show has already destroyed fails the run, which is expected: nothing is left on it. Then it deletes the persona bypass codes it recorded for each card. Codes it could not tell apart from another room's stop at their <code>valid_secs</code>, and its last line says until when.</li>
 <li>Rotate the credentials the boxes held: the Web SDK secret, the read-only Status Admin API key and the CII API client (I1).</li>
 <li>The room stack: run its Lab 5 teardown on the TA side, and confirm CII's webhook target is gone before the stack is destroyed.</li>
 <li>Personas: <code>py scripts/identity/provision_personas.py --reset</code>. It re-enables and unlocks the contained victim and resyncs every HOTP token. Then <em>Clear all step-ups</em> and CII <em>Reset Feedback</em>. The trusted personas' exclusions stay.</li>
@@ -217,8 +217,12 @@ ul,ol{padding-left:1.4rem}
 <td><code>lab5-setup status</code>, <code>persona_activity.py selfcheck</code>, <em>Clear all step-ups</em>; <code>lab5-setup handouts</code> if the cards' persona codes run out before the lab ends</td>
 </tr>
 <tr>
+<td>lost card</td>
+<td><code>lab5-setup up --only &lt;n&gt; --reissue-passcodes</code>, then <code>lab5-setup handouts --only &lt;n&gt; --revoke</code></td>
+</tr>
+<tr>
 <td>after</td>
-<td><code>lab5-setup down</code>; rotate the box credentials; <code>provision_personas.py --reset</code></td>
+<td><code>lab5-setup down</code> (it also deletes the recorded persona bypass codes); rotate the box credentials; <code>provision_personas.py --reset</code></td>
 </tr>
 </tbody>
 </table>

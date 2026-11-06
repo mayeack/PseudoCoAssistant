@@ -7,9 +7,11 @@
                                       then the participant accounts and the handout
     lab5-setup status workshop.yaml   per-box preflight and Cloudflare state
     lab5-setup handouts workshop.yaml a fresh batch of persona bypass codes on
-                                      each handout card (lab-day morning, a lost card)
-    lab5-setup down   workshop.yaml   delete the workshop's tunnels and DNS
-                                      records, revert the Lab 5 keys
+                                      each handout card (lab-day morning, a lost
+                                      card); --revoke deletes the card's earlier ones
+    lab5-setup down   workshop.yaml   delete the workshop's tunnels, DNS records and
+                                      recorded persona bypass codes, revert the
+                                      Lab 5 keys
     lab5-setup expire [workshop.yaml] participant accounts: disable at day 7,
                                       delete at day 14 (daily from launchd)
 
@@ -335,21 +337,23 @@ SIGNIN_POLICY_NOTE = ("Its policy (plan 4.4) must allow bypass code + hardware t
                       "neither set nor check it)")
 
 
-def create_participants(ctx: "Ctx", reports: List["BoxReport"]) -> Tuple[List[str], int]:
+def create_participants(ctx: "Ctx", reports: List["BoxReport"]) -> Tuple[List[str], List[str]]:
     """After the boxes: one account per box that came up, then the room
     personas' bypass codes on each card (4.3), then the handout. Returns the
-    usernames that failed and the number of cards left without their codes."""
+    usernames that failed and the instance numbers whose card's persona codes
+    failed. A failed card never stops the rest: the handout path, the
+    password links and the Sign-in reminders are always printed."""
     env, failed, links = ctx.accounts, [], []
     ctx.out.line(f"== participant accounts (12.2): {len(reports)} instance(s) ==")
     if not reports:
         ctx.out.line("  SKIP     no box came up, so no participant account was created")
-        return failed, 0
+        return failed, []
     try:
         if participants.group_name(ctx.ws.name) not in env.groups:
             participants.preflight(env, create_missing=True)
     except Lab5Error as exc:
         ctx.out.line(f"  FAIL     groups       {exc}")
-        return [participants.username(ctx.ws.name, r.box.nn) for r in reports], 0
+        return [participants.username(ctx.ws.name, r.box.nn) for r in reports], []
     ready: List[str] = []
     for rep in reports:
         name = participants.username(ctx.ws.name, rep.box.nn)
@@ -365,7 +369,7 @@ def create_participants(ctx: "Ctx", reports: List["BoxReport"]) -> Tuple[List[st
             ready.append(rep.box.nn)
         if link:
             links.append(f"{name}: {link}")
-    bad_cards = issue_bypass(ctx, ready, force=False) if ctx.ws.bypass_codes.enabled else 0
+    bad_cards = issue_bypass(ctx, ready, force=False) if ctx.ws.bypass_codes.enabled else []
     handout = env.handout()
     if handout.csv_path.exists():
         ctx.out.line(f"handout: {handout.html_path} (and .csv), mode 0600. It holds each participant's access key "
@@ -382,16 +386,43 @@ def create_participants(ctx: "Ctx", reports: List["BoxReport"]) -> Tuple[List[st
     return failed, bad_cards
 
 
-def issue_bypass(ctx: "Ctx", numbers: Sequence[str], force: bool) -> int:
+def issue_bypass(ctx: "Ctx", numbers: Sequence[str], force: bool) -> List[str]:
     """The room personas' bypass codes on each of these cards (4.3). Returns
-    the number of cards left without the batch they needed."""
+    the instance numbers whose card did not get the batch it needed. Every
+    error is a card's (lab5_bypass.issue); one that still escapes fails every
+    card here, never the run."""
     codes = ctx.ws.bypass_codes
     ctx.out.line(f"== persona bypass codes (4.3): {bypass.describe(ctx.personas, codes)}, valid {codes.valid_hours} h, "
                  "one batch per instance ==")
     if not numbers:
         ctx.out.line("  SKIP     no card to put them on")
-        return 0
-    rows, failed = bypass.issue(ctx.accounts, numbers, ctx.personas, codes, ctx.redactor, force=force)
+        return []
+    try:
+        rows, failed = bypass.issue(ctx.accounts, numbers, ctx.personas, codes, ctx.redactor, force=force)
+    except (Lab5Error, OSError, ValueError) as exc:
+        rows = [("FAIL", f"instance {nn}", f"no bypass codes issued ({exc}); re-run") for nn in numbers]
+        failed = list(numbers)
+    for status, name, detail in rows:
+        ctx.out.line(f"  {status:<8} {name:<24} {detail}")
+    return failed
+
+
+def revoke_codes(ctx: "Ctx", deps: "Deps", numbers: Sequence[str]) -> List[str]:
+    """`down`: delete the persona bypass codes this workshop recorded for
+    these cards (4.3), with the Provisioner app. Returns the instance numbers
+    whose codes were not all deleted. Nothing recorded: no Duo call at all."""
+    todo = bypass.pending(ctx.state.root, ctx.ws.name, numbers)
+    if not todo:
+        return []
+    ctx.out.line(f"== persona bypass codes (4.3): delete the codes recorded for {len(todo)} card(s) ==")
+    try:
+        admin = duo.admin_api(ctx.keychain, deps.duo_transport)
+    except Lab5Error as exc:
+        ctx.out.line(f"  FAIL     {'duo':<24} no bypass code deleted ({exc}); re-run down")
+        return todo
+    env = participants.Env(admin=admin, line=ctx.out.line, root=ctx.state.root, workshop=ctx.ws.name,
+                           email_domain="", personas=set(), persona_group="", now=deps.now)
+    rows, failed = bypass.revoke(env, todo)
     for status, name, detail in rows:
         ctx.out.line(f"  {status:<8} {name:<24} {detail}")
     return failed
@@ -1307,8 +1338,8 @@ def run_expire(args: argparse.Namespace, deps: Deps) -> int:
         scope = f"workshop {ws.name}" if ws else "every workshop"
         reporter.line(f"lab5-setup expire{' --dry-run' if args.dry_run else ''}: {scope}; disable at day "
                       f"{participants.DISABLE_DAYS}, delete at day {participants.DELETE_DAYS}; the "
-                      f"{len(cast.personas)} personas of {_cast_file(ws).name} are never touched, and their "
-                      "bypass codes run out at their own valid_secs")
+                      f"{len(cast.personas)} personas of {_cast_file(ws).name} are never touched, nor is a bypass "
+                      "code: down deletes the ones it recorded, the rest run out at their own valid_secs")
         counts, failed = participants.expire(admin, root, set(cast.usernames), cast.group, deps.now(),
                                              reporter.line, workshop=ws.name if ws else "", dry_run=args.dry_run)
         reporter.line(f"RESULT: expire: {counts['disabled']} disabled, {counts['deleted']} deleted, "
@@ -1340,11 +1371,12 @@ def select_boxes(ws: Workshop, only: str, yaml_path: Path) -> List[BoxSpec]:
 
 
 def run_handouts(args: argparse.Namespace, deps: Deps) -> int:
-    """`lab5-setup handouts workshop.yaml [--only N]`: a fresh batch of the
-    room personas' bypass codes on each handout card (plan 4.3), for lab-day
-    morning or a lost card. It touches no box, tunnel or participant account,
-    and asks for no SSH password. The codes it replaces stay valid until
-    their own valid_secs: nothing can delete them cleanly (lab5_bypass)."""
+    """`lab5-setup handouts workshop.yaml [--only N] [--revoke]`: a fresh
+    batch of the room personas' bypass codes on each handout card (plan 4.3),
+    for lab-day morning or a lost card. It touches no box, tunnel or
+    participant account, and asks for no SSH password. The codes it replaces
+    stay valid until their own valid_secs, unless --revoke deletes the
+    recorded ids of each card's earlier batches (lab5_bypass)."""
     out = deps.out or sys.stdout
     redactor = Redactor()
     try:
@@ -1368,15 +1400,20 @@ def run_handouts(args: argparse.Namespace, deps: Deps) -> int:
         personas = bypass.room_personas(ws.victim, ws.trusted, env.cast)
         codes = ws.bypass_codes
         reporter.line(f"lab5-setup handouts: workshop {ws.name}, {len(boxes)} card(s): a fresh batch each, "
-                      f"{bypass.describe(personas, codes)}, valid {codes.valid_hours} h")
-        rows, failed = bypass.issue(env, [b.nn for b in boxes], personas, codes, redactor, force=True)
+                      f"{bypass.describe(personas, codes)}, valid {codes.valid_hours} h"
+                      + ("; the codes of each card's earlier batches are deleted (--revoke)" if args.revoke else ""))
+        rows, failed = bypass.issue(env, [b.nn for b in boxes], personas, codes, redactor, force=True,
+                                    revoke=args.revoke)
         for status, name, detail in rows:
             reporter.line(f"  {status:<8} {name:<24} {detail}")
         handout = env.handout()
-        if failed < len(boxes) and handout.csv_path.exists():
-            reporter.line(f"handout: {handout.html_path} (and .csv), mode 0600: print the changed cards. The codes "
-                          "they replace stay valid until they expire")
-        reporter.line(f"RESULT: handouts: {len(boxes) - failed} card(s) ok, {failed} failed")
+        if len(failed) < len(boxes) and handout.csv_path.exists():
+            reporter.line(f"handout: {handout.html_path} (and .csv), mode 0600: print the changed cards. "
+                          + ("The codes they replace are deleted where the rows above say so; any other stays valid "
+                             "until it expires" if args.revoke else
+                             "The codes they replace stay valid until they expire (--revoke deletes them)"))
+        reporter.line(f"RESULT: handouts: {len(boxes) - len(failed)} card(s) ok, {len(failed)} failed"
+                      + (f" (instance {', '.join(failed)})" if failed else ""))
         return 1 if failed else 0
     except Lab5Error as exc:
         reporter.line(f"lab5-setup handouts: {exc}")
@@ -1401,8 +1438,15 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
     ap.add_argument("--reissue-passcodes", action="store_true",
                     help="up: replace each participant's HOTP token and print new passcodes on the handout "
                          "(the old ones stop working)")
+    ap.add_argument("--revoke", action="store_true",
+                    help="handouts: also delete the persona bypass codes of each card's earlier batches "
+                         "(a lost card)")
     args = ap.parse_args(argv)
     out = deps.out or sys.stdout
+    if args.revoke and args.command != "handouts":
+        print("lab5-setup: --revoke is for handouts (down deletes every recorded persona bypass code itself)",
+              file=out)
+        return 2
     if args.command == "expire":
         return run_expire(args, deps)
     if args.workshop_yaml is None:
@@ -1449,9 +1493,10 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
         reports = run_parallel(ctx, boxes, COMMANDS[args.command])
         failed = [r.box.nn for r in reports if r.failed]
         bad_accounts = bad_codes = 0
+        bad_cards: List[str] = []          # up and down: the cards whose persona codes failed
         numbers = [b.nn for b in boxes]
         if with_participants and args.command == "up":
-            failed_accounts, bad_codes = create_participants(ctx, [r for r in reports if not r.failed])
+            failed_accounts, bad_cards = create_participants(ctx, [r for r in reports if not r.failed])
             bad_accounts = len(failed_accounts)
         if with_participants and args.command == "check":
             bad_accounts = _print_rows(ctx, "== participant accounts (12.2): what up would do ==",
@@ -1466,15 +1511,24 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
                 bad_accounts = _print_rows(ctx, "== participant accounts (12.2) ==",
                                            participants.status_rows(ctx.accounts, numbers))
             if with_codes:
-                bad_codes = _print_rows(ctx, "== persona bypass codes (4.3) ==",
-                                        bypass.status_rows(ctx.accounts, numbers, ctx.personas))
+                bad_codes = _print_rows(ctx, "== persona bypass codes (4.3): each room persona's Duo status, then "
+                                             "each card ==",
+                                        bypass.status_rows(ctx.accounts, numbers, ctx.personas, ws.bypass_codes))
         if args.command in ("status", "down"):
             for row in workshop_orphans(ctx):
                 reporter.line(f"  WARN     orphan       {row}")
+        if args.command == "down":
+            bad_cards = revoke_codes(ctx, deps, numbers)
+        codes_note = ""
+        if bad_cards:
+            what = "not deleted" if args.command == "down" else "failed"
+            codes_note = f"; persona bypass codes {what} on {len(bad_cards)} card(s) (instance {', '.join(bad_cards)})"
+        elif bad_codes:
+            codes_note = f"; persona bypass codes: {bad_codes} failed"
         reporter.line(f"RESULT: {args.command}: {len(reports) - len(failed)} ok, {len(failed)} failed"
                       + (f" (box {', '.join(failed)})" if failed else "")
                       + (f"; {bad_accounts} participant account(s) failed" if bad_accounts else "")
-                      + (f"; persona bypass codes: {bad_codes} failed" if bad_codes else ""))
+                      + codes_note)
         if args.command == "down" and failed:
             only = ",".join(str(r.box.instance) for r in reports if r.failed)
             reporter.line(f"NEXT: re-run `lab5-setup down {args.workshop_yaml} --only {only}` once those boxes "
@@ -1482,10 +1536,11 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
         if args.command == "down" and ws.participants_enabled:
             reporter.line("Participant accounts stay until `lab5-setup expire` disables them at day "
                           f"{participants.DISABLE_DAYS} and deletes them at day {participants.DELETE_DAYS}")
-            note = bypass.down_note(state.root, ws.name, deps.now())
+        if args.command == "down":
+            note = bypass.down_note(state.root, ws.name, deps.now(), numbers)
             if note:
                 reporter.line(note)
-        return 1 if failed or bad_accounts or bad_codes else 0
+        return 1 if failed or bad_accounts or bad_codes or bad_cards else 0
     except Lab5Error as exc:
         reporter.line(f"lab5-setup: {exc}")
         return 2
