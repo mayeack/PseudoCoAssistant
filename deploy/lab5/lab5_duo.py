@@ -20,16 +20,20 @@ on ``/auth/v2/auth``) and must never send one it forbids
 Secrets (skeys, HOTP secrets, passcodes) only ever travel as signed request
 parameters: duo_client puts POST parameters in the request body, and nothing
 secret is sent with GET.
+
+Every call raises ``DuoError`` and nothing else (``_Api``): a refusal from Duo,
+and any answer that never arrived or cannot be read, so each caller's
+per-card and per-account handling sees one error type.
 """
 from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import re
 import secrets
-import socket
 import struct
 from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib.parse import quote_plus
@@ -144,6 +148,16 @@ def admin_panel_url(host: str, user_id: str = "") -> str:
     return f"https://{panel}" + (f"/users/{quote_plus(user_id)}" if user_id else "")
 
 
+# What a duo_client call raises when no usable answer comes back, besides the
+# RuntimeError that carries Duo's own refusal: the socket, TLS and timeout
+# errors (OSError; ssl.SSLError and socket.timeout are OSErrors), an HTTP
+# exchange cut off or garbled on the way (http.client.HTTPException:
+# IncompleteRead, BadStatusLine, RemoteDisconnected), and a body that is not the
+# JSON Duo documents (ValueError: JSONDecodeError, UnicodeDecodeError; KeyError,
+# TypeError and AttributeError from its parser). Each becomes a DuoError.
+TRANSPORT_ERRORS = (OSError, http.client.HTTPException, ValueError, KeyError, TypeError, AttributeError)
+
+
 class _Api:
     def __init__(self, transport: Any, host: str = "") -> None:
         self.transport = transport
@@ -154,16 +168,25 @@ class _Api:
             return self.transport.json_api_call(method, path, dict(params or {}))
         except RuntimeError as exc:
             raise self._error(method, path, exc)
-        except (OSError, socket.timeout) as exc:
-            raise DuoError(f"Duo {method} {path}: cannot reach Duo ({type(exc).__name__})")
+        except TRANSPORT_ERRORS as exc:
+            raise self._transport_error(method, path, exc)
 
     def page(self, path: str, params: Optional[Dict[str, str]] = None) -> List[Any]:
         try:
             return list(self.transport.json_paging_api_call("GET", path, dict(params or {})))
         except RuntimeError as exc:
             raise self._error("GET", path, exc)
-        except (OSError, socket.timeout) as exc:
-            raise DuoError(f"Duo GET {path}: cannot reach Duo ({type(exc).__name__})")
+        except TRANSPORT_ERRORS as exc:
+            raise self._transport_error("GET", path, exc)
+
+    @staticmethod
+    def _transport_error(method: str, path: str, exc: Exception) -> DuoError:
+        """Only the exception's type is reported: an unfinished answer to a
+        create may hold what it created (a bypass code, say)."""
+        if isinstance(exc, OSError):
+            return DuoError(f"Duo {method} {path}: cannot reach Duo ({type(exc).__name__})")
+        return DuoError(f"Duo {method} {path}: Duo's answer was cut off or unreadable ({type(exc).__name__}), so "
+                        "whether the call took effect is unknown")
 
     @staticmethod
     def _error(method: str, path: str, exc: RuntimeError) -> DuoError:
@@ -171,11 +194,17 @@ class _Api:
         code = None
         data = getattr(exc, "data", None)
         try:
-            body = json.loads(data.decode() if isinstance(data, bytes) else (data or "{}"))
+            body = data if isinstance(data, dict) else json.loads(
+                data.decode() if isinstance(data, bytes) else (data or "{}"))
             code = int(body.get("code")) if body.get("code") is not None else None
         except (ValueError, AttributeError, TypeError):
             pass
-        return DuoError(f"Duo {method} {path}: {str(exc)[:200]}", status=status, code=code)
+        text = str(exc)
+        if status == 200 or text.startswith(("Received bad response", "Received error response")):
+            # duo_client puts the whole body of an unreadable 200 answer in its message; it may hold what
+            # the call created, so it is never repeated
+            text = "Duo's answer was not the JSON it documents, so whether the call took effect is unknown"
+        return DuoError(f"Duo {method} {path}: {text[:200]}", status=status, code=code)
 
 
 def _id(value: Any) -> str:
@@ -228,6 +257,9 @@ class AdminAPI(_Api):
         return self.call("POST", "/admin/v1/groups", {"name": name, "desc": desc})
 
     def user_groups(self, user_id: str) -> List[Dict[str, Any]]:
+        """``GET /admin/v1/users/{id}/groups`` (paged; *Grant resource - Read*):
+        the user's groups as group objects, each with ``group_id``, ``name``
+        and ``status`` (read it with group_status())."""
         return self.page(f"/admin/v1/users/{_id(user_id)}/groups")
 
     def add_user_group(self, user_id: str, group_id: str) -> None:
@@ -347,6 +379,14 @@ def auth_api(keychain: Keychain, transport_factory: Callable[..., Any] = duo_tra
 
 def group_names(user: Dict[str, Any]) -> List[str]:
     return [str(g.get("name") or "") for g in (user.get("groups") or [])]
+
+
+def group_status(group: Dict[str, Any]) -> str:
+    """A group object's ``status``, lower-cased; empty when Duo sent none.
+    The Admin API documents "Active" (members complete secondary
+    authentication), "Bypass" (members skip it) and "Disabled" (members
+    cannot authenticate), while its example responses write "active"."""
+    return str(group.get("status") or "").strip().lower()
 
 
 def assigned_elsewhere(token: Dict[str, Any], user_id: str = "") -> bool:

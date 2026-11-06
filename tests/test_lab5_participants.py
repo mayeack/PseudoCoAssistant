@@ -35,6 +35,19 @@ What it pins:
     2), recording a partial batch as incomplete; each batch records the ids
     that Duo lists as new around each create (none when that is ambiguous),
     `down` and `handouts --revoke` delete exactly those, and `expire` none;
+  * a room persona in a Duo group whose status is Bypass or Disabled (read
+    with GET /admin/v1/users/{id}/groups, in either case) stops every card's
+    batch like one that is not active, and `status` names the group;
+  * `handouts --revoke` deletes a card's earlier codes only once its new
+    batch is on the card and recorded: a card whose new batch failed keeps
+    them, and only the cards that changed are named for printing;
+  * a Duo call without a usable answer (IncompleteRead, TLS, timeout,
+    unreadable JSON) is a DuoError that never repeats the answer, and `up`,
+    `handouts` and `down` still print their RESULT and closing lines;
+  * the room's victim, disabled after this workshop gave it codes (the lab's
+    containment), is skipped: the trusted personas' codes go on and nothing
+    asks for a reset before the debrief; one disabled before its first code
+    is refused with the reset;
   * the Sign-in policy allows bypass code + hardware token: `up`, the
     persona tool and the docs say so, and nothing says bypass code only.
 
@@ -1122,6 +1135,348 @@ def test_bypass_revocation() -> None:
           admin.delete_bypass_code("DB0000009999") is False)
 
 
+def persona_row(out: str, name: str) -> str:
+    """The last report row of one room persona in this output."""
+    rows = [l for l in out.splitlines()
+            if l.split()[:1] in (["OK"], ["FAIL"], ["SKIP"], ["WARN"]) and l.split()[1:2] == [name]]
+    return rows[-1] if rows else ""
+
+
+def posted_users(h: Harness, start: int = 0) -> List[str]:
+    """The usernames whose bypass codes were created since call ``start``."""
+    ids = {u["user_id"]: u["username"] for u in h.duo.users.values()}
+    return [ids.get(p.split("/")[4], "?") for _, m, p, _ in h.duo.calls[start:]
+            if m == "POST" and p.endswith("/bypass_codes")]
+
+
+def try_code(h: Harness, name: str, code: str) -> str:
+    auth = duo.AuthAPI(h.duo.transport("auth", *tls_vpn()), API_HOST)
+    return auth.auth_passcode(name, code, "198.51.100.200", "ATTENDEE-LAPTOP")["result"]
+
+
+def test_bypass_persona_groups() -> None:
+    print("== a room persona in a Duo group that is not Active (Bypass, Disabled): no batch, each card fails ==")
+    for status, said in (("Bypass", "plan 4.3 forbids a bypass group"),
+                         ("Disabled", "Duo lets no member of a disabled group sign in")):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(Path(tmp))
+            group = h.duo.join_group("marcus.bell", "Lab Shortcuts", status)    # as Duo's table writes it
+            rc, out = h.run("check")
+            row = persona_row(out, "marcus.bell")
+            check(f"[{status}] check fails each card and names the persona, the group and its status; changes nothing",
+                  rc == 1 and row.startswith("  FAIL") and f"Lab Shortcuts (status {status})" in row and said in row
+                  and "in the Duo Admin Panel" in row and out.count("FAIL     instance 0") == 2
+                  and not h.duo.mutations(), out)
+            listed = {p.split("/")[4] for _, m, p, _ in h.duo.calls
+                      if m == "GET" and p.startswith("/admin/v1/users/") and p.endswith("/groups")}
+            check(f"[{status}] ... each room persona's groups are read with GET /admin/v1/users/{{id}}/groups",
+                  {h.duo.by_name(n)["user_id"] for n in CARD_PERSONAS} <= listed, str(listed))
+            rc, out = h.run("up")
+            check(f"[{status}] up issues no code to anyone and fails each card (exit 1, not 2)",
+                  rc == 1 and not bypass_posts(h) and out.count("no bypass codes issued") == 2
+                  and "RESULT: up: 2 ok, 0 failed; persona bypass codes failed on 2 card(s) (instance 01, 02)" in out,
+                  out)
+            rc, out = h.run("handouts")
+            check(f"[{status}] handouts issues none either (exit 1)",
+                  rc == 1 and not bypass_posts(h) and out.count("no bypass codes issued") == 2, out)
+            rc, out = h.run("status")
+            check(f"[{status}] status shows it: this persona fails with its group, the others list their Active groups",
+                  rc == 1 and persona_row(out, "marcus.bell").startswith("  FAIL")
+                  and "Lab Shortcuts" in persona_row(out, "marcus.bell")
+                  and all("its Duo groups are Active: PseudoCo Workforce" in persona_row(out, n)
+                          for n in ("avery.kim", "elena.sousa", "grace.lin")), out)
+            check(f"[{status}] ... and the persona and the group are left as they were",
+                  h.duo.by_name("marcus.bell")["status"] == "active" and group["status"] == status)
+            group["status"] = "Active"
+            rc, out = h.run("up")
+            check(f"[{status}] once the group is Active again, up puts the codes on both cards (exit 0)",
+                  rc == 0 and len(bypass_posts(h)) == 8
+                  and all(list(card_codes(r)) == CARD_PERSONAS for r in h.handout().values()), out)
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        h.duo.group("PseudoCo Workforce")["status"] = "disabled"
+        rc, out = h.run("check")
+        check("the persona group itself disabled (lower case, as Duo's examples write it): every room persona fails",
+              rc == 1 and all(persona_row(out, n).startswith("  FAIL")
+                              and "PseudoCo Workforce (status disabled)" in persona_row(out, n)
+                              for n in CARD_PERSONAS), out)
+        h.duo.group("PseudoCo Workforce")["status"] = "active"
+        elena = h.duo.by_name("elena.sousa")["user_id"]
+        h.duo.fail[("GET", f"/admin/v1/users/{elena}/groups")] = DuoFailure(500, 50000, "Internal error")
+        rc, out = h.run("up")
+        check("Duo cannot list a persona's groups: that persona fails, no card gets codes, up still finishes (exit 1)",
+              rc == 1 and "its Duo groups cannot be read" in persona_row(out, "elena.sousa")
+              and not bypass_posts(h) and _up_finished(out), out)
+    check("group_status reads Duo's documented values in either case",
+          [duo.group_status(g) for g in ({"status": "Bypass"}, {"status": "active"}, {"status": " Disabled "}, {})]
+          == ["bypass", "active", "disabled", ""])
+
+
+def test_handouts_revoke_waits_for_the_new_batch() -> None:
+    print("== handouts --revoke: a card's earlier codes go only once its new batch is on it and recorded ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        rc, out = h.run("up")
+        before = {r["instance"]: card_codes(r) for r in h.handout().values()}
+        earlier = {nn: {i for b in record(h, nn)["bypass_batches"] for e in b["codes"] for i in e["ids"]}
+                   for nn in ("01", "02")}
+        marcus = h.duo.by_name("marcus.bell")["user_id"]
+        creates: List[str] = []
+
+        def refuse_card_01(uid: str) -> None:       # Duo refuses marcus.bell's code for card 01, then recovers
+            creates.append(uid)
+            if len(creates) == 1:
+                h.duo.fail[("POST", f"/admin/v1/users/{marcus}/bypass_codes")] = DuoFailure(500, 50000, "Internal error")
+            elif len(creates) == 2:
+                h.duo.fail.clear()
+        h.duo.bypass_hooks.append(refuse_card_01)
+        start = len(h.duo.calls)
+        rc, out = h.run("handouts", "--revoke")
+        deleted = {p.rsplit("/", 1)[1] for p in deletes_since(h, start)}
+        after = {r["instance"]: card_codes(r) for r in h.handout().values()}
+        skipped = [l for l in out.splitlines() if l.split()[:3] == ["SKIP", "instance", "01"]]
+        check("card 01's new batch fails: its card and its earlier codes stay, and --revoke says it deleted none",
+              rc == 1 and after["01"] == before["01"] and not deleted & earlier["01"]
+              and "keeps its earlier codes" in out and skipped and "--revoke deleted none" in skipped[0]
+              and all(try_code(h, n, c[0]) == "allow" for n, c in before["01"].items()), out)
+        check("... card 02 gets its new batch, and only then loses its earlier codes",
+              earlier["02"] <= deleted and after["02"] != before["02"]
+              and all(try_code(h, n, c[0]) == "deny" for n, c in before["02"].items())
+              and all(try_code(h, n, c[0]) == "allow" for n, c in after["02"].items()), out)
+        check("... the handout line names only the card that changed, and RESULT the one that failed",
+              "print the changed card(s) again, instance 02. " in out
+              and "RESULT: handouts: 1 card(s) ok, 1 failed (instance 01)" in out, out)
+        partial = record(h, "01")["bypass_batches"][-1]
+        check("... card 01's partial batch is recorded as incomplete, for a later --revoke or down",
+              partial["complete"] is False and lb.pending(h.root, "acme", ["01"]) == ["01"], str(partial))
+
+        real = lb._record
+
+        def no_record(env, nn, *args, **kwargs):     # the new batch reaches card 01, its record cannot be written
+            if nn == "01":
+                raise OSError(28, "No space left on device")
+            return real(env, nn, *args, **kwargs)
+        lb._record = no_record
+        try:
+            start = len(h.duo.calls)
+            rc, out = h.run("handouts", "--only", "1", "--revoke")
+        finally:
+            lb._record = real
+        check("new batch on card 01 but not recorded: --revoke deletes nothing, and the card is named for printing",
+              rc == 1 and not deletes_since(h, start) and card_codes(h.handout()["l5-acme-01"]) != before["01"]
+              and "print the changed card(s) again, instance 01. " in out
+              and "--revoke deleted none of its earlier codes" in out, out)
+
+        h.duo.by_name("grace.lin")["status"] = "locked out"
+        cards = h.handout()
+        start = len(h.duo.calls)
+        rc, out = h.run("handouts", "--revoke")
+        check("a room persona not active: handouts --revoke deletes nothing, changes no card, names none to print",
+              rc == 1 and not deletes_since(h, start) and h.handout() == cards
+              and out.count("--revoke deleted none of its earlier codes") == 2
+              and "no card changed, so there is nothing to print again" in out
+              and "print the changed card" not in out, out)
+        h.duo.by_name("grace.lin")["status"] = "active"
+        rc, out = h.run("handouts", "--only", "1", "--revoke")
+        check("fixed: a re-run puts a new batch on card 01, then deletes the 5 codes its earlier batches recorded",
+              rc == 0 and "deleted 5 bypass code(s) of its earlier batch(es)" in out
+              and all(try_code(h, n, c[0]) == "deny" for n, c in before["01"].items()), out)
+
+
+class _Broken:
+    """A duo_client stand-in whose every call fails as a transport can."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+    def json_api_call(self, method, path, params):
+        raise self.exc
+
+    def json_paging_api_call(self, method, path, params):
+        raise self.exc
+        yield  # a generator, as duo_client's is
+
+
+def test_duo_transport_errors() -> None:
+    print("== a Duo call without a usable answer is a DuoError; up, handouts and down still finish ==")
+    import http.client
+    import json
+    import socket
+    import ssl
+    partial = b'["407176182", "0169'
+    for exc in (http.client.IncompleteRead(partial, 20), http.client.RemoteDisconnected("Remote end closed"),
+                ssl.SSLError(1, "[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC] decryption failed"),
+                socket.timeout("timed out"), json.JSONDecodeError("Expecting value", partial.decode(), 0),
+                UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+                AttributeError("'str' object has no attribute 'get'")):
+        api = duo.AdminAPI(_Broken(exc), API_HOST)
+        outcomes = []
+        for call in (lambda: api.call("GET", "/admin/v1/users"), lambda: api.page("/admin/v1/users"),
+                     lambda: api.create_bypass_codes("DU0000000001", 1, 5, 3600)):
+            try:
+                call()
+                outcomes.append("returned")
+            except duo.DuoError as err:
+                outcomes.append("DuoError" if type(exc).__name__ in str(err) and "407176182" not in str(err)
+                                else str(err))
+            except Exception as err:  # noqa: BLE001
+                outcomes.append(type(err).__name__)
+        check(f"{type(exc).__name__}: call, page and create each raise a DuoError naming it, never the answer",
+              outcomes == ["DuoError"] * 3, str(outcomes))
+    bad = RuntimeError('Received bad response: {"stat": "OK", "response": ["407176182", "0169')
+    bad.status, bad.reason, bad.data = 200, "OK", '{"stat": "OK", "response": ["407176182", "0169'
+    try:
+        duo.AdminAPI(_Broken(bad), API_HOST).create_bypass_codes("DU0000000001", 1, 5, 3600)
+        said = "returned"
+    except duo.DuoError as err:
+        said = str(err)
+    check("duo_client's 'bad response' (the body in its message) is a DuoError that never repeats the body",
+          said.startswith("Duo POST") and "407176182" not in said and "not the JSON it documents" in said, said)
+    dup = RuntimeError("Received 400 Duplicate resource")
+    dup.status, dup.reason, dup.data = 400, "Bad Request", {"stat": "FAIL", "code": 40003,
+                                                            "message": "Duplicate resource"}
+    try:
+        duo.AdminAPI(_Broken(dup), API_HOST).create_group("x", "y")
+        got = None
+    except duo.DuoError as err:
+        got = (err.status, err.code)
+    check("a refusal keeps Duo's status and code, also when duo_client leaves its body parsed",
+          got == (400, 40003), str(got))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        marcus, elena = (h.duo.by_name(n)["user_id"] for n in ("marcus.bell", "elena.sousa"))
+        seen: List[str] = []
+
+        def cut_off(uid: str) -> None:          # the answer to elena.sousa's create for card 02 is cut off
+            seen.append(uid)
+            if seen.count(marcus) == 2:
+                h.duo.fail[("POST", f"/admin/v1/users/{elena}/bypass_codes")] = http.client.IncompleteRead(b'["1', 20)
+        h.duo.bypass_hooks.append(cut_off)
+        rc, out = h.run("up")
+        batch = record(h, "02")["bypass_batches"][-1]
+        check("up: an IncompleteRead halfway through card 02 fails that card only, and up prints its RESULT, the "
+              "handout, the password links and the reminders (exit 1, no traceback)",
+              rc == 1 and _up_finished(out) and "(IncompleteRead)" in out
+              and "persona bypass codes failed on 1 card(s) (instance 02)" in out
+              and list(card_codes(h.handout()["l5-acme-01"])) == CARD_PERSONAS, out)
+        check("... and records what was issued: card 02's 2 codes, as an incomplete batch",
+              batch["complete"] is False and sum(len(e["ids"]) for e in batch["codes"]) == 2, str(batch))
+
+        h.duo.fail.clear()
+        h.duo.fail[("GET", "/admin/v1/users")] = ssl.SSLError(1, "[SSL] record layer failure")
+        rc, out = h.run("handouts")
+        check("handouts: a TLS error reading the personas fails each card; the handout line and RESULT still print",
+              rc == 1 and "cannot reach Duo (SSLError)" in out and out.count("no bypass codes issued") == 2
+              and "no card changed, so there is nothing to print again" in out
+              and "RESULT: handouts: 0 card(s) ok, 2 failed (instance 01, 02)" in out, out)
+
+        h.duo.fail.clear()
+        h.duo.fail[("DELETE", "/admin/v1/bypass_codes/")] = http.client.IncompleteRead(b"", 2)
+        real_route = h.world.cf.route
+
+        def cut_listing(method, path, q, data):    # the orphan check's tunnel listing is cut off too
+            if method == "GET" and "include_prefix" in q:
+                raise http.client.IncompleteRead(b"", 10)
+            return real_route(method, path, q, data)
+        h.world.cf.route = cut_listing
+        try:
+            rc, out = h.run("down")
+        finally:
+            h.world.cf.route = real_route
+        check("down: cut-off DELETE answers fail the cards and keep their ids; down still prints its RESULT (exit 1)",
+              rc == 1 and "RESULT: down: 2 ok, 0 failed; persona bypass codes not deleted on 2 card(s) (instance 01, "
+                          "02)" in out and lb.pending(h.root, "acme", ["01", "02"]) == ["01", "02"], out)
+        check("... and a cut-off Cloudflare orphan listing is a WARN, not the end of down",
+              "not looked for: Cloudflare did not answer (IncompleteRead)" in out, out)
+        h.duo.fail.clear()
+        h.duo.fail[("GET", "/admin/v1/users/")] = json.JSONDecodeError("Expecting value", "", 0)
+        rc, out = h.run("down")
+        check("down: unreadable listings fail the cards; RESULT still printed (exit 1)",
+              rc == 1 and "(JSONDecodeError)" in out and "persona bypass codes not deleted on 2 card(s)" in out, out)
+        h.duo.fail.clear()
+        rc, out = h.run("down")
+        check("... and a re-run deletes every recorded code", rc == 0 and lb.pending(h.root, "acme", ["01", "02"]) == []
+              and "every batch these cards had is deleted or has expired" in out, out)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        h.duo.fail[("POST", "/admin/v1/groups")] = json.JSONDecodeError("Expecting value", "", 0)
+        rc, out = h.run("up")
+        check("up: an unreadable answer creating the workshop group fails the accounts, and up still prints the "
+              "reminders and its RESULT (exit 1)",
+              rc == 1 and "FAIL     groups" in out and "(JSONDecodeError)" in out
+              and "RESULT: up: 2 ok, 0 failed; 2 participant account(s) failed" in out
+              and "whose User access must admit CII Read-Only" in out and "Its policy (plan 4.4)" in out, out)
+        h.duo.fail.clear()
+        rc, out = h.run("up")
+        check("... and a re-run creates the accounts and their cards", rc == 0 and _up_finished(out), out)
+
+
+def test_contained_victim() -> None:
+    print("== the room's victim disabled by the lab's containment: its codes are skipped, no reset before the debrief ==")
+    trusted = ["marcus.bell", "elena.sousa", "grace.lin"]
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        rc, out = h.run("up")
+        before = {r["instance"]: card_codes(r) for r in h.handout().values()}
+        h.duo.by_name("avery.kim")["status"] = "disabled"      # claim 4: the response agent disables the victim
+        start = len(h.duo.calls)
+        rc, out = h.run("handouts", "--only", "1")
+        row = persona_row(out, "avery.kim")
+        new1 = card_codes(h.handout()["l5-acme-01"])
+        check("handouts after the containment: the victim's row says it is contained, asks for a reset only after "
+              "the workshop, and nothing says to set it active now (exit 0)",
+              rc == 0 and row.startswith("  SKIP") and "contained" in row and "after the workshop" in row
+              and "provision_personas.py --reset --only avery.kim" in row and "set it active" not in out, out)
+        check("... card 01 gets a fresh batch for the trusted personas only, none for the victim; card 02 is untouched",
+              list(new1) == trusted and posted_users(h, start) == trusted
+              and "none for avery.kim, which is contained" in out
+              and card_codes(h.handout()["l5-acme-02"]) == before["02"], out)
+        check("... the new trusted codes work; the contained victim signs in with none of its codes",
+              all(try_code(h, n, c[0]) == "allow" for n, c in new1.items())
+              and try_code(h, "avery.kim", before["02"]["avery.kim"][0]) == "deny")
+        start = len(h.duo.calls)
+        rc, out = h.run("up")
+        check("up after the containment keeps both cards (with or without the victim's code) and asks for no reset",
+              rc == 0 and out.count("kept: valid until") == 2 and not posted_users(h, start)
+              and "set it active" not in out and persona_row(out, "avery.kim").startswith("  SKIP"), out)
+        rc, out = h.run("status")
+        check("status shows the victim contained, and its dead code on card 02, without failing (exit 0)",
+              rc == 0 and "contained" in persona_row(out, "avery.kim")
+              and "avery.kim (victim, contained: its code no longer works)" in out, out)
+        rc, out = h.run("check")
+        check("check: the same, exit 0", rc == 0 and out.count("OK       instance 0") == 2, out)
+        rc, out = h.run("handouts", "--only", "2", "--revoke")
+        check("handouts --only 2 --revoke after the containment: trusted codes, its earlier 4 codes deleted",
+              rc == 0 and list(card_codes(h.handout()["l5-acme-02"])) == trusted
+              and "deleted 4 bypass code(s) of its earlier batch(es)" in out, out)
+        h.duo.by_name("avery.kim")["status"] = "active"        # provision_personas.py --reset, after the workshop
+        rc, out = h.run("up")
+        check("after the reset, up gives both cards the victim's codes again",
+              rc == 0 and out.count("its codes are for other personas") == 2
+              and all(list(card_codes(r)) == CARD_PERSONAS for r in h.handout().values()), out)
+        h.duo.by_name("avery.kim")["status"] = "disabled"
+        h.duo.join_group("avery.kim", "Lab Shortcuts", "Bypass")
+        start = len(h.duo.calls)
+        rc, out = h.run("handouts", "--only", "1")
+        check("a contained victim in a bypass group still stops every card (plan 4.3)",
+              rc == 1 and persona_row(out, "avery.kim").startswith("  FAIL")
+              and "Lab Shortcuts (status Bypass)" in out and not posted_users(h, start), out)
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        h.duo.by_name("avery.kim")["status"] = "disabled"      # left so by an earlier delivery
+        rc, out = h.run("check")
+        row = persona_row(out, "avery.kim")
+        check("a victim disabled before this workshop gave it any code is not the containment: check fails each "
+              "card and asks for the reset now",
+              rc == 1 and row.startswith("  FAIL") and "not the lab's containment" in row
+              and "set it active (scripts/identity/provision_personas.py --reset --only avery.kim)" in row
+              and out.count("FAIL     instance 0") == 2, out)
+        rc, out = h.run("up")
+        check("... and up issues no code (exit 1)", rc == 1 and not bypass_posts(h), out)
+
+
 def test_signin_policy_docs() -> None:
     print("== the Sign-in policy allows bypass code + hardware token (plan 4.4) ==")
     sys.path.insert(0, str(ROOT / "scripts" / "identity"))
@@ -1162,7 +1517,8 @@ def main() -> int:
                  test_expire_after_up_cleans_the_handout, test_signin_user_access_docs,
                  test_bypass_codes_on_the_handout, test_bypass_victim_swap, test_bypass_refusals,
                  test_old_handout_gets_codes, test_bypass_persona_status, test_bypass_errors_are_per_card,
-                 test_bypass_settings_change_reissues, test_bypass_revocation,
+                 test_bypass_settings_change_reissues, test_bypass_revocation, test_bypass_persona_groups,
+                 test_handouts_revoke_waits_for_the_new_batch, test_duo_transport_errors, test_contained_victim,
                  test_signin_policy_docs):
         try:
             test()

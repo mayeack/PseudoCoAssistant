@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import http.client
 import json
 import re
 import secrets
@@ -341,35 +342,38 @@ def create_participants(ctx: "Ctx", reports: List["BoxReport"]) -> Tuple[List[st
     """After the boxes: one account per box that came up, then the room
     personas' bypass codes on each card (4.3), then the handout. Returns the
     usernames that failed and the instance numbers whose card's persona codes
-    failed. A failed card never stops the rest: the handout path, the
-    password links and the Sign-in reminders are always printed."""
-    env, failed, links = ctx.accounts, [], []
+    failed. A failed account or card never stops the rest, and neither does a
+    Duo error: the handout path, the password links and the Sign-in
+    reminders are always printed."""
+    env, failed, links, bad_cards = ctx.accounts, [], [], []
     ctx.out.line(f"== participant accounts (12.2): {len(reports)} instance(s) ==")
+    try:
+        if reports and participants.group_name(ctx.ws.name) not in env.groups:
+            participants.preflight(env, create_missing=True)
+        groups_ok = True
+    except (Lab5Error, OSError, ValueError) as exc:
+        ctx.out.line(f"  FAIL     groups       {exc}")
+        failed = [participants.username(ctx.ws.name, r.box.nn) for r in reports]
+        groups_ok = False
     if not reports:
         ctx.out.line("  SKIP     no box came up, so no participant account was created")
-        return failed, []
-    try:
-        if participants.group_name(ctx.ws.name) not in env.groups:
-            participants.preflight(env, create_missing=True)
-    except Lab5Error as exc:
-        ctx.out.line(f"  FAIL     groups       {exc}")
-        return [participants.username(ctx.ws.name, r.box.nn) for r in reports], []
-    ready: List[str] = []
-    for rep in reports:
-        name = participants.username(ctx.ws.name, rep.box.nn)
-        try:
-            (status, _, detail), link = participants.ensure(env, rep.box.nn, f"https://{rep.hostname}",
-                                                             rep.access_key, reissue=ctx.reissue)
-        except Lab5Error as exc:
-            status, detail, link = "FAIL", str(exc), None
-        ctx.out.line(f"  {status:<8} {name:<24} {detail}")
-        if status == "FAIL":
-            failed.append(name)
-        else:
-            ready.append(rep.box.nn)
-        if link:
-            links.append(f"{name}: {link}")
-    bad_cards = issue_bypass(ctx, ready, force=False) if ctx.ws.bypass_codes.enabled else []
+    elif groups_ok:
+        ready: List[str] = []
+        for rep in reports:
+            name = participants.username(ctx.ws.name, rep.box.nn)
+            try:
+                (status, _, detail), link = participants.ensure(env, rep.box.nn, f"https://{rep.hostname}",
+                                                                 rep.access_key, reissue=ctx.reissue)
+            except (Lab5Error, OSError, ValueError) as exc:     # OSError, ValueError: its record or the handout
+                status, detail, link = "FAIL", str(exc), None
+            ctx.out.line(f"  {status:<8} {name:<24} {detail}")
+            if status == "FAIL":
+                failed.append(name)
+            else:
+                ready.append(rep.box.nn)
+            if link:
+                links.append(f"{name}: {link}")
+        bad_cards = issue_bypass(ctx, ready, force=False) if ctx.ws.bypass_codes.enabled else []
     handout = env.handout()
     if handout.csv_path.exists():
         ctx.out.line(f"handout: {handout.html_path} (and .csv), mode 0600. It holds each participant's access key "
@@ -397,14 +401,22 @@ def issue_bypass(ctx: "Ctx", numbers: Sequence[str], force: bool) -> List[str]:
     if not numbers:
         ctx.out.line("  SKIP     no card to put them on")
         return []
-    try:
-        rows, failed = bypass.issue(ctx.accounts, numbers, ctx.personas, codes, ctx.redactor, force=force)
-    except (Lab5Error, OSError, ValueError) as exc:
-        rows = [("FAIL", f"instance {nn}", f"no bypass codes issued ({exc}); re-run") for nn in numbers]
-        failed = list(numbers)
-    for status, name, detail in rows:
+    result = issue_guarded(ctx.accounts, numbers, ctx.personas, codes, ctx.redactor, force=force)
+    for status, name, detail in result.rows:
         ctx.out.line(f"  {status:<8} {name:<24} {detail}")
-    return failed
+    return result.failed
+
+
+def issue_guarded(env: participants.Env, numbers: Sequence[str], personas: Sequence[Tuple[str, str]],
+                  codes: "bypass.Settings", redactor: Redactor, force: bool, revoke: bool = False) -> "bypass.Issued":
+    """bypass.issue(), whose errors are each a card's; one that still escapes
+    (an unreadable handout, say) fails every card here and never the run, so
+    up and handouts still print their RESULT."""
+    try:
+        return bypass.issue(env, numbers, personas, codes, redactor, force=force, revoke=revoke)
+    except (Lab5Error, OSError, ValueError) as exc:
+        return bypass.Issued([("FAIL", f"instance {nn}", f"no bypass codes issued ({exc}); re-run") for nn in numbers],
+                             list(numbers), [])
 
 
 def revoke_codes(ctx: "Ctx", deps: "Deps", numbers: Sequence[str]) -> List[str]:
@@ -1401,17 +1413,22 @@ def run_handouts(args: argparse.Namespace, deps: Deps) -> int:
         codes = ws.bypass_codes
         reporter.line(f"lab5-setup handouts: workshop {ws.name}, {len(boxes)} card(s): a fresh batch each, "
                       f"{bypass.describe(personas, codes)}, valid {codes.valid_hours} h"
-                      + ("; the codes of each card's earlier batches are deleted (--revoke)" if args.revoke else ""))
-        rows, failed = bypass.issue(env, [b.nn for b in boxes], personas, codes, redactor, force=True,
-                                    revoke=args.revoke)
-        for status, name, detail in rows:
+                      + ("; the codes of each card's earlier batches are deleted once its new batch is on it "
+                         "(--revoke)" if args.revoke else ""))
+        result = issue_guarded(env, [b.nn for b in boxes], personas, codes, redactor, force=True, revoke=args.revoke)
+        for status, name, detail in result.rows:
             reporter.line(f"  {status:<8} {name:<24} {detail}")
+        failed, changed = result.failed, result.changed
         handout = env.handout()
-        if len(failed) < len(boxes) and handout.csv_path.exists():
-            reporter.line(f"handout: {handout.html_path} (and .csv), mode 0600: print the changed cards. "
+        if changed and handout.csv_path.exists():
+            reporter.line(f"handout: {handout.html_path} (and .csv), mode 0600: print the changed card(s) again, "
+                          f"instance {', '.join(changed)}. "
                           + ("The codes they replace are deleted where the rows above say so; any other stays valid "
                              "until it expires" if args.revoke else
                              "The codes they replace stay valid until they expire (--revoke deletes them)"))
+        elif handout.csv_path.exists():
+            reporter.line(f"handout: {handout.html_path} (and .csv), mode 0600: no card changed, so there is nothing "
+                          "to print again; every card keeps the codes it has")
         reporter.line(f"RESULT: handouts: {len(boxes) - len(failed)} card(s) ok, {len(failed)} failed"
                       + (f" (instance {', '.join(failed)})" if failed else ""))
         return 1 if failed else 0
@@ -1515,7 +1532,13 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
                                              "each card ==",
                                         bypass.status_rows(ctx.accounts, numbers, ctx.personas, ws.bypass_codes))
         if args.command in ("status", "down"):
-            for row in workshop_orphans(ctx):
+            try:
+                orphans = workshop_orphans(ctx)
+            except (Lab5Error, OSError, ValueError, http.client.HTTPException) as exc:
+                # a report only: down still deletes the recorded bypass codes and prints its RESULT
+                orphans = ["not looked for: Cloudflare did not answer "
+                           f"({exc if isinstance(exc, Lab5Error) else type(exc).__name__})"]
+            for row in orphans:
                 reporter.line(f"  WARN     orphan       {row}")
         if args.command == "down":
             bad_cards = revoke_codes(ctx, deps, numbers)

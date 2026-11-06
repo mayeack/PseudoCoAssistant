@@ -9,7 +9,11 @@ FakeDuo answers the calls the tools make through duo_client's
 HOTP tokens like Duo does (a token's secret is kept to verify passcodes; HOTP
 accepts a code at or ahead of the token's counter within a look-ahead window,
 then moves the counter past it; 10 failures in a row lock a user out), and
-records every call so the tests can pin what was sent where.
+records every call so the tests can pin what was sent where. A group carries
+its ``status``, and ``GET /admin/v1/users/{id}/groups`` lists each of the
+user's groups with the status it has now (``join_group``). ``fail`` raises any
+exception for a (method, path prefix): a DuoFailure is Duo refusing, anything
+else (http.client.IncompleteRead, ssl.SSLError, ...) the transport failing.
 
 Bypass codes follow the Admin API page: a POST returns only the code strings
 (no ids), clears the user's other codes unless preserve_existing=true, makes at
@@ -75,7 +79,7 @@ class FakeDuo:
         self.tokens: Dict[str, Dict[str, Any]] = {}
         self.calls: List[Tuple[str, str, str, Dict[str, str]]] = []   # (kind, method, path, params)
         self.transports: List[Tuple[str, str, str, str]] = []
-        self.fail: Dict[Tuple[str, str], DuoFailure] = {}            # (method, path prefix) -> error
+        self.fail: Dict[Tuple[str, str], Exception] = {}             # (method, path prefix) -> what it raises
         self.pushes: Dict[str, Dict[str, Any]] = {}
         self.push_answer = "deny"
         self.bypass: Dict[str, List[Dict[str, Any]]] = {}             # user_id -> its bypass codes
@@ -108,6 +112,24 @@ class FakeDuo:
 
     def by_name(self, username: str) -> Optional[Dict[str, Any]]:
         return next((u for u in self.users.values() if u["username"] == username), None)
+
+    def group(self, name: str) -> Dict[str, Any]:
+        return next(g for g in self.groups.values() if g["name"] == name)
+
+    def join_group(self, username: str, name: str, status: str = "active") -> Dict[str, Any]:
+        """Put a user in a group whose status becomes ``status`` (Duo's table
+        writes "Active", "Bypass", "Disabled"; its examples "active"): the
+        Admin Panel's doing, never the tools'. Returns the group."""
+        group = next((g for g in self.groups.values() if g["name"] == name), None) or self.add_group(name)
+        group["status"] = status
+        user = self.by_name(username)
+        if all(g["group_id"] != group["group_id"] for g in user["groups"]):
+            user["groups"].append(dict(group))
+        return group
+
+    def _groups_of(self, user: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """A user's groups as Duo lists them: each with the group's current status."""
+        return [dict(self.groups.get(g["group_id"], g)) for g in user["groups"]]
 
     def add_persona(self, username: str, role: str, secret_hex: str = "") -> Dict[str, Any]:
         """A persona as provision_personas.py leaves it: persona notes, the
@@ -150,7 +172,7 @@ class FakeDuo:
 
     def _view(self, user: Dict[str, Any]) -> Dict[str, Any]:
         out = {k: v for k, v in user.items() if k != "fails"}
-        out["groups"] = [dict(g) for g in user["groups"]]
+        out["groups"] = self._groups_of(user)
         out["tokens"] = [{"token_id": t, "serial": self.tokens[t]["serial"], "type": "h6"}
                          for t in user["tokens"] if t in self.tokens]
         return out
@@ -202,7 +224,7 @@ class FakeDuo:
         if parts[:1] == ["users"] and parts[2:] == ["groups"]:
             user = self._user(parts[1])
             if method == "GET":
-                return [dict(g) for g in user["groups"]]
+                return self._groups_of(user)
             group = self.groups[p["group_id"]]
             if all(g["group_id"] != group["group_id"] for g in user["groups"]):
                 user["groups"].append(dict(group))
