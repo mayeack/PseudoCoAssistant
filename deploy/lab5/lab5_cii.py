@@ -1,0 +1,120 @@
+"""Read-only Cisco Identity Intelligence (CII) API client for the persona self-check.
+
+Uses the same CII API client the boxes use for the gate (Keychain items
+``pseudoco-lab5-cii-*``, the "Copy all" values): an OAuth client-credentials
+token (JSON body ``client_id``, ``client_secret``, ``grant_type``; it lasts
+about 10 h and is cached here for the run) and one GraphQL query,
+``getEndUser(login)``, whose ``levelOfTrust`` and current ``failingChecks``
+are all the self-check reads (plan 4.5, 12.4). CII's login is the email.
+
+The query's exact shape is pinned by spikes S5/S6. ``END_USER_QUERY`` is the
+default, and personas.yaml ``cii.end_user_query`` overrides it without a code
+change. Values are parsed defensively: a trust level may come back as a string
+or as an object, and a failing check as a name or as an object.
+"""
+from __future__ import annotations
+
+import json
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from lab5_common import Keychain, Lab5Error
+
+CII_ITEMS = {"client_id": "pseudoco-lab5-cii-client-id", "client_secret": "pseudoco-lab5-cii-client-secret",
+             "token_url": "pseudoco-lab5-cii-token-url", "api_url": "pseudoco-lab5-cii-api-url"}
+
+END_USER_QUERY = ("query Lab5EndUser($login: String!) { getEndUser(login: $login) "
+                  "{ levelOfTrust failingChecks } }")
+
+TRUST_LEVELS = ("TRUSTED", "NEUTRAL", "QUESTIONABLE", "UNTRUSTED", "UNKNOWN")
+GOOD_TRUST = ("TRUSTED", "NEUTRAL")
+
+Transport = Callable[[str, str, Dict[str, str], Optional[bytes], float], Tuple[int, bytes]]
+
+
+def _trust(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("level") or value.get("name") or value.get("value")
+    text = str(value or "").strip().upper().replace(" ", "_")
+    return text or "UNKNOWN"
+
+
+def _check_name(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("checkId") or value.get("id") or value.get("title")
+    return str(value or "").strip()
+
+
+class CIIClient:
+    def __init__(self, client_id: str, client_secret: str, token_url: str, api_url: str,
+                 transport: Transport, query: str = END_USER_QUERY, clock: Callable[[], float] = time.time) -> None:
+        for url, what in ((token_url, "token URL"), (api_url, "API URL")):
+            if not url.lower().startswith("https://"):
+                raise Lab5Error(f"the CII {what} in the Keychain must be an https URL")
+        self._id, self._secret = client_id, client_secret
+        self.token_url, self.api_url = token_url, api_url
+        self._transport, self.query, self._clock = transport, query or END_USER_QUERY, clock
+        self._token: Optional[str] = None
+        self._expires = 0.0
+
+    def _post(self, url: str, payload: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
+        body = json.dumps(payload).encode()
+        try:
+            status, data = self._transport("POST", url, dict(headers, **{"Content-Type": "application/json",
+                                                                          "Accept": "application/json"}),
+                                           body, 20.0)
+        except Lab5Error as exc:
+            raise Lab5Error(f"CII: cannot reach {url.split('/')[2]} ({exc})")
+        if status != 200:
+            raise Lab5Error(f"CII: {url.split('/')[2]} answered HTTP {status}")
+        try:
+            return json.loads(data or b"{}")
+        except ValueError:
+            raise Lab5Error("CII: the answer was not JSON")
+
+    def token(self) -> str:
+        if self._token and self._clock() < self._expires:
+            return self._token
+        doc = self._post(self.token_url, {"client_id": self._id, "client_secret": self._secret,
+                                          "grant_type": "client_credentials"}, {})
+        token = str(doc.get("access_token") or "")
+        if not token:
+            raise Lab5Error("CII: the token endpoint returned no access_token")
+        self._token = token
+        self._expires = self._clock() + max(60.0, float(doc.get("expires_in") or 36000) - 300.0)
+        return token
+
+    def end_user(self, login: str) -> Dict[str, Any]:
+        """``{"trust": "NEUTRAL", "failing_checks": [...], "found": bool}``."""
+        doc = self._post(self.api_url, {"query": self.query, "variables": {"login": login}},
+                         {"Authorization": f"Bearer {self.token()}"})
+        if doc.get("errors"):
+            first = doc["errors"][0] if isinstance(doc["errors"], list) and doc["errors"] else {}
+            message = str(first.get("message") if isinstance(first, dict) else first)[:200]
+            raise Lab5Error(f"CII query failed ({message}); spikes S5/S6 pin the query: "
+                            "set cii.end_user_query in scripts/identity/personas.yaml")
+        user = (doc.get("data") or {}).get("getEndUser")
+        if not user:
+            return {"trust": "UNKNOWN", "failing_checks": [], "found": False}
+        checks = user.get("failingChecks") or []
+        if not isinstance(checks, list):
+            checks = [checks]
+        return {"trust": _trust(user.get("levelOfTrust")),
+                "failing_checks": sorted({_check_name(c) for c in checks if _check_name(c)}),
+                "found": True}
+
+
+def cii_client(keychain: Keychain, transport: Transport, query: str = "") -> CIIClient:
+    return CIIClient(
+        keychain.require(CII_ITEMS["client_id"], "CII API client: client ID"),
+        keychain.require(CII_ITEMS["client_secret"], "CII API client: client secret"),
+        keychain.require(CII_ITEMS["token_url"], "CII API client: token URL", secret=False),
+        keychain.require(CII_ITEMS["api_url"], "CII API client: API URL", secret=False),
+        transport, query=query)
+
+
+def failing(checks: List[str], wanted: str) -> bool:
+    """Does any failing check name contain ``wanted`` (case and spacing
+    ignored)? Check IDs are pinned by spike S6; names are matched loosely."""
+    key = wanted.lower().replace(" ", "").replace("_", "").replace("-", "")
+    return any(key in c.lower().replace(" ", "").replace("_", "").replace("-", "") for c in checks)

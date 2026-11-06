@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>lab5-setup: Show boxes in, Lab 5 out</title>
+<style>
+:root{--bg:#ffffff;--fg:#1c1e21;--muted:#5c6370;--border:#d7dbe0;--accent:#0b6bcb;--code-bg:#f5f7f9;--th:#eef2f6;--warn:#8a5a00}
+@media (prefers-color-scheme: dark){:root{--bg:#14171a;--fg:#e6e8ea;--muted:#9aa3ad;--border:#2c3238;--accent:#63a9f0;--code-bg:#1c2126;--th:#1f252b;--warn:#e0b050}}
+*{box-sizing:border-box}
+body{margin:0;padding:2.5rem 1.5rem 5rem;background:var(--bg);color:var(--fg);
+ font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+ -webkit-font-smoothing:antialiased}
+main{max-width:60rem;margin:0 auto}
+h1{font-size:2rem;line-height:1.25;margin:0 0 .5rem;letter-spacing:-.02em}
+h2{font-size:1.4rem;margin:3rem 0 .75rem;padding-bottom:.4rem;border-bottom:1px solid var(--border);letter-spacing:-.01em}
+h3{font-size:1.1rem;margin:2rem 0 .5rem}
+h4{font-size:1rem;margin:1.5rem 0 .4rem;color:var(--muted)}
+p,li{margin:.6rem 0}
+a{color:var(--accent)}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.875em;
+ background:var(--code-bg);padding:.15em .4em;border-radius:4px;border:1px solid var(--border)}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:1rem;
+ overflow-x:auto;line-height:1.5}
+pre code{background:none;border:none;padding:0;font-size:.85rem}
+table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.9rem;display:block;overflow-x:auto}
+th,td{border:1px solid var(--border);padding:.5rem .7rem;text-align:left;vertical-align:top}
+th{background:var(--th);font-weight:600}
+tbody tr:nth-child(even){background:color-mix(in srgb,var(--th) 45%,transparent)}
+blockquote{margin:1.2rem 0;padding:.6rem 1rem;border-left:3px solid var(--warn);
+ background:color-mix(in srgb,var(--warn) 8%,transparent);color:var(--fg)}
+blockquote p{margin:.3rem 0}
+hr{border:none;border-top:1px solid var(--border);margin:2.5rem 0}
+strong{font-weight:650}
+ul,ol{padding-left:1.4rem}
+@media print{body{padding:0}pre,table{page-break-inside:avoid}}
+</style></head>
+<body><main>
+<h1>lab5-setup: Show boxes in, Lab 5 out</h1>
+<p><code>lab5-setup</code> turns the Splunk Show boxes of one workshop into Lab 5 (&quot;Verify: Cisco Identity Intelligence&quot;) instances, and puts them back afterwards. It runs on the facilitator's Mac. The design is section 12.3 of <code>docs/identity-intelligence-lab-plan.md</code>; section 12.1 lists the keys it writes.</p>
+<p>There is no broker and no AWS. Secrets come from the Mac's Keychain. What <code>up</code> created is recorded under <code>~/.pseudoco-lab5/</code>. Everything else lives on the boxes, in Duo and in Cloudflare.</p>
+<p>The same Mac runs the persona scripts (<code>scripts/identity/</code>, below) and two daily launchd jobs (<code>deploy/launchd/install-lab5.sh</code>). The lab-day runbook is <code>docs/identity-lab-facilitator.md</code>.</p>
+<h2>Commands</h2>
+<pre><code>deploy/lab5/lab5-setup check  workshop.yaml   # read-only: what up would change
+deploy/lab5/lab5-setup up     workshop.yaml   # make every box a Lab 5 instance
+deploy/lab5/lab5-setup status workshop.yaml   # per-box preflight + Cloudflare state
+deploy/lab5/lab5-setup handouts workshop.yaml # a fresh batch of persona bypass codes on every card
+deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS + recorded bypass codes, revert the keys
+deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at day 7, delete at day 14
+</code></pre>
+<p><code>--only 1,3</code> limits a run (<code>expire</code> excepted) to some instance numbers. <code>--restart</code> makes <code>up</code> or <code>down</code> restart the app even when <code>.env</code> did not change. <code>--reissue-passcodes</code> makes <code>up</code> replace each participant's HOTP token and print new passcodes. <code>--dry-run</code> makes <code>expire</code> list what it would do. <code>--revoke</code> makes <code>handouts</code> also delete the persona bypass codes of each card's earlier batches, for a lost card.</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>check</code></td>
+<td>Connects to each box and reads its version, <code>.env</code> and HEC destinations. Prints the exact <code>.env</code> diff, the HEC host change, the tunnel and DNS plan, and a verdict per box. A box that <code>up</code> would accept says <strong>ready, nothing to upgrade</strong>. It also says what <code>up</code> would do for each participant account and for the persona bypass codes on its card, and fails each card whose codes <code>up</code> would refuse. It changes nothing on the boxes, in Cloudflare or in Duo.</td>
+</tr>
+<tr>
+<td><code>up</code></td>
+<td>Runs each box in parallel, in this order: version check, backup, Lab 5 <code>.env</code> keys, tunnel and DNS, HEC host, restart, preflight. Any refusal happens before the first change. Then it creates a participant account for each box that came up, puts the room personas' bypass codes on its card, and writes the handout.</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>Checks each box's tunnel health, DNS record, connector unit and <code>.env</code> drift, then runs the preflight. It also lists <code>l5-&lt;workshop&gt;-*</code> tunnels and DNS records that no box record owns, each participant account's state and age, each room persona's Duo status, and how long each card's persona bypass codes have left.</td>
+</tr>
+<tr>
+<td><code>handouts</code></td>
+<td>Puts a fresh batch of persona bypass codes on each handout card (or <code>--only</code> some), for lab-day morning or a lost card. It touches no box, tunnel or participant account, and asks for no SSH password. The codes it replaces stay valid until they expire, unless <code>--revoke</code> deletes them.</td>
+</tr>
+<tr>
+<td><code>down</code></td>
+<td>Removes the connector, reverts the Lab 5 keys and the HEC host on every reachable box, then deletes the DNS records and tunnels that <code>up</code> recorded. A box it cannot reach or cannot finish fails the run, and the last line says how to re-run it. Running it twice is safe: the second run changes nothing. Then it deletes the persona bypass codes recorded for each card, and its last line says until when any code it could not delete stays valid.</td>
+</tr>
+<tr>
+<td><code>expire</code></td>
+<td>Day 7: disables each participant account. Day 14: deletes it and its HOTP token, which frees the Duo seat. Without a workshop file it covers every workshop, which is how the daily launchd job runs it. It is idempotent and never touches a persona or a bypass code.</td>
+</tr>
+</tbody>
+</table>
+<p>Exit codes: <code>0</code> means every box, participant account and card is fine. <code>1</code> means at least one box, account or card's bypass codes failed or was refused; its report says why. <code>2</code> means a usage, configuration or Keychain error, or a Duo prerequisite such as the CII Read-Only group is missing. A Duo error, or a handout lock that times out, while a card's bypass codes are issued or deleted fails that card (<code>1</code>), never the run: the others go on, and <code>up</code> still prints its result, the handout and the reminders.</p>
+<h2>One-time setup on the Mac</h2>
+<ol>
+<li>
+<p>Install the tool's dependencies (paramiko, PyYAML and duo_client) into their own venv. The wrapper, the persona scripts' launchd job and <code>install-lab5.sh</code> all use that venv. Keep them out of the app's venv: paramiko pulls in <code>cryptography</code>, and <code>tests/test_attachments.py</code> relies on the app's venv lacking it.</p>
+<pre><code>python3 -m venv ~/.pseudoco-lab5/venv
+~/.pseudoco-lab5/venv/bin/pip install -r deploy/lab5/requirements.txt
+</code></pre>
+</li>
+<li>
+<p>Put the credentials in the login Keychain. Nothing here should be typed after <code>-w</code>: <code>security</code> then prompts for the value, so it stays out of your shell history.</p>
+<pre><code>security add-generic-password -s pseudoco-lab5-duo-websdk-client-secret -a &quot;$USER&quot; -w
+</code></pre>
+</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>Keychain item</th>
+<th><code>.env</code> key</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pseudoco-lab5-cloudflare</code></td>
+<td>(none)</td>
+<td>Cloudflare API token <code>pseudoco-lab5-instances</code>: Tunnel edit + <code>pseudocoassistant.com</code> DNS edit</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-websdk-client-id</code></td>
+<td><code>DUO_CLIENT_ID</code></td>
+<td>Web SDK app <strong>PseudoCo Lab: Sign-in</strong></td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-websdk-client-secret</code></td>
+<td><code>DUO_CLIENT_SECRET</code></td>
+<td>same app</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-websdk-api-host</code></td>
+<td><code>DUO_API_HOST</code></td>
+<td>same app</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-status-ikey</code></td>
+<td><code>DUO_ADMIN_IKEY</code></td>
+<td>Admin API app <strong>PseudoCo Lab: Status (read-only)</strong></td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-status-skey</code></td>
+<td><code>DUO_ADMIN_SKEY</code></td>
+<td>same app</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-cii-client-id</code></td>
+<td><code>CII_CLIENT_ID</code></td>
+<td>the CII API client's &quot;Copy all&quot;</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-cii-client-secret</code></td>
+<td><code>CII_CLIENT_SECRET</code></td>
+<td>same</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-cii-token-url</code></td>
+<td><code>CII_TOKEN_URL</code></td>
+<td>same</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-cii-api-url</code></td>
+<td><code>CII_API_URL</code></td>
+<td>same</td>
+</tr>
+<tr>
+<td>your choice, per room</td>
+<td>(none)</td>
+<td>the room stack's HEC token. Optional: only its last 4 characters are compared with the box's destination.</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-provisioner-ikey</code></td>
+<td>(none, Mac only)</td>
+<td>Admin API app <strong>PseudoCo Provisioner</strong> (Grant resource read + write): participant accounts and the persona cast. It never leaves the Mac.</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-provisioner-skey</code></td>
+<td>(none, Mac only)</td>
+<td>same app</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-api-host</code></td>
+<td>(none, Mac only)</td>
+<td>the tenant's API hostname, the same on every Duo application page. If it is missing, <code>pseudoco-lab5-duo-websdk-api-host</code> is used.</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-vpn-ikey</code></td>
+<td>(none, Mac only)</td>
+<td>Auth API app <strong>PseudoCo VPN</strong>: the persona sign-ins (<code>persona_activity.py</code>)</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-vpn-skey</code></td>
+<td>(none, Mac only)</td>
+<td>same app</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-hotp-&lt;persona&gt;</code></td>
+<td>(none, Mac only)</td>
+<td>written by <code>provision_personas.py</code>, one per persona. You never add these by hand.</td>
+</tr>
+</tbody>
+</table>
+<p>The names of the first table's items are defaults. A workshop file can rename any of them under <code>keychain:</code>. The Mac-only items have fixed names.</p>
+<h2>Duo applications: who may sign in</h2>
+<p>Duo checks an application's <strong>User access</strong> before an instance sees who signed in. A new application admits no one until it is set (plan 4.2). Only the Admin Panel can set or check it here: reading or changing an application needs the Admin API's <em>Grant applications</em> permission, which neither the Provisioner nor the Status app has. Set it once, after <code>provision_personas.py</code> has created PseudoCo Workforce (<em>Applications</em>, then the application, then <em>User access</em>):</p>
+<table>
+<thead>
+<tr>
+<th>Application</th>
+<th>User access</th>
+<th>Who signs in through it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>PseudoCo Lab: Sign-in</strong> (Web SDK)</td>
+<td><em>Enable only for permitted groups</em>: <strong>PseudoCo Workforce</strong> and <strong>CII Read-Only</strong></td>
+<td>everyone an instance's <code>IDENTITY_ALLOWED_USERS</code> names: the trusted personas and the room's victim (PseudoCo Workforce), and the instance's participant account (CII Read-Only, which <code>up</code> adds every participant account to)</td>
+</tr>
+<tr>
+<td><strong>PseudoCo VPN</strong> (Auth API)</td>
+<td><em>Enable only for permitted groups</em>: <strong>PseudoCo Workforce</strong> only</td>
+<td>the persona scripts</td>
+</tr>
+<tr>
+<td><strong>PseudoCo Provisioner</strong>, <strong>PseudoCo Lab: Status</strong> (Admin API)</td>
+<td>nothing to set</td>
+<td>no one: they are API keys, for the Mac and for the boxes</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The Sign-in policy.</strong> PseudoCo Lab: Sign-in also gets its own policy (plan 4.4), applied to that application only, so the global policy stays as it is. Its authentication methods are <strong>bypass code + hardware token</strong> and nothing else: tick <em>Bypass code</em> and <em>Hardware tokens</em>, and untick every other method. Every handout card needs both. Its persona lines are bypass codes (see &quot;Persona bypass codes&quot;), and the participant's passcodes come from a hardware (HOTP) token. Without hardware tokens, Duo refuses every participant; without bypass codes, every persona sign-in. The rest of 4.4 stands: New User policy deny, Verified Push off, remembered devices off, risk-based factor selection off. No tool here creates or checks the policy. If it is ever scripted through Policies v2, <code>allowed_auth_list</code> is <code>bypass</code> and <code>hardware-token</code>, and every other method goes in <code>blocked_auth_list</code>, because Duo allows a method that is in neither list.</p>
+<p>Plan section 4.2 limits every lab app to PseudoCo Workforce. That predates the participant accounts (12.2): a Sign-in app limited that way refuses every participant at the Universal Prompt, so no attendee can sign in to their own instance. Participant accounts never need PseudoCo Workforce. If someone adds one to it anyway, it is still a participant: <code>expire</code> disables and deletes it on schedule, and its <code>status</code> and <code>expire</code> rows say it is in the group. <code>up</code> repeats the Sign-in requirement after the participant accounts, because the tools cannot check it.</p>
+<h2>The workshop file</h2>
+<p>Copy <code>deploy/lab5/workshop.example.yaml</code>, one per delivery. It holds no secrets: only names, addresses and Keychain item names.</p>
+<ul>
+<li><code>workshop</code> names the delivery. Box <em>nn</em> becomes tunnel <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code> and host <code>l5-&lt;workshop&gt;-&lt;nn&gt;.pseudocoassistant.com</code>. Use a new name each time, because the tool refuses to take over a tunnel or record it did not create.</li>
+<li><code>stack.hec_url</code> is the room's Splunk stack. <code>up</code> looks for the box's existing destination with that URL.</li>
+<li><code>room.victim</code> goes on every box's <code>IDENTITY_ALLOWED_USERS</code>, together with the trusted personas and that box's participant account. To swap to <code>room.fallback</code>, change <code>victim</code> and re-run <code>up</code>.</li>
+<li><code>participants:</code> is optional. <code>enabled</code> (default <code>true</code>) creates one participant account per box. <code>cii_url</code> is the Identity Intelligence sign-in link printed on the handout. <code>email_domain</code> defaults to <code>zone</code>. Turn the accounts off for a dry run that should use no Duo seats.</li>
+<li><code>bypass_codes:</code> is optional (see &quot;Persona bypass codes&quot;). <code>count</code> (default 1, at most 10) is the codes per persona per box, <code>reuse_count</code> (default 5, at most 20) the sign-ins each code allows, and <code>valid_hours</code> (default 12, at most 72) how long a batch lasts from the moment it is issued. <code>enabled: false</code> puts no persona codes on the cards. The codes ride on the participant handout, so they need <code>participants.enabled</code>.</li>
+<li><code>personas_file</code> is the persona cast. It defaults to <code>scripts/identity/personas.yaml</code>. <code>expire</code> never touches a persona, and <code>up</code> only gives the room's personas their bypass codes: no persona is ever changed, disabled or deleted.</li>
+<li><code>boxes</code> has one row per Show box: <code>instance</code> and <code>host</code>. Port <code>2222</code>, user <code>splunk</code>, checkout <code>/home/splunk/DemoBot</code>, unit <code>demobot-app</code> and app port <code>8001</code> come from <code>defaults:</code>.</li>
+<li><code>identity:</code> is optional and overrides the 12.1 defaults. The app reads these values as numbers and a boolean when it starts, so a value like <code>12h</code> would stop it from starting. The tool therefore checks them before it connects to anything, and refuses the file otherwise:
+<ul>
+<li><code>session_ttl_minutes</code>: a whole number from 1 to 10080 (7 days), the range the app uses;</li>
+<li><code>status_ttl_seconds</code>: a whole number from 0 to 3600;</li>
+<li><code>fail_open</code>: <code>true</code> or <code>false</code>.</li>
+</ul>
+</li>
+</ul>
+<h2>What <code>up</code> does to a box</h2>
+<ol>
+<li>
+<p><strong>Version check.</strong> The box's <code>/health</code> must report at least <code>required_version</code> (default 4.22.0). There is no code upgrade (I5). A box below that is refused with &quot;the Show template needs that release (12.6)&quot;. It also checks <code>sudo -n</code>, <code>cloudflared</code> and the app unit, and that exactly one HEC destination sends to the room stack.</p>
+</li>
+<li>
+<p><strong>Backup.</strong> <code>.env</code> (byte for byte) and <code>medadvice.db</code> (SQLite online backup, safe while the app writes) go to <code>~/.pseudoco-lab5/backups/&lt;workshop&gt;-&lt;UTC stamp&gt;-&lt;random&gt;/</code> on the box, mode 0600 in a 0700 directory. Each run gets a new directory.</p>
+</li>
+<li>
+<p><strong>Lab 5 keys.</strong> Only the keys of the 12.1 table change, <code>PUBLIC_BASE_URL</code> and <code>HEC_HOST</code> included. The first live line of a key is replaced in place, and a missing key is appended. Every other line keeps its bytes, comments, quoting and line endings. The file is written atomically, with its mode kept. If the file changed since it was read, nothing is written.</p>
+</li>
+<li>
+<p><strong>Tunnel and DNS.</strong> These are created through the Cloudflare API:</p>
+<ul>
+<li>a remotely managed tunnel <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code>, with ingress <code>&lt;host&gt; -&gt; http://localhost:8001</code>;</li>
+<li>a proxied CNAME <code>&lt;host&gt; -&gt; &lt;tunnel-id&gt;.cfargotunnel.com</code>.</li>
+</ul>
+<p><code>cloudflared</code> runs as <code>pseudoco-assistant-lab5-tunnel.service</code>. Its token sits in <code>/etc/pseudoco-assistant/lab5-tunnel.env</code> (root, 0600) and reaches cloudflared as <code>TUNNEL_TOKEN</code>, never on a command line.</p>
+</li>
+<li>
+<p><strong>HEC host.</strong> The tool reads the destination through the box's Settings API, authenticated with the box's own <code>ACCESS_KEY</code>. It sends a <code>PUT</code> that carries only <code>host</code>, then reads the destination back and checks that every other field is unchanged. The other labs' destinations are never touched.</p>
+</li>
+<li>
+<p><strong>Restart.</strong> <code>sudo systemctl restart demobot-app</code>, only when <code>.env</code> changed. If the app does not answer <code>/health</code> within 120 s, <code>up</code> puts back the <code>.env</code> this run started from, restarts the app again and fails the box, so Labs 0–4 keep running. Fix the cause (the box's <code>journalctl -u demobot-app</code> says what it is), then re-run <code>up</code>.</p>
+</li>
+<li>
+<p><strong>Preflight</strong>, through the public name:</p>
+<ul>
+<li>the name resolves;</li>
+<li><code>https://&lt;host&gt;/health</code> reports at least the required release;</li>
+<li><code>/api/server-info</code> shows <code>gated.duo_signin</code> enabled. If it is not, the gate's own reason is printed.</li>
+</ul>
+</li>
+</ol>
+<p>The app's API is reached through an SSH-forwarded connection to the box's <code>127.0.0.1:8001</code>, so the access key never crosses the Show box's plain-http port.</p>
+<p>After the boxes, <code>up</code> creates a <strong>participant account</strong> for each box that came up (see &quot;Participant accounts&quot; below). Step 3 already put that account's username on the box's <code>IDENTITY_ALLOWED_USERS</code>, because the name is fixed. Then it puts the room personas' bypass codes on each card (see &quot;Persona bypass codes&quot;).</p>
+<h2>What <code>down</code> puts back</h2>
+<ul>
+<li>The connector unit and its token file are stopped and removed. The tool only removes a unit that carries its own marker comment.</li>
+<li>Each Lab 5 key is put back the way the first <code>up</code> found it. A replaced line goes back in place, and an appended key is removed. Lines outside the Lab 5 keys stay as they are now, even if another lab changed them during the workshop.
+<ul>
+<li>The state directory never stores a credential. A credential that existed before <code>up</code> is restored from the box's first backup.</li>
+<li>A box with no record of <code>up</code> gets every Lab 5 key that holds a value removed, which is the app default and the template state.</li>
+</ul>
+</li>
+<li><code>.env</code> backups that hold Lab 5 credentials (made by a re-run of <code>up</code>) are deleted. The first backup is kept.</li>
+<li>The app restarts if <code>.env</code> changed, and <code>down</code> waits for it to answer <code>/health</code>.</li>
+<li>The destination's host then goes back to its prior value, through the restarted app. If someone changed it after <code>up</code>, it is left alone, with a warning. If the destination no longer exists, there is nothing to revert.</li>
+<li>The DNS record and tunnel that <code>up</code> recorded are deleted, even when the box itself is unreachable. Anything named <code>l5-&lt;workshop&gt;-*</code> that the tool did not create is only reported.</li>
+<li>A box that <code>down</code> cannot reach (a wrong password, a changed host key, a timeout) or cannot finish (for example, the app does not answer, so the HEC host stays) fails the run with exit 1:
+<ul>
+<li>its report says what is still on the box, and the run ends with a <code>NEXT:</code> line that names the <code>--only</code> re-run;</li>
+<li>its record keeps a pending revert, which <code>status</code> shows, until a <code>down</code> finishes on the box;</li>
+<li>if Show has already destroyed the box, the failure is expected: nothing is left on it to revert.</li>
+</ul>
+</li>
+</ul>
+<p>Participant accounts stay until <code>expire</code> disables them at day 7 and deletes them at day 14. <code>down</code> also deletes the persona bypass codes it recorded for each card (see &quot;Persona bypass codes&quot;). Any it could not tell apart from another room's stop at their <code>valid_secs</code>, and the last line of <code>down</code> says when. Rotate the Duo and CII credentials after the workshop (I1).</p>
+<h2>Participant accounts (plan 12.2)</h2>
+<p><code>up</code> creates one Duo account per box that came up, with the Admin API app PseudoCo Provisioner:</p>
+<ul>
+<li><strong>Username</strong> <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code>, <strong>email</strong> <code>l5-&lt;workshop&gt;-&lt;nn&gt;@pseudocoassistant.com</code> (the zone, or <code>participants.email_domain</code>). Identity Intelligence matches users by email.</li>
+<li><strong>Notes</strong>: <code>lab5-setup participant; workshop=&lt;workshop&gt;; instance=&lt;nn&gt;; created=&lt;UTC time&gt;</code>.</li>
+<li><strong>Groups</strong>: <strong>CII Read-Only</strong>, which gives Duo SSO into Identity Intelligence as read-only, and <strong><code>l5-&lt;workshop&gt;</code></strong>, created on the first <code>up</code>. <code>up</code> refuses to start if Duo has no CII Read-Only group. CII Read-Only is also the group that gets the account through the Sign-in app, whose User access must admit it (see &quot;Duo applications&quot; above). Never PseudoCo Workforce: that is the persona cast's group.</li>
+<li><strong>Its own HOTP token</strong> (type h6, serial = the username), created through the API and attached. <code>up</code> computes the token's first 10 passcodes for the handout and then discards the secret, so the passcodes cannot be printed again. <code>--reissue-passcodes</code> replaces the token, and the old passcodes stop working.</li>
+<li>The account stays <strong>active</strong> and MFA-required. It never gets bypass status or bypass codes of its own: the bypass codes on its card are the room personas'.</li>
+</ul>
+<p>An account with the participant's name that <code>up</code> did not create (its notes lack the marker, or name another workshop) is left alone, and that box's participant fails the run. A re-run keeps existing accounts and their handout cards, and finishes an account that an earlier run left half made.</p>
+<p><strong>The handout</strong> is <code>~/.pseudoco-lab5/workshops/&lt;workshop&gt;/handout.html</code>, a printable card per instance, plus <code>handout.csv</code> with the same rows. Both are 0600. A card holds the instance URL, the box's access key, the username, the email, a blank for the temporary password, the 10 passcodes in order and the sign-in steps. Below them are the team's persona bypass codes (see &quot;Persona bypass codes&quot;). It also tells the participant that other read-only users can see their sign-ins and IP address. A card leaves the handout once its account is disabled. Delete the files after the workshop. They are the only place the tool writes a participant's sign-in details or a persona's bypass code.</p>
+<p><strong>The password is a console step.</strong> The Admin API cannot set a Duo Directory password. <code>up</code> prints each account's Admin Panel link. Open each one and click <strong>Create temporary password</strong> (valid 30 days), then write it on that participant's card. The token is attached first, because that flow expects an enrolled device. The participant signs in with the temporary password and a passcode, then sets their own password. <code>status</code> shows who has done so (<code>has_password</code>).</p>
+<p><strong><code>status</code></strong> prints one row per account: its Duo status, whether its token is attached and whether it has a password, plus its age and the dates it is disabled and deleted. A missing or locked-out account fails the run. For a locked-out account, unlock it in the Admin Panel and turn on lockout auto-revert.</p>
+<p><strong><code>expire</code></strong> lists every Duo user whose name starts with <code>l5-</code> and acts only when all three markers match: the <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code> username, the notes marker naming that same workshop and instance, and membership of <code>l5-&lt;workshop&gt;</code>. It never acts on a persona: a username in <code>scripts/identity/personas.yaml</code>, or a user whose notes carry the persona marker. <code>personas.yaml</code> refuses <code>l5-</code> names, so a persona can never carry the participant markers. Membership of PseudoCo Workforce does not make an account a persona: a participant account that someone added to that group is still disabled and deleted on schedule, so its seat is freed, and its row says it is in the group. Age is counted from Duo's own <code>created</code> time, or from the notes if that is missing.</p>
+<ul>
+<li>At day 7 it sets <code>status=disabled</code>. That denies sign-in and invalidates remembered devices, though an open CII tab may last until CII's idle timeout.</li>
+<li>At day 14 it deletes the account's HOTP token, then the account. Deleting through the API is immediate and permanent and skips Duo's Trash. That is why it needs all three markers, and why <code>--dry-run</code> exists. If the token cannot be deleted, the account is kept for the next run.</li>
+<li>Everything else, such as a user without the markers, is listed as left alone.</li>
+<li>It writes a run log to <code>~/.pseudoco-lab5/runs/</code>. A failed run raises a macOS notification and exits 1.</li>
+</ul>
+<p><strong>Seats.</strong> Disabled users still hold a Duo seat. Only deletion frees one. You need seats for your own account, the persona cast and every participant account from the last 14 days. Each seat also covers up to 5 CII identities.</p>
+<p><strong>What this relies on.</strong> These facts come from the research in plan section 12.4 (Duo Admin API docs of 2026-11-04 and CII docs, checked 2026-11-05). This stage also checked the Admin and Auth API pages read-only.</p>
+<ul>
+<li><code>POST /admin/v1/users</code> takes <code>username</code>, <code>email</code>, <code>realname</code>, <code>notes</code> and <code>status</code>.</li>
+<li>The user object carries <code>created</code>, <code>groups</code>, <code>tokens</code> and <code>has_password</code>. <code>has_password</code> is true when the user has a Duo Directory password.</li>
+<li><code>POST /admin/v1/users/{id}/groups</code> takes <code>group_id</code>. <code>POST /admin/v1/groups</code> returns error 40003 when the name is already taken.</li>
+<li><code>POST /admin/v1/tokens</code> takes <code>type=h6</code>, <code>serial</code> (up to 128 characters), <code>secret</code> and <code>counter</code>. The page does not say how the secret is encoded. The tools send hex, and spike S7 settles it (personas.yaml <code>hotp.secret_encoding</code>).</li>
+<li><code>DELETE /admin/v1/tokens/{id}</code> returns 200 whether or not the token existed. <code>DELETE /admin/v1/users/{id}</code> is immediate and permanent, and the page does not say that it removes the user's tokens. That is why <code>expire</code> deletes the token first.</li>
+<li>Spike S15 (group membership grants CII Read-Only; a password plus an HOTP passcode reaches CII; what disabling does to a live CII session) has not run yet.</li>
+</ul>
+<h2>Persona bypass codes (plan 4.3)</h2>
+<p>Attendees also sign in to their instance as the room's victim and as the trusted personas: every instance's <code>IDENTITY_ALLOWED_USERS</code> names them. The personas' HOTP tokens stay script-only, because HOTP accepts only codes ahead of Duo's counter, so a second consumer would break the baseline. Their cards carry bypass codes instead. The participant account itself never gets one (12.4).</p>
+<p><strong>What <code>up</code> issues.</strong> After the participant accounts, each card gets one small batch for its team, that is, for its box. The batch has codes for <code>room.victim</code> and for each <code>room.trusted</code> persona. The fallback victim and the participant accounts get none.</p>
+<ul>
+<li><code>count</code> codes per persona (default 1), each good for <code>reuse_count</code> sign-ins (default 5), until <code>valid_hours</code> after it was issued (default 12). Those are Duo's <code>count</code>, <code>reuse_count</code> and <code>valid_secs</code>, and the tool always sends all three. Duo's own defaults, unlimited uses and no expiry, are never used.</li>
+<li><code>preserve_existing=true</code>, always. The trusted personas are shared by every box and by other rooms, and Duo's default clears every code the user already has.</li>
+<li>Only the cast's personas get codes: a user <code>scripts/identity/personas.yaml</code> lists in that role (victim, or spike for a dry run; trusted) whose Duo notes carry the persona marker. A workshop file that names anyone else as the victim or a trusted persona is refused before anything changes. A Duo user with a persona's name but without the marker gets nothing, and that run issues no codes at all.</li>
+<li>Only while each room persona is <strong>active</strong> in Duo. Plan 4.3 forbids bypass status: Duo then skips the second factor for that persona, so anyone with an instance's access key could sign in as it. A room persona in bypass status, disabled or in any other status but active (or locked out, below) stops every card's batch: <code>check</code>, <code>up</code> and <code>handouts</code> fail each card (a card that keeps a valid batch included) and name the persona, its status and the fix, <code>scripts/identity/provision_personas.py --reset --only &lt;persona&gt;</code>. The tools never change a persona's status themselves. The same goes for a room persona in any Duo group whose status is not Active: plan 4.3 forbids a bypass group as it forbids bypass status, and Duo lets no member of a disabled group sign in. The fix is in the Admin Panel: take the persona out of that group, or set the group Active. <code>status</code> shows each room persona's Duo status and groups.</li>
+<li>One exception: the room's victim once the lab has contained it, that is, disabled in Duo after this workshop gave it codes. <code>check</code>, <code>up</code>, <code>handouts</code> and <code>status</code> then say it is contained, leave its codes off the cards and go on with the trusted personas' codes. Nothing asks for a reset before the debrief: <code>provision_personas.py --reset</code> runs after the workshop. A victim that is disabled before the workshop gave it any code was left so by an earlier delivery, and fails every card with the reset as the fix.</li>
+<li>A locked-out room persona is the other exception, because a lockout is temporary: Duo unlocks it on its own in about 15 minutes (lockout auto-revert, plan 4.4). So nothing asks for a reset mid-lab. Its row says it is locked out, unlocks on its own, and to retry <code>lab5-setup handouts &lt;workshop.yaml&gt; --only N</code> after that. A card issued meanwhile gets the other personas' codes and is reported <code>PARTIAL</code>, not failed (exit 0, named in <code>RESULT</code>). A card that keeps a valid batch keeps the persona's code, which works again once Duo unlocks it. A locked-out persona in a Bypass or Disabled group still stops every card.</li>
+<li>Per-team batches limit how far one team can burn another's codes. Each code signs in only its own persona.</li>
+<li>A re-run of <code>up</code> keeps a card's batch while it is valid and names the same personas. It issues a new one when the batch has expired, when <code>room.victim</code> or <code>room.trusted</code> changed, or when <code>bypass_codes.count</code>, <code>reuse_count</code> or <code>valid_hours</code> changed. The report names what changed, for example <code>reuse_count 5 -&gt; 3</code>.</li>
+</ul>
+<p><strong>The card</strong> lists each persona with its code, then the steps: <em>Sign in with Duo</em> with the persona's username, then <em>Other options</em>, <em>Bypass Code</em> in Duo. It also says how many sign-ins each code allows and when the batch expires, in UTC. The codes exist only in the 0600 handout. They are registered with the redactor, so they never reach the output, the run log or the state directory. The participant record (<code>participants/&lt;nn&gt;.json</code>) keeps when each batch was issued, when it expires, for whom and the ids of its codes, but never a code. <code>status</code> shows how long each card's batch has left, fails a card whose batch has expired, and warns about one issued with other settings than the workshop file's.</p>
+<p><strong><code>lab5-setup handouts workshop.yaml [--only N] [--revoke]</code></strong> puts a fresh batch on each card, for lab-day morning or a lost card. It touches no box, tunnel or participant account, and asks for no SSH password. Print the changed cards again. The codes it replaces stay valid until they expire. For a lost card, <code>handouts --only N --revoke</code> also deletes the codes of that card's earlier batches (see &quot;Revocation&quot;), but only once the card carries its new batch and the participant record has it. A card whose new batch failed keeps its earlier codes, and the handout line names only the cards that really changed. If <code>up</code> runs the day before the lab, either raise <code>valid_hours</code> so the batch covers the end of lab day, or run <code>handouts</code> that morning (then copy the temporary passwords onto the new cards). <code>up --reissue-passcodes</code> keeps a card's persona codes: it replaces only the participant's token.</p>
+<p><strong>Duo's limit.</strong> Duo keeps at most 100 bypass codes per user, and a trusted persona collects one batch per box from every room until they expire. Before it issues anything, <code>up</code> (and <code>handouts</code>) counts each persona's unexpired codes, other rooms' included. If the run would cross 100, it issues nothing and names the persona. With <code>count: 1</code>, each issue takes one code per box from each persona.</p>
+<p><strong>One card at a time.</strong> A Duo error while a card's codes are issued, or the handout's lock timing out while the card is written, fails that card only. A Duo call that gets no usable answer (a timeout, a TLS error, an answer cut off or not JSON) counts as a Duo error, and its message never repeats the answer. The other cards go on, and <code>up</code> still prints its <code>RESULT</code> line with the failed cards, the handout path, the temporary-password links and the Sign-in reminders. <code>handouts</code> and <code>down</code> likewise print their <code>RESULT</code>. The exit code is <code>1</code>. A card that got only part of its batch keeps its earlier codes, and the codes Duo did issue are recorded as an incomplete batch, which <code>down</code> and <code>handouts --revoke</code> delete. Re-run to finish the card. If a create gets no usable answer (a timeout, an answer cut off, a 5xx such as a gateway's 502, 503 or 504, or a body that is not the codes), Duo may still have made the codes, which are then on no card. The tool does not look for them, because no listing can tell them from another room's codes for the same shared persona. The batch records that persona's ids as unknown for the card, and the row says, whatever the cause: &ldquo;Duo's answer was lost; any codes it made expire at &lt;time&gt; and cannot be revoked by this tool&rdquo;. No error says Duo could not be reached: the request may have gone out before its answer was lost.</p>
+<p><strong>Revocation: <code>down</code> and <code>handouts --revoke</code>.</strong> Duo's Admin API deletes a code only by its id (<code>DELETE /admin/v1/bypass_codes/{id}</code>). The create call returns only the code strings, not their ids, and a code carries no label or notes. So the tool lists the persona's <code>bypass_code_id</code>s just before and after each create that returns its codes. Exactly <code>count</code> new ids are this batch's, and the participant record keeps them. Any other difference means another room issued codes for the same persona in between (or a lost create's codes landed late), and a second listing that fails tells nothing either. Then the record keeps that persona's ids as unknown for the card, and the row says when its codes expire: for those codes, as for a lost create's, <code>valid_secs</code> is the cutoff. <code>down</code> deletes the recorded ids of every batch its cards had, and <code>handouts --only N --revoke</code> deletes those of card N's earlier batches. Each id is deleted only while Duo still lists it under the persona it was recorded for, so another room's codes and the codes a persona never got from this tool are never touched. A code that was used up, expired or deleted already counts as gone. A delete Duo refuses fails that card, keeps its ids, and a re-run of <code>down</code> finishes it. <code>expire</code> deletes no bypass code. <code>valid_hours</code> is capped at 72, so a code whose id is unknown is dead long before <code>expire</code> disables a participant at day 7. The last line of <code>down</code> says until when any code it could not delete stays valid, and names each card and persona whose code ids are unknown, with when those codes expire. While there are any, it never says every batch was deleted. <code>handouts --revoke</code> names them the same way.</p>
+<p><strong>Policy and CII.</strong> The Sign-in policy must allow bypass codes as well as hardware tokens (see &quot;Duo applications&quot;). The trusted personas' CII exclusions include <em>A Bypass Code Was Used To Successfully Sign In</em> (plan 4.3), so attendees' sign-ins never fail them. The victim has no exclusion, so its bypass sign-ins add that check to the ones it already fails.</p>
+<p><strong>What this relies on</strong> (the Admin API page, checked read-only on 2026-11-05 and 2026-11-06):</p>
+<ul>
+<li><code>POST /admin/v1/users/{id}/bypass_codes</code> takes <code>count</code> (at most 10 per call), <code>reuse_count</code> (default 1, and 0 means unlimited), <code>valid_secs</code> (default 0, which means the codes never expire) and <code>preserve_existing</code> (default false, which clears the user's other codes). It returns the codes as strings, without ids. It needs <em>Grant resource - Write</em>, which the Provisioner app has. A user holds at most 100 codes.</li>
+<li><code>GET /admin/v1/users/{id}/bypass_codes</code> returns <code>bypass_code_id</code>, <code>created</code>, <code>expiration</code>, <code>reuse_count</code> and <code>admin_email</code>, never the code. It is paged (<code>limit</code> 100 by default, at most 500), and the client reads every page.</li>
+<li><code>DELETE /admin/v1/bypass_codes/{id}</code> takes no parameters and needs <em>Grant resource - Write</em>. It answers 200 when it deleted the code and 404 when there is no such code.</li>
+<li>A user's <code>status</code> is <code>active</code>, <code>bypass</code> (Duo skips secondary authentication), <code>disabled</code>, <code>locked out</code> or <code>pending deletion</code>.</li>
+<li><code>GET /admin/v1/users/{id}/groups</code> lists the user's groups (paged), each with <code>group_id</code>, <code>name</code> and <code>status</code>. A group's <code>status</code> is Active, Bypass (its members skip secondary authentication) or Disabled (they cannot authenticate). The table writes these capitalized and the examples in lower case, so the tool compares them case-insensitively.</li>
+<li>In the Universal Prompt, a bypass code is entered through <em>Other options</em>, <em>Bypass Code</em> (Duo's end-user guide).</li>
+</ul>
+<h2>Persona scripts (<code>scripts/identity/</code>)</h2>
+<p>The cast is <code>scripts/identity/personas.yaml</code>: 3 trusted personas, the victims (an active victim plus an untouched fallback per concurrent room), and the spike persona, which becomes the dry-run victim. A test pins every name as disjoint from the app's synthetic end users and from the synthetic-PII name pools and records of all 8 themes. Run both scripts with the tool's venv: <code>~/.pseudoco-lab5/venv/bin/python scripts/identity/&lt;script&gt; ...</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>provision_personas.py [--dry-run]</code></td>
+<td>Creates what is missing: the <strong>PseudoCo Workforce</strong> group, each user (API-created, email on <code>pseudocoassistant.com</code>, a persona notes marker), and one HOTP token each. The token's secret goes into the Keychain first, through <code>security -i</code> on stdin and never in argv. Its counter starts at 0 in <code>~/.pseudoco-lab5/personas/hotp/</code>. When it creates the group, it prints the User access each lab app needs (see &quot;Duo applications&quot;).</td>
+</tr>
+<tr>
+<td><code>provision_personas.py --status</code></td>
+<td>Read-only: each persona's Duo status, its token, its Keychain secret (present or missing, never the value), its counter and its last baseline success.</td>
+</tr>
+<tr>
+<td><code>provision_personas.py --reset [--only U,...]</code></td>
+<td>Re-enables and unlocks (<code>status=active</code>), then resyncs each HOTP token to the Mac's counter with three codes. Afterwards, clear all step-ups in the Admin Panel and run CII Reset Feedback, which have no API.</td>
+</tr>
+<tr>
+<td><code>provision_personas.py --teardown --yes</code></td>
+<td>Deletes the cast's users and tokens, their Keychain secrets and their counters. Without <code>--yes</code> it only lists what it would delete. It keeps the group, because the User access of PseudoCo VPN and PseudoCo Lab: Sign-in names it.</td>
+</tr>
+<tr>
+<td><code>persona_activity.py baseline</code></td>
+<td>One successful passcode sign-in per persona from its home address and device, at random points in <code>baseline.jitter_minutes</code>, then the self-check. It does nothing while <code>baseline.enabled</code> is false. It refuses documentation addresses, so set real ones once spike S1 says how Duo geolocates them. A rejected passcode is never retried.</td>
+</tr>
+<tr>
+<td><code>persona_activity.py takeover --victim U</code></td>
+<td>A home sign-in, then 5 to 9 wrong passcodes from the next foreign address within MFA Flood's 2 minutes (under the lockout limit of 10), then a success from that address with the attacker's device. It refuses a trusted persona, a victim that preauth does not accept, and a victim taken over in the last 8 days unless you pass <code>--force</code>. Its record in <code>personas/takeovers/</code> is the takeover time. When to run it depends on the S1 decision.</td>
+</tr>
+<tr>
+<td><code>persona_activity.py replay --victim U</code></td>
+<td>A short push flood, 5 pushes by default and never more than 9, to the one victim with <code>replay_device: true</code> (Duo Mobile on a facilitator phone). The facilitator denies each push. An approved push fails the run.</td>
+</tr>
+<tr>
+<td><code>persona_activity.py selfcheck [--gate]</code></td>
+<td>For each persona: the last sign-in and its age, the Keychain secret and counter, Duo preauth, and CII trust and failing checks (<code>getEndUser</code> on the email). A trusted persona that fails a check or drops below Neutral is a failure. <code>--gate</code> is the T-18 gate, where Unknown trust also fails. Any failure raises a macOS notification and exits 1.</td>
+</tr>
+</tbody>
+</table>
+<p>Every sign-in sends <code>ipaddr</code> and <code>hostname</code> and never <code>client_supports_verified_push</code>. Each HOTP code is reserved under a file lock before it is sent, so two runs never use the same counter value. Nothing else may use these codes: HOTP accepts only codes ahead of Duo's counter.</p>
+<h2>Daily jobs (launchd)</h2>
+<p><code>deploy/launchd/install-lab5.sh</code> installs two user agents with this checkout's paths. It never touches the app's own agents.</p>
+<table>
+<thead>
+<tr>
+<th>Agent</th>
+<th>When</th>
+<th>Runs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>com.yeack.pseudoco-assistant-lab5-expire</code></td>
+<td>daily 08:15</td>
+<td><code>deploy/lab5/lab5-setup expire</code></td>
+</tr>
+<tr>
+<td><code>com.yeack.pseudoco-assistant-lab5-baseline</code></td>
+<td>daily 09:20</td>
+<td><code>scripts/identity/persona_activity.py baseline</code>, then the self-check</td>
+</tr>
+</tbody>
+</table>
+<p>Use <code>--only expire|baseline</code> to install one, <code>--uninstall</code> to remove them and <code>--print</code> to see the rendered plists. A run missed while the Mac sleeps happens when it wakes. Nothing runs while the Mac is shut down, so a week away before a delivery shows up as a self-check failure. Logs go to <code>logs/launchd-lab5-*.log</code> and to the run logs under <code>~/.pseudoco-lab5/</code>. Install from the main checkout, not a worktree.</p>
+<h2>Secrets</h2>
+<ul>
+<li>SSH passwords are asked once per box per run with <code>getpass</code>. Pressing Enter reuses the previous box's password. They are never stored.</li>
+<li>Keychain values reach a box only as file content: <code>.env</code> over SFTP, and the tunnel token on the stdin of a <code>sudo</code> file write. They never appear in a command line, a URL, the output or the run log.</li>
+<li>Output shows credentials by their last 4 characters only. All output, mirrored to <code>~/.pseudoco-lab5/workshops/&lt;workshop&gt;/runs/*.log</code>, passes through a redactor that holds every secret the run read.</li>
+<li><code>~/.pseudoco-lab5/workshops/&lt;workshop&gt;/</code> holds the per-box records (<code>boxes/&lt;nn&gt;.json</code>: tunnel and DNS ids, the non-secret baseline, backup paths) and <code>known_hosts</code>. Directories are 0700 and files 0600.</li>
+<li>Host keys are trusted on first use, per workshop. Show reuses IP addresses, so <code>~/.ssh/known_hosts</code> is not consulted. A box that later presents a different key is refused.</li>
+</ul>
+<h2>Show template (12.6)</h2>
+<p>A box from the template must pass <code>lab5-setup check</code> with <strong>ready, nothing to upgrade</strong>. That means:</p>
+<ul>
+<li>the release tag is at least <code>required_version</code>;</li>
+<li><code>cloudflared</code> is installed, with no tunnel and no token;</li>
+<li>every <code>DUO_*</code>, <code>CII_*</code>, <code>IDENTITY_*</code> and <code>PUBLIC_BASE_URL</code> key is empty;</li>
+<li>the HEC destination for the room stack is in <code>medadvice.db</code>.</li>
+</ul>
+<p>An <code>APP_VERSION</code> line left in the template's <code>.env</code> overrides what <code>/health</code> reports. Keep it equal to the tag, or remove it. <code>check</code> names it when it explains a version refusal.</p>
+<h2>Tests</h2>
+<p><code>tests/test_lab5_participants.py</code> and <code>tests/test_identity_personas.py</code> cover the participant accounts, <code>expire</code>, the persona scripts and the launchd templates. They run against an in-memory Duo, CII and Keychain (<code>tests/lab5_fakes.py</code>), and pin the following:</p>
+<ul>
+<li><code>up</code> creates the accounts with all three markers and a handout whose passcodes Duo accepts;</li>
+<li><code>expire</code> acts only on fully marked accounts, at day 7 and day 14, and never on a persona, while a participant account that is also in PseudoCo Workforce is still expired;</li>
+<li>the persona tool, the README and the runbook say which groups each lab app admits: Sign-in admits CII Read-Only too, and no text limits every lab app to PseudoCo Workforce;</li>
+<li><code>up</code> puts one batch of persona bypass codes per box on its card: to the cast's victim and trusted personas only, with <code>reuse_count</code> 5, <code>valid_secs</code> from <code>valid_hours</code> and <code>preserve_existing=true</code>. Duo accepts the codes up to their uses and until <code>valid_secs</code>, while no code reaches the output, a log or the state, and no persona HOTP code is read or printed;</li>
+<li>a re-run keeps a valid batch and reissues one whose <code>count</code>, <code>reuse_count</code> or <code>valid_hours</code> changed, <code>handouts</code> issues a fresh one and touches nothing else, and a run that would pass Duo's 100-code limit issues nothing;</li>
+<li>a room persona in bypass status or disabled stops every card's batch in <code>check</code>, <code>up</code> and <code>handouts</code>, and <code>status</code> shows each persona's Duo status; a locked-out one gets no reset advice, and its cards get the other personas' codes and are partial, not failed;</li>
+<li>a create without a usable answer (a timeout before or after Duo made the codes, an answer cut off, a 502, 503 or 504, a malformed 200) is never listed again: its persona's ids are unknown for that card, and its row says, in one wording, when any codes it made expire and that the tool cannot revoke them. <code>down</code> and <code>handouts --revoke</code> delete none of them, nor another room's codes for that persona, nor a late commit's; they say when those codes expire, and <code>down</code> never claims every batch was deleted;</li>
+<li>a Duo error or a handout lock timeout fails only its card: <code>up</code> still finishes, exits 1 and records a partial batch as incomplete;</li>
+<li>each batch records exactly the ids Duo lists as new around a create that returned its codes, and unknown ids when another room's create makes that ambiguous; <code>down</code> and <code>handouts --revoke</code> delete exactly the recorded ones, and <code>expire</code> deletes none;</li>
+<li>the Sign-in policy is described as bypass code + hardware token everywhere, and nothing asks for a policy with bypass codes alone;</li>
+<li>each secret reaches Duo once, in a POST body, and the Keychain only on stdin;</li>
+<li>the cast is disjoint from the app's synthetic users and synthetic PII;</li>
+<li>the takeover stays within MFA Flood's window and under the lockout limit.</li>
+</ul>
+<p><code>tests/test_lab5_setup.py</code> runs every box command against fakes only: in-memory Show boxes, an in-memory Cloudflare API behind the real client, and a fake <code>security</code>. It pins the following:</p>
+<ul>
+<li><code>up</code> on a box with Labs 0–4 settings keeps every other <code>.env</code> line and every other destination field;</li>
+<li><code>check</code> changes nothing;</li>
+<li><code>down</code> restores the original bytes, and a second <code>down</code> is a no-op;</li>
+<li>a <code>down</code> that cannot reach or finish a box exits 1, keeps it pending, and a re-run finishes it;</li>
+<li><code>identity:</code> values the app could not start with are refused, and an app that does not come back after <code>up</code> gets its <code>.env</code> rolled back;</li>
+<li><code>check</code> renders its diff on long and repetitive <code>.env</code> files, <code>.env.example</code> included;</li>
+<li>no secret reaches argv, a URL, the output, the run log or the state directory.</li>
+</ul>
+<p>It is registered in <code>tests/run_all.sh</code> and runs with the app's venv: it never imports paramiko, and it fails if anything does.</p>
+</main></body></html>
