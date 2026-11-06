@@ -15,9 +15,23 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _describe_error(e: BaseException) -> str:
+    """Exception type plus message, so an empty-message error still says what it was."""
+    msg = str(e)
+    return f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+
+
 class AutoPrompterService:
     """Service that automatically creates sessions and sends realistic medical prompts"""
-    
+
+    # Per-request httpx timeout for the self-calls. Every generated turn runs the
+    # Multi-Agent pipeline, which on Ollama took a median of about 22 s, a p90 of about
+    # 32 s and up to 72 s in the October runs. The old 30 s limit dropped about half of the
+    # sessions mid-conversation while the server finished each turn anyway. Same
+    # budget as the incident load driver (routers/incident.py).
+    TURN_TIMEOUT_S = 150.0
+
     # Realistic medical consultation scenarios with multi-turn conversations
     CONSULTATION_SCENARIOS = [
         {
@@ -158,7 +172,9 @@ class AutoPrompterService:
                 self._last_session_time = datetime.utcnow()
                 logger.info(f"Auto-prompter: Session #{self._sessions_created} completed")
             except Exception as e:
-                logger.error(f"Auto-prompter error: {e}")
+                # Name the type: httpx timeouts stringify to "", which left a
+                # bare "Auto-prompter error: " that read like a hang.
+                logger.error("Auto-prompter error: %s", _describe_error(e))
             
             # Wait 60 seconds before next session
             if self._running:
@@ -170,7 +186,7 @@ class AutoPrompterService:
         # (e.g. served via the tunnel); otherwise every generated turn 401s and no
         # demo traffic is produced. HTTP Basic: any username, key as the password.
         auth = ("auto-prompter", settings.access_key) if getattr(settings, "access_key", "") else None
-        async with httpx.AsyncClient(timeout=30.0, auth=auth) as client:
+        async with httpx.AsyncClient(timeout=self.TURN_TIMEOUT_S, auth=auth) as client:
             # Create new session
             response = await client.post(f"{self._base_url}/api/chat/session/new")
             response.raise_for_status()
