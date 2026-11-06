@@ -252,7 +252,8 @@ def test_store() -> None:
     check("the public reference is not derived from the token",
           snap.session_ref != row.token_hash and snap.session_ref not in token)
     check("username normalized, TTL from settings, client/agent/txid recorded",
-          row.username == "nina.osei" and abs((row.expires_at - row.created_at) - timedelta(minutes=720))
+          row.username == "nina.osei"
+          and abs((row.expires_at - row.created_at) - timedelta(minutes=settings.identity_session_ttl_minutes))
           < timedelta(seconds=1) and row.client_address == "203.0.113.7" and row.user_agent == "UA/1"
           and row.duo_txid.startswith("1b2c3d4e"))
     try:
@@ -990,20 +991,32 @@ def test_isolation_from_dotenv() -> None:
                 "DUO_API_HOST": "api-test0000.duosecurity.com", "DUO_ADMIN_IKEY": "DIDEVADMINIKEY000001",
                 "DUO_ADMIN_SKEY": "s" * 40, "CII_CLIENT_ID": "cii-dev", "CII_CLIENT_SECRET": "c" * 32,
                 "CII_TOKEN_URL": "https://auth.cii.invalid/oauth/token", "CII_API_URL": "https://api.cii.invalid/graphql",
-                "IDENTITY_ALLOWED_USERS": "nina.osei,avery.kim"}
+                "IDENTITY_ALLOWED_USERS": "nina.osei,avery.kim",
+                # lab5-setup's behaviour settings, as workshop.yaml may set them (deploy/lab5/workshop.example.yaml)
+                "IDENTITY_FAIL_OPEN": "false", "IDENTITY_SESSION_TTL_MINUTES": "480",
+                "IDENTITY_STATUS_TTL_SECONDS": "60", "HEC_HOST": "l5-dev.pseudocoassistant.com"}
     probe = (
         "import json, sys\n"
         f"sys.path[:0] = [{str(ROOT)!r}, {str(ROOT / 'tests')!r}]\n"
         "from backend.config import settings\n"
         "before = settings.duo_admin_ikey\n"
         "import identity_isolation\n"
+        "pre = {k: getattr(settings, k) for k in identity_isolation.LAB5_DEFAULT_SETTINGS}\n"
         "identity_isolation.isolate(settings)\n"
         "from backend.services import identity_lookup, identity_signin\n"
         "settings.duo_enabled = True\n"          # what the suites do for a signed-in test
         "st = identity_lookup.lookup('nina.osei')\n"
-        "print(json.dumps({'before': before, 'keys': [getattr(settings, k) for k in identity_isolation.IDENTITY_SETTINGS],"
-        " 'sources': st['sources'], 'signin': identity_signin.configured(),"
-        " 'refused': identity_isolation.requests_refused()}))\n")
+        "refused, signin = identity_isolation.requests_refused(), identity_signin.configured()\n"
+        "defaults = {k: getattr(settings, k) for k in identity_isolation.LAB5_DEFAULT_SETTINGS}\n"
+        # A suite that turns the Web SDK on (as test_duo_signin's _configure does) before it installs its fake.
+        "settings.duo_client_id, settings.duo_client_secret = 'DIPROBECLIENTID00001', 'p' * 40\n"
+        "settings.duo_api_host = 'api-probe.duosecurity.invalid'\n"
+        "settings.public_base_url = 'https://l5-dev.pseudocoassistant.com'\n"
+        "health = identity_signin.run_health_check()\n"
+        "print(json.dumps({'before': before, 'keys': [getattr(settings, k) for k in identity_isolation.IDENTITY_SETTINGS"
+        " if k not in ('duo_client_id', 'duo_client_secret', 'duo_api_host', 'public_base_url')],"
+        " 'sources': st['sources'], 'signin': signin, 'refused': refused, 'pre': pre, 'defaults': defaults,"
+        " 'health': health, 'websdk': identity_isolation.requests_refused()[len(refused):]}))\n")
     run = subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True, text=True, timeout=120,
                          env={**{k: v for k, v in os.environ.items() if not k.startswith(("DUO_", "CII_"))},
                               **lab5_env, "OTEL_ENABLED": "false"})
@@ -1014,9 +1027,18 @@ def test_isolation_from_dotenv() -> None:
     check("the Lab 5 keys were there to blank (they reached the settings)",
           got.get("before") == lab5_env["DUO_ADMIN_IKEY"], (run.stderr or run.stdout)[-300:])
     check("isolate() blanks every Duo / CII setting: nothing is configured, so nothing is sent",
-          got.get("keys") == [""] * len(identity_isolation.IDENTITY_SETTINGS)
+          got.get("keys") == [""] * (len(identity_isolation.IDENTITY_SETTINGS) - 4)
           and got.get("sources") == {"duo": "not_configured", "cii": "not_configured"}
           and got.get("signin") is False and got.get("refused") == [], str(got))
+    d = Settings.model_fields
+    check("...and puts lab5-setup's behaviour settings (fail open, the TTLs, HEC_HOST) back to the app's defaults",
+          got.get("pre") == {"identity_session_ttl_minutes": 480, "identity_status_ttl_seconds": 60,
+                             "identity_fail_open": False, "hec_host": "l5-dev.pseudocoassistant.com"}
+          and got.get("defaults") == {k: d[k].default for k in identity_isolation.LAB5_DEFAULT_SETTINGS}, str(got))
+    check("...and a suite that turns the Web SDK on builds no duo_universal client: the health check fails, and the "
+          "attempt is recorded (the closing 'no identity request' check sees it)",
+          got.get("health") is False and got.get("websdk") == ["Web SDK client for api-probe.duosecurity.invalid"],
+          str(got))
     run_all = (ROOT / "tests" / "run_all.sh").read_text()
     exported = run_all[run_all.index("export DUO_ENABLED=false"):run_all.index("pass=0")]
     keys = [k.upper() for k in identity_isolation.IDENTITY_SETTINGS]
