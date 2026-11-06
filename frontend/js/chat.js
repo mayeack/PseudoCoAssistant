@@ -646,6 +646,9 @@ async function refreshServerInfo() {
         if (ver) ver.textContent = data.version ? `v${data.version}` : '—';
         _hostGate = { gated: data.gated || {}, capabilities: data.capabilities || {},
                       identity_session: data.identity_session === true };
+        // Once GET /api/identity/me has answered, server-info's
+        // identity_session is as current an answer (it is asked first).
+        if (_identityAnswer !== null) _identityAnswer = _hostGate.identity_session ? 'signed_in' : 'signed_out';
         _attachmentConfig = data.attachments || null;
         applyAttachmentGate();
         // Every poll, not only when /api/identity/me is asked: once the gate
@@ -931,6 +934,11 @@ function startProviderPolling() {
 // identity the Identity Risk Gate refuses (IDENTITY AT RISK) or one the user
 // has unblocked (UNBLOCKED), each with the Unblock me toggle.
 let _identity = null;
+// What the server last said about this browser's session: 'signed_in',
+// 'signed_out', or null while that is not known (the first GET
+// /api/identity/me still pending, or the last one failed with anything but a
+// 401/403). Only 'signed_out' shows the "Sign in with Duo" link.
+let _identityAnswer = null;
 
 // Lab 5 is inert unless the server says otherwise. GET /api/identity/me is
 // polled only while the duo_signin gate is open, the server reports an
@@ -949,25 +957,39 @@ async function refreshIdentity() {
     try {
         const res = await fetch('/api/identity/me');
         // 401/403: not signed in any more (the fetch wrapper raised the banner).
-        // Anything else that is not OK (a tunnel blip) keeps the last badge.
-        if (res.status === 401 || res.status === 403) { renderIdentity(null); return; }
-        if (!res.ok) return;
+        if (res.status === 401 || res.status === 403) {
+            _identityAnswer = 'signed_out';
+            renderIdentity(null);
+            return;
+        }
+        // Anything else that is not OK (a tunnel blip) keeps the last badge,
+        // but says nothing about the session: no Sign in link until one does.
+        if (!res.ok) { _identityAnswer = null; renderSigninLink(); return; }
         const data = await res.json();
+        _identityAnswer = data && data.signed_in ? 'signed_in' : 'signed_out';
         if (data && data.revoked) { showIdentityBanner('revoked', data); return; }
         renderIdentity(data && data.signed_in ? data : null);
-    } catch (e) { /* best-effort: the badge keeps its last state */ }
+    } catch (e) {
+        // Best-effort: the badge keeps its last state; the link waits for an answer.
+        _identityAnswer = null;
+        renderSigninLink();
+    }
 }
 
-// "Sign in with Duo": shown only while gated.duo_signin is open and the page
-// shows no signed-in identity. Re-evaluated on every server-info poll
-// (refreshServerInfo) and whenever the identity changes (renderIdentity), so
-// it goes away as soon as the gate closes, and comes back when it reopens.
-// The gate only governs starting a sign-in; one already at Duo still finishes.
+// "Sign in with Duo": shown only while gated.duo_signin is open AND the server
+// last said this browser is signed out (GET /api/identity/me, or server-info's
+// identity_session once /me has answered). So it never flashes for a
+// signed-in user: hidden while the first /me is pending, and after a /me
+// that failed with anything but a 401/403. Re-evaluated on every server-info
+// poll (refreshServerInfo) and whenever the identity changes
+// (renderIdentity), so it goes away as soon as the gate closes, and comes
+// back when it reopens. The gate only governs starting a sign-in; one
+// already at Duo still finishes.
 function renderSigninLink() {
     const signin = document.getElementById('identitySignin');
     if (!signin) return;
     const g = gateFor('duo_signin');
-    signin.classList.toggle('hidden', !(g && g.enabled) || !!_identity);
+    signin.classList.toggle('hidden', !(g && g.enabled) || _identityAnswer !== 'signed_out' || !!_identity);
 }
 
 function renderIdentity(identity) {

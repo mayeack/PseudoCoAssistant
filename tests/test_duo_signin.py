@@ -1086,7 +1086,7 @@ def test_frontend() -> None:
     check("#identityBanner sits beside #emergencyBanner, hidden by default",
           re.search(r'<div id="identityBanner" class="hidden ', page) is not None
           and 0 < page.index('id="emergencyBanner"') - page.index('id="identityBanner"') < 4000)
-    check("chat.js cache-buster bumped to v=37", "/static/js/chat.js?v=37" in page)
+    check("chat.js cache-buster bumped to v=38", "/static/js/chat.js?v=38" in page)
     check("chat.js: exactly ONE fetch wrapper, around window.fetch",
           js.count("window.fetch =") == 1 and "const _pageFetch = window.fetch.bind(window);" in js
           and js.count("_pageFetch(") == 1)
@@ -1670,7 +1670,10 @@ def test_identity_poll_inert() -> None:
 
 # Loads the real chat.js with stub #identitySignin / #identityBadge elements,
 # runs refreshIndicators() once per server-info answer in `polls`, and prints
-# whether the "Sign in with Duo" link was shown after each poll.
+# whether the "Sign in with Duo" link was shown after each poll, and whether it
+# was EVER shown (a flash in between counts). `me` is the /api/identity/me
+# answer, or a list of them (one per poll): a body (200), {status, body},
+# 'pending' (never answers) or 'throw' (a network error).
 _LINK_HARNESS = r"""
 const fs = require('fs');
 const vm = require('vm');
@@ -1678,11 +1681,19 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 const scenarios = JSON.parse(process.argv[3]);
 function el(initial) {
   const s = new Set(initial || []);
-  return { title: '', textContent: '', dataset: {},
-           classList: { add: (...c) => c.forEach((x) => s.add(x)), remove: (...c) => c.forEach((x) => s.delete(x)),
-                        toggle: (c, force) => { const on = force === undefined ? !s.has(c) : !!force;
-                                                 if (on) s.add(c); else s.delete(c); return on; },
-                        contains: (c) => s.has(c) } };
+  const e = { title: '', textContent: '', dataset: {}, ever: false };
+  const seen = () => { if (!s.has('hidden')) e.ever = true; };
+  e.classList = { add: (...c) => { c.forEach((x) => s.add(x)); seen(); },
+                  remove: (...c) => { c.forEach((x) => s.delete(x)); seen(); },
+                  toggle: (c, force) => { const on = force === undefined ? !s.has(c) : !!force;
+                                          if (on) s.add(c); else s.delete(c); seen(); return on; },
+                  contains: (c) => s.has(c) };
+  return e;
+}
+function respond(status, body) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body, text: async () => JSON.stringify(body),
+           headers: { get: (k) => (k.toLowerCase() === 'content-type' ? 'application/json' : null) },
+           clone() { return this; } };
 }
 (async () => {
   const out = {};
@@ -1695,11 +1706,13 @@ function el(initial) {
       fetch: async (input) => {
         const url = String(input);
         requests.push(url);
-        const body = url.startsWith('/api/server-info') ? sc.polls[Math.min(poll, sc.polls.length - 1)]
-                   : url.startsWith('/api/identity/me') ? (sc.me || { signed_in: false }) : {};
-        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body),
-                 headers: { get: (k) => (k.toLowerCase() === 'content-type' ? 'application/json' : null) },
-                 clone() { return this; } };
+        if (url.startsWith('/api/server-info')) return respond(200, sc.polls[Math.min(poll, sc.polls.length - 1)]);
+        if (!url.startsWith('/api/identity/me')) return respond(200, {});
+        const me = sc.me || { signed_in: false };
+        const answer = Array.isArray(me) ? me[Math.min(poll, me.length - 1)] : me;
+        if (answer === 'pending') return new Promise(() => {});
+        if (answer === 'throw') throw new TypeError('Failed to fetch');
+        return answer.status ? respond(answer.status, answer.body || {}) : respond(200, answer);
       },
       document: { addEventListener() {}, getElementById: (id) => elements[id] || null, querySelectorAll: () => [],
                   querySelector: () => null, hidden: false,
@@ -1719,7 +1732,8 @@ function el(initial) {
       for (let j = 0; j < 20; j++) await new Promise((r) => setImmediate(r));
       shown.push(!elements.identitySignin.classList.contains('hidden'));
     }
-    out[name] = { shown, me: requests.filter((u) => u.startsWith('/api/identity/me')).length };
+    out[name] = { shown, ever: elements.identitySignin.ever,
+                  me: requests.filter((u) => u.startsWith('/api/identity/me')).length };
   }
   console.log(JSON.stringify(out));
 })().catch((e) => { console.error(e && e.stack || e); process.exit(2); });
@@ -1727,11 +1741,14 @@ function el(initial) {
 
 
 def test_signin_link_follows_gate() -> None:
-    print("chat.js: the Sign in with Duo link is re-evaluated on every server-info poll")
+    print("chat.js: the Sign in with Duo link follows every server-info poll, and never flashes for a signed-in user")
     js = (ROOT / "frontend" / "js" / "chat.js").read_text()
     info = re.search(r"async function refreshServerInfo\(\) \{(.*?)\n\}", js, re.S).group(1)
     check("refreshServerInfo re-evaluates the link (renderSigninLink) on every answer",
           "renderSigninLink();" in info)
+    link = re.search(r"function renderSigninLink\(\) \{(.*?)\n\}", js, re.S).group(1)
+    check("...and shows it only on a signed-out answer from the server (_identityAnswer), unknown at first",
+          "_identityAnswer !== 'signed_out'" in link and "let _identityAnswer = null;" in js)
     node = shutil.which("node")
     if not node:
         print("  SKIP  node is not installed: the behavioural link check did not run")
@@ -1750,6 +1767,13 @@ def test_signin_link_follows_gate() -> None:
         "gate_reopens": {"polls": [si(down), si(up)]},
         "signed_in": {"polls": [si(up, True), si(down, True)], "me": {"signed_in": True, "username": "nina.osei"}},
         "duo_off": {"polls": [si(off), si(off)]},
+        "first_me_pending_signed_in": {"polls": [si(up, True)], "me": "pending"},
+        "first_me_pending_signed_out": {"polls": [si(up)], "me": "pending"},
+        "me_errors": {"polls": [si(up)] * 5,
+                      "me": [{"signed_in": False}, {"status": 502, "body": {"detail": "Bad Gateway"}}, "throw",
+                             {"status": 401, "body": {"detail": "identity_session_expired"}},
+                             {"status": 403, "body": {"detail": "identity_session_revoked"}}]},
+        "server_info_signed_in": {"polls": [si(up), si(up, True)], "me": [{"signed_in": False}, "pending"]},
     }
     out = subprocess.run([node, str(harness), str(ROOT / "frontend" / "js" / "chat.js"), json.dumps(scenarios)],
                          capture_output=True, text=True, timeout=60)
@@ -1762,9 +1786,17 @@ def test_signin_link_follows_gate() -> None:
           got["gate_closes"]["shown"] == [True, False, False], str(got["gate_closes"]))
     check("the gate reopens: the link comes back", got["gate_reopens"]["shown"] == [False, True],
           str(got["gate_reopens"]))
-    check("signed in: never the link (the badge instead), gate open or closed",
-          got["signed_in"]["shown"] == [False, False], str(got["signed_in"]))
-    check("Duo off: never the link, and no /api/identity/me", got["duo_off"] == {"shown": [False, False], "me": 0},
+    check("signed in: never the link (the badge instead), gate open or closed, not even for a moment",
+          got["signed_in"]["shown"] == [False, False] and not got["signed_in"]["ever"], str(got["signed_in"]))
+    check("the first /me still pending: no link, whatever server-info says (signed in or not)",
+          got["first_me_pending_signed_in"] == {"shown": [False], "ever": False, "me": 1}
+          and got["first_me_pending_signed_out"] == {"shown": [False], "ever": False, "me": 1},
+          f"{got['first_me_pending_signed_in']} {got['first_me_pending_signed_out']}")
+    check("/me errors: a 502 or a network error hides the link, a 401 or 403 (signed out) shows it",
+          got["me_errors"]["shown"] == [True, False, False, True, True], str(got["me_errors"]))
+    check("server-info's identity_session says signed in: the link goes before /me answers",
+          got["server_info_signed_in"]["shown"] == [True, False], str(got["server_info_signed_in"]))
+    check("Duo off: never the link, and no /api/identity/me", got["duo_off"] == {"shown": [False, False], "ever": False, "me": 0},
           str(got["duo_off"]))
 
 
