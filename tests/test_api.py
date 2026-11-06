@@ -1069,7 +1069,7 @@ def main() -> int:
         check("Composer: attachment chip row present", 'id="attachmentChip"' in a_html)
         check("Composer: the attachment controls are outside the Demo Controls drawer",
               all(f'id="{i}"' not in _drawer for i in ("attachButton", "attachmentInput", "attachmentChip")))
-        check("Chat: chat.js cache-buster bumped to v=36", "/static/js/chat.js?v=36" in a_html)
+        check("Chat: chat.js cache-buster bumped to v=37", "/static/js/chat.js?v=37" in a_html)
         check("chat.js: a stage label for attachment_intake", "attachment_intake:" in _chat_js)
         check("chat.js: the payload carries the attachment and keeps the hidden-control line",
               "attachment: attachment ?" in _chat_js and "_hiddenControls.has(key)) payload[flag] = null" in _chat_js)

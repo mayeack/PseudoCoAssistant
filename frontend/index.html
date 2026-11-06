@@ -633,7 +633,8 @@
                         <!-- Lab 5 identity badge (chat.js renderIdentity, from GET /api/identity/me
                              on the 10 s poll): the persona in neutral colours, a trust pill that
                              only ever shows state, and Sign out. Hidden unless signed in. The
-                             "Sign in with Duo" link shows only while gated.duo_signin is open. -->
+                             "Sign in with Duo" link shows only while gated.duo_signin is open
+                             (chat.js renderSigninLink, on every server-info poll). -->
                         <span id="identityBadge" class="hidden inline-flex items-baseline gap-1.5 text-xs text-gray-500">
                             <span>Signed in as</span>
                             <span id="identityUser" class="font-mono font-semibold text-gray-700"></span>
@@ -800,6 +801,6 @@
         </div>
     </div>
 
-    <script src="/static/js/chat.js?v=36"></script>
+    <script src="/static/js/chat.js?v=37"></script>
 </body>
 </html>

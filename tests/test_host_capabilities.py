@@ -260,11 +260,30 @@ def test_duo_signin_rule() -> None:
               hc.duo_signin_gate(ok) == {"enabled": True, "reason": ""})
         check("the earlier reasons still win over a passing health check",
               hc.duo_signin_gate(Settings(duo_enabled=False))["enabled"] is False)
+        check("5. an open gate closes only after DUO_HEALTH_FAILURES_TO_CLOSE (3) failed checks in a row",
+              hc.DUO_HEALTH_FAILURES_TO_CLOSE == 3)
+        streak = [hc.record_duo_health(False, "HTTP 503"), hc.record_duo_health(False, "HTTP 503")]
+        check("...one or two failed checks (a blip on the timer) leave it open, and the streak is returned",
+              streak == [1, 2] and hc.duo_signin_gate(ok) == {"enabled": True, "reason": ""}, str(streak))
+        check("...a pass clears the streak", hc.record_duo_health(True) == 0
+              and hc.record_duo_health(False, "HTTP 503") == 1 and hc.duo_signin_gate(ok)["enabled"] is True)
+        hc.record_duo_health(False, "HTTP 502")
+        third = hc.record_duo_health(False, "HTTP 504")
+        check("...the third in a row closes it, with the latest failure as the reason",
+              third == 3 and hc.duo_signin_gate(ok) == {"enabled": False,
+                                                        "reason": "Duo health check failed: HTTP 504"},
+              str(hc.duo_signin_gate(ok)))
+        hc.record_duo_health(True)
         hc._cache.clear(); hc._cached_at = 0.0
         hc._cache.update({"capabilities": {}, "gated": {"duo_signin": {"enabled": True, "reason": ""}}})
-        hc.record_duo_health(False, "HTTP 503")
+        for _ in range(hc.DUO_HEALTH_FAILURES_TO_CLOSE):
+            hc.record_duo_health(False, "HTTP 503")
         check("recording a health result patches the cached snapshot at once",
               hc.current()["gated"]["duo_signin"]["enabled"] is False, str(hc.current()["gated"]))
+        hc.reset_duo_health()
+        check("reset: back to not checked yet, and the streak starts again",
+              hc.duo_signin_gate(ok)["reason"] == "The Duo health check has not run yet."
+              and hc.record_duo_health(False, "HTTP 503") == 1)
     finally:
         hc.reset_duo_health()
         hc._cache.clear(); hc._cached_at = 0.0; hc._refreshing = False

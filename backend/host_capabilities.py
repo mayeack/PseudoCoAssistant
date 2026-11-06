@@ -11,9 +11,10 @@ Gate on the capability an option actually needs, not on a vendor name:
 - PDF chat attachments need the pypdf package (docs/attachments.md); it is pure
   Python, so "installed" is the whole check.
 - Duo sign-in (Lab 5) needs DUO_ENABLED, the Web SDK keys, an https
-  PUBLIC_BASE_URL on a DNS name, and a passing Duo health check. The rule reads
-  settings and the cached result of the latest health check (identity_signin
-  re-runs it every 5 minutes, off the event loop); it never calls Duo itself.
+  PUBLIC_BASE_URL on a DNS name, and a passing Duo health check; once open, it
+  closes only after 3 failed checks in a row. The rule reads settings and the
+  cached health results (identity_signin re-runs the check every 5 minutes,
+  off the event loop); it never calls Duo itself.
 
 Every probe is best-effort, short, cached, and never raises: a missing binary
 reads as "absent", not as an error. The Settings poll reads the cache;
@@ -141,35 +142,52 @@ def pdf_attachments_gate() -> Dict[str, Any]:
 
 # The Duo health check's cached result. The sign-in stage runs the check at
 # startup and then on a timer (off the request path) and records each result
-# here with record_duo_health(); until the first one, the duo_signin gate stays
-# closed ("not checked yet"), and it is open only while the latest one passed.
-_duo_health: Dict[str, Any] = {"checked": False, "ok": False, "detail": ""}
+# here with record_duo_health(). Until a check has passed, the duo_signin gate
+# stays closed ("not checked yet", or the latest failure). A passing check
+# opens it, and it closes again only after DUO_HEALTH_FAILURES_TO_CLOSE failed
+# checks in a row: one failed check (a blip on the timer) never closes it.
+#: Consecutive failed Duo health checks that close an open duo_signin gate.
+DUO_HEALTH_FAILURES_TO_CLOSE = 3
+_duo_health: Dict[str, Any] = {"checked": False, "open": False, "failures": 0, "detail": ""}
 _DUO_HEALTH_DETAIL_MAX = 160
 # The Web SDK keys the Universal Prompt needs, by the .env name the reason shows.
 _DUO_WEB_SDK_KEYS = (("DUO_CLIENT_ID", "duo_client_id"), ("DUO_CLIENT_SECRET", "duo_client_secret"),
                      ("DUO_API_HOST", "duo_api_host"))
 
 
-def record_duo_health(ok: bool, detail: str = "") -> None:
-    """Record a Duo health check's result for the ``duo_signin`` gate.
+def record_duo_health(ok: bool, detail: str = "") -> int:
+    """Record a Duo health check's result for the ``duo_signin`` gate, and
+    return how many checks in a row have now failed (0 after a pass).
+
+    A pass opens the gate and clears the count. A failure keeps an open gate
+    open until it is the ``DUO_HEALTH_FAILURES_TO_CLOSE``-th in a row; a gate
+    that never opened stays closed, with this failure as its reason.
 
     ``detail`` is a short, already-sanitized failure description (an error
     class or HTTP status, never a URL, key or response body); it is shown as
-    the gate's reason. The cached snapshot is patched at once, so the Settings
-    chip and ``GET /api/server-info`` agree without waiting for a re-probe."""
+    the gate's reason once the gate is closed. The cached snapshot is patched
+    at once, so the Settings chip and ``GET /api/server-info`` agree without
+    waiting for a re-probe."""
     text = " ".join(str(detail or "").split())[:_DUO_HEALTH_DETAIL_MAX]
     with _lock:
-        _duo_health.update(checked=True, ok=bool(ok), detail="" if ok else text)
+        if ok:
+            _duo_health.update(checked=True, open=True, failures=0, detail="")
+        else:
+            failures = int(_duo_health["failures"]) + 1
+            _duo_health.update(checked=True, failures=failures, detail=text,
+                               open=bool(_duo_health["open"]) and failures < DUO_HEALTH_FAILURES_TO_CLOSE)
+        failures = int(_duo_health["failures"])
     gate = duo_signin_gate()
     with _lock:
         if isinstance(_cache.get("gated"), dict):
             _cache["gated"] = {**_cache["gated"], "duo_signin": gate}
+    return failures
 
 
 def reset_duo_health() -> None:
     """Back to "not checked yet" (a settings reload, and tests)."""
     with _lock:
-        _duo_health.update(checked=False, ok=False, detail="")
+        _duo_health.update(checked=False, open=False, failures=0, detail="")
 
 
 def duo_signin_gate(settings=None) -> Dict[str, Any]:
@@ -179,7 +197,13 @@ def duo_signin_gate(settings=None) -> Dict[str, Any]:
     1. disabled (``DUO_ENABLED`` off);
     2. Web SDK keys missing (named, never shown);
     3. ``PUBLIC_BASE_URL`` not https on an RFC 1034 host (the redirect URI's only source);
-    4. the Duo health check has not passed: not run yet, or failed.
+    4. the Duo health check is not passing: not run yet, failing since
+       startup, or failed ``DUO_HEALTH_FAILURES_TO_CLOSE`` times in a row
+       (fewer leave an open gate open).
+
+    It gates starting a sign-in (``POST /auth/duo/start``, the sign-in page's
+    button, the chat page's link), never finishing one: the callback does
+    not read it.
 
     Attribute reads use ``getattr`` defaults, so a settings stub without the
     identity keys (tests/test_host_capabilities.py) reads as disabled."""
@@ -197,7 +221,7 @@ def duo_signin_gate(settings=None) -> Dict[str, Any]:
         health = dict(_duo_health)
     if not health["checked"]:
         return _gate(False, "The Duo health check has not run yet.")
-    if not health["ok"]:
+    if not health["open"]:
         return _gate(False, "Duo health check failed" + (f": {health['detail']}" if health["detail"] else "."))
     return _gate(True)
 

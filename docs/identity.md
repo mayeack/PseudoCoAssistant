@@ -204,11 +204,19 @@ When a block or a revocation happens, the banner explains it and shows an
   enters the rate table, and a full table evicts the least recently used name,
   one at a time and never all at once. A flood of made-up names therefore
   can't reset a real user's spent budget.
-- **Duo's health, on a timer.** The `duo_signin` gate is open only while
-  Duo's latest health check passed. The check runs on a daemon thread at
-  startup, then every 5 minutes (every minute while it fails). It never runs
-  on the event loop, and never starts while the previous check is still
-  waiting for Duo.
+- **Duo's health, on a timer.** A passing health check opens the
+  `duo_signin` gate, and only three failed checks in a row close it again,
+  so one failed check on the timer never does. The check runs on a daemon
+  thread at startup, then every 5 minutes (every minute while it fails). It
+  never runs on the event loop, and never starts while the previous check is
+  still waiting for Duo.
+- **The gate governs starting a sign-in, never finishing one.** Only
+  `POST /auth/duo/start`, the sign-in page's Continue button and the chat
+  page's "Sign in with Duo" link read it. A sign-in that is already at Duo
+  finishes at `/auth/duo/callback` even if the gate closed meanwhile: the
+  code exchange is attempted, and a Duo failure there is a fixed error
+  (`duo_unavailable`, `duo_refused`, ...). Only `DUO_ENABLED` being off
+  refuses the callback up front.
 - **TLS to Duo.** When `REQUESTS_CA_BUNDLE` (or else `CURL_CA_BUNDLE`) names
   a file, Duo is verified against that bundle, as every other outbound client
   is. `backend.config` points both at the checkout's `ca-bundle.pem` when it
@@ -225,19 +233,26 @@ When a block or a revocation happens, the banner explains it and shows an
 - **Nothing secret in a log, at any level.** At `LOG_LEVEL=DEBUG` urllib3
   logs every request line with its query string, and the token exchange sends
   Duo's code and the `client_assertion` JWT (signed with `DUO_CLIENT_SECRET`)
-  that way. `backend/logging/redaction.py` redacts every record of urllib3,
-  requests, httpx, httpcore, duo_universal and the identity modules as the
-  record is created, child loggers included. It removes query values, cookie
-  and authorization headers, token and secret pairs, JWTs and the identity
-  secrets' exact values. Those exact values are `DUO_CLIENT_SECRET`,
-  `DUO_ADMIN_SKEY` and `CII_CLIENT_SECRET`, plus Duo's code, the CII token and
-  each identity cookie, registered as they appear. Every other logger loses
-  those exact values too. The callback's own query is redacted in uvicorn's
-  access log, and `run.sh` keeps the callback out of spans.
+  that way. `backend/logging/redaction.py` redacts every log record as it
+  is created, child loggers included, by pattern only. Every logger loses
+  the values of credential query parameters (`duo_code`, `code`, `state`,
+  `client_assertion`, `assertion`, `access_token`, ...), `Authorization`,
+  `Cookie`, `Set-Cookie` and `X-Access-Key` values, the app's own cookies,
+  Bearer credentials, anything shaped like a JWT, and the exact values of
+  `DUO_CLIENT_SECRET`, `DUO_ADMIN_SKEY`, `CII_CLIENT_SECRET` and
+  `ACCESS_KEY`. urllib3, requests, httpx, httpcore, duo_universal and the
+  identity modules also lose every query value and token and secret pairs.
+  Nothing is registered at run time, so no request can make a string (a
+  username, say) vanish from later log lines. The configured secrets are
+  compiled once at startup and again only when one of them changes, and the
+  record factory takes no lock. The callback's own query is also redacted
+  in uvicorn's access log, and `run.sh` keeps the callback out of spans.
 - **Inert in the browser too.** The chat page asks `GET /api/identity/me`
   only while `gated.duo_signin` is open, while `GET /api/server-info` reports
   that this browser holds a session (`identity_session`), or while the page
-  already shows one. With `DUO_ENABLED` off it sends no request for it.
+  already shows one. With `DUO_ENABLED` off it sends no request for it. The
+  "Sign in with Duo" link is re-evaluated on every `/api/server-info` poll,
+  so it goes away as soon as the gate closes.
 
 ## Duo application → configuration
 
@@ -291,9 +306,14 @@ with the room access key can rewrite those.
   - a real sign-in through duo_universal, requests and urllib3 at DEBUG
     against a local fake Duo, with no code, JWT, cookie or secret in any log
     line (httpx and httpcore too)
+  - redaction by pattern only: a username sent as Duo's code is never
+    blanked from later lines, nothing is compiled per record, and a log call
+    made while redacting never waits on a lock
   - the allowlist before the rate limit, and least-recently-used eviction
   - a hung call giving its slot back, and the health check not stacking
-  - the health timer closing and reopening the gate
+  - the gate closing only after three failed checks in a row, the timer
+    reopening it, and a callback finishing while it is closed
   - the CA bundle rule
   - `identity_session` in `/api/server-info`
-  - the real `chat.js` run in node: no `/api/identity/me` with Duo off
+  - the real `chat.js` run in node: no `/api/identity/me` with Duo off, and
+    the "Sign in with Duo" link following the gate on every poll

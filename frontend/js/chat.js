@@ -648,6 +648,9 @@ async function refreshServerInfo() {
                       identity_session: data.identity_session === true };
         _attachmentConfig = data.attachments || null;
         applyAttachmentGate();
+        // Every poll, not only when /api/identity/me is asked: once the gate
+        // closes nothing asks it any more, and the link must still go.
+        renderSigninLink();
     } catch (e) {
         unavailable();
     }
@@ -902,8 +905,8 @@ function refreshIndicators() {
     // Capabilities first: the provider/model gating in refreshActiveProvider reads them.
     refreshServerInfo().then(() => {
         refreshActiveProvider();
-        // After server-info: the Sign-in link follows gated.duo_signin, and with
-        // Lab 5 off nothing asks for /api/identity/me at all.
+        // After server-info (which already re-evaluated the Sign-in link from
+        // gated.duo_signin): with Lab 5 off nothing asks for /api/identity/me.
         if (identityPollWanted()) refreshIdentity();
     });
     refreshActiveBlueprint();
@@ -955,15 +958,25 @@ async function refreshIdentity() {
     } catch (e) { /* best-effort: the badge keeps its last state */ }
 }
 
+// "Sign in with Duo": shown only while gated.duo_signin is open and the page
+// shows no signed-in identity. Re-evaluated on every server-info poll
+// (refreshServerInfo) and whenever the identity changes (renderIdentity), so
+// it goes away as soon as the gate closes, and comes back when it reopens.
+// The gate only governs starting a sign-in; one already at Duo still finishes.
+function renderSigninLink() {
+    const signin = document.getElementById('identitySignin');
+    if (!signin) return;
+    const g = gateFor('duo_signin');
+    signin.classList.toggle('hidden', !(g && g.enabled) || !!_identity);
+}
+
 function renderIdentity(identity) {
     _identity = identity;
+    renderSigninLink();
     const badge = document.getElementById('identityBadge');
-    const signin = document.getElementById('identitySignin');
     if (!badge) return;
     if (!identity) {
         badge.classList.add('hidden');
-        const g = gateFor('duo_signin');
-        if (signin) signin.classList.toggle('hidden', !(g && g.enabled));
         return;
     }
     const user = document.getElementById('identityUser');
@@ -972,7 +985,6 @@ function renderIdentity(identity) {
         ? 'Verified with Duo until ' + parseServerTime(identity.expires_at).toLocaleString()
         : 'Verified with Duo';
     badge.classList.remove('hidden');
-    if (signin) signin.classList.add('hidden');
     renderTrustPill(identity);
     // The banner follows the server's answer: Unblock me on, the gate refusing
     // this identity, or nothing (a stale revoked / expired banner goes).

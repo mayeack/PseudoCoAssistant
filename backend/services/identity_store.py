@@ -241,10 +241,9 @@ def create(
         raise ValueError("username must be 1-128 characters")
     now = now or _utcnow()
     token = new_token()
-    # The cookie value is a credential: no log line may ever carry it.
-    from backend.logging import redaction
-
-    redaction.register(token)
+    # The cookie value is a credential: it is never logged, and
+    # backend/logging/redaction.py drops it by pattern wherever it travels as
+    # a cookie (the Cookie / Set-Cookie headers, this cookie's name=value).
     token_hash = hash_token(token)
     row = IdentitySession(
         id=uuid.uuid4().hex,

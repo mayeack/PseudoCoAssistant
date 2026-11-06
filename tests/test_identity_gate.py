@@ -858,8 +858,8 @@ def test_rules() -> None:
     check("UI: the Unblock me toggle sits in #identityBanner (never the Demo Controls drawer), green accent",
           'id="identityUnblockToggle"' in banner and "peer-checked:bg-green-600" in banner
           and "identityUnblockToggle" not in drawer and "unblock" not in drawer.lower())
-    check("UI: the toggle calls /api/identity/unblock and /reblock; chat.js?v=36",
-          "'/api/identity/unblock' : '/api/identity/reblock'" in js and "/static/js/chat.js?v=36" in page)
+    check("UI: the toggle calls /api/identity/unblock and /reblock; chat.js?v=37",
+          "'/api/identity/unblock' : '/api/identity/reblock'" in js and "/static/js/chat.js?v=37" in page)
     check("UI: the sign-in page offers Unblock me for a revoked session",
           'action="/api/identity/unblock"' in login and 'form.unblock' in login)
     claude = (ROOT / "CLAUDE.md").read_text()

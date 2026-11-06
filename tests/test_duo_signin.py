@@ -192,6 +192,13 @@ def _open_gate() -> None:
     host_capabilities.record_duo_health(True)
 
 
+def _close_gate(detail: str = "HTTP 503") -> None:
+    """Duo down long enough to close the gate: one failed check never does,
+    it takes DUO_HEALTH_FAILURES_TO_CLOSE in a row."""
+    for _ in range(host_capabilities.DUO_HEALTH_FAILURES_TO_CLOSE):
+        host_capabilities.record_duo_health(False, detail)
+
+
 # --------------------------------------------------------------------------- request helpers
 def client(base_url: str = BASE) -> TestClient:
     return TestClient(app, base_url=base_url)
@@ -369,7 +376,7 @@ def test_login_page() -> None:
           r.status_code == 303 and location(r) == "https://testserver/login/duo"
           and not cookie_header(r, STATE_COOKIE), location(r))
 
-    host_capabilities.record_duo_health(False, "HTTP <b>503</b>")
+    _close_gate("HTTP <b>503</b>")
     try:
         r = c.get("/login/duo", headers=H)
         check("gate closed: Continue disabled, the reason as its tooltip (escaped)",
@@ -767,15 +774,8 @@ def test_callback_refusals() -> None:
     finally:
         _configure()
 
-    # gate closed between start and callback
-    c = client()
-    start(c, "nina.osei"); st = FakeDuo.issued[-1]["state"]
-    host_capabilities.record_duo_health(False, "HTTP 503")
-    try:
-        r = callback(c, st, code="CODE-GATE")
-        check("gate closed at the callback -> error=unavailable", location(r) == "/login/duo?error=unavailable")
-    finally:
-        _open_gate()
+    # The duo_signin gate closing between start and callback no longer refuses
+    # the callback: test_callback_not_gated.
 
 
 def test_routes_off_event_loop() -> None:
@@ -834,7 +834,7 @@ def test_sign_out() -> None:
           and c.post("/api/chat/session/new", headers=H).status_code == 403)
     check("...and the page offers Unblock me for it (a form to /api/identity/unblock, next=/app)",
           'action="/api/identity/unblock"' in page.text)
-    host_capabilities.record_duo_health(False, "HTTP 503")
+    _close_gate()
     try:
         page = c.get("/login/duo?revoked=1", headers=page_h)
         check("revoked with Duo sign-in closed: Continue with Duo disabled, the way out still offered",
@@ -1086,7 +1086,7 @@ def test_frontend() -> None:
     check("#identityBanner sits beside #emergencyBanner, hidden by default",
           re.search(r'<div id="identityBanner" class="hidden ', page) is not None
           and 0 < page.index('id="emergencyBanner"') - page.index('id="identityBanner"') < 4000)
-    check("chat.js cache-buster bumped to v=36", "/static/js/chat.js?v=36" in page)
+    check("chat.js cache-buster bumped to v=37", "/static/js/chat.js?v=37" in page)
     check("chat.js: exactly ONE fetch wrapper, around window.fetch",
           js.count("window.fetch =") == 1 and "const _pageFetch = window.fetch.bind(window);" in js
           and js.count("_pageFetch(") == 1)
@@ -1277,15 +1277,30 @@ def test_debug_log_redaction() -> None:
           any(n == "httpx" and "/echo?access_token=[REDACTED]&username=[REDACTED]" in l for n, l in cap.lines))
 
 
+class _Records(logging.Handler):
+    """Every record object, for formatters that read ``record.args``."""
+
+    def __init__(self):
+        super().__init__(level=logging.DEBUG)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
 def test_redaction_rules() -> None:
-    print("redaction: child loggers, tracebacks, other loggers' exact secrets, structure kept")
+    print("redaction: child loggers, tracebacks, other loggers by pattern and configured secret, structure kept")
+    from uvicorn.logging import AccessFormatter
+
     from backend.logging import redaction
 
     cap = _Capture()
+    recs = _Records()
     root = logging.getLogger()
     root.addHandler(cap)
     saved_level = root.level
     root.setLevel(logging.DEBUG)
+    _CODES_SENT.update({"ACCESS-ARG-CODE-3", "SPLIT-CODE-4"})
     try:
         child = logging.getLogger("urllib3.brand_new_child_" + str(os.getpid()))
         child.debug('%s "%s %s"', "https://h:443", "POST", "/oauth/v1/token?code=CHILD-CODE-1&state=s")
@@ -1293,20 +1308,24 @@ def test_redaction_rules() -> None:
             raise ValueError("Max retries exceeded with url: /oauth/v1/token?code=TRACE-CODE-2&client_assertion=x")
         except ValueError:
             logging.getLogger("requests.adapters").exception("connection failed")
-        redaction.register("RUNTIME-REGISTERED-SECRET-3")
         access = logging.getLogger("uvicorn.access")
         saved_access = (access.level, access.propagate)
         access.setLevel(logging.INFO)
         access.propagate = False         # as uvicorn configures it: its own handler only
         access.addHandler(cap)
+        access.addHandler(recs)
         try:
             access.info('%s - "%s %s HTTP/%s" %d', "198.51.100.7:5000", "GET",
-                        f"/app?x={CLIENT_SECRET}&y=RUNTIME-REGISTERED-SECRET-3", "1.1", 200)
+                        f"/app?x={CLIENT_SECRET}&code=ACCESS-ARG-CODE-3&signin=ok", "1.1", 200)
         finally:
             access.removeHandler(cap)
+            access.removeHandler(recs)
             access.setLevel(saved_access[0])
             access.propagate = saved_access[1]
-        logging.getLogger("some.other.module").info("plain %s, status_code=%d, ?k=v", "words", 200)
+        other = logging.getLogger("some.other.module")
+        other.info("plain %s, status_code=%d, ?k=v, exit code=1 state=open", "words", 200)
+        # A credential the format string and its argument only make up together.
+        other.warning("redirected to /auth/duo/callback?duo_code=%s", "SPLIT-CODE-4")
     finally:
         root.removeHandler(cap)
         root.setLevel(saved_level)
@@ -1316,11 +1335,21 @@ def test_redaction_rules() -> None:
     check("a traceback logged with exc_info is redacted", "TRACE-CODE-2" not in text
           and any("Max retries exceeded" in l and "code=[REDACTED]" in l for _, l in cap.lines))
     acc = [l for n, l in cap.lines if n == "uvicorn.access"]
-    check("another logger: the exact secrets go, its argument tuple and format stay (uvicorn's access log)",
-          len(acc) == 1 and CLIENT_SECRET not in acc[0] and "RUNTIME-REGISTERED-SECRET-3" not in acc[0]
-          and 'GET /app?x=[REDACTED]&y=[REDACTED] HTTP/1.1" 200' in acc[0], str(acc)[:300])
-    check("...and ordinary lines elsewhere are left alone",
-          any(l.endswith("plain words, status_code=200, ?k=v") for _, l in cap.lines))
+    check("another logger: the configured secret and the code= value go, other parameters stay "
+          "(uvicorn's access log)",
+          len(acc) == 1 and CLIENT_SECRET not in acc[0] and "ACCESS-ARG-CODE-3" not in acc[0]
+          and 'GET /app?x=[REDACTED]&code=[REDACTED]&signin=ok HTTP/1.1" 200' in acc[0], str(acc)[:300])
+    fmt = AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s', use_colors=False)
+    line = fmt.format(recs.records[0]) if len(recs.records) == 1 else ""
+    check("...its argument tuple is kept, so uvicorn's own AccessFormatter still formats it",
+          isinstance(recs.records[0].args, tuple) and len(recs.records[0].args) == 5
+          and line == '198.51.100.7:5000 - "GET /app?x=[REDACTED]&code=[REDACTED]&signin=ok HTTP/1.1" 200 OK',
+          line)
+    check("...a code split across the format string and its argument is redacted too",
+          "SPLIT-CODE-4" not in text and any(l.endswith("/auth/duo/callback?duo_code=[REDACTED]")
+                                             for _, l in cap.lines))
+    check("...and ordinary lines elsewhere are left alone (code= / state= outside a query are text)",
+          any(l.endswith("plain words, status_code=200, ?k=v, exit code=1 state=open") for _, l in cap.lines))
     for raw, want in (
         ("POST /x?grant_type=authorization_code&code=A1&client_assertion=eyJa.eyJb.c HTTP/1.1",
          "POST /x?grant_type=[REDACTED]&code=[REDACTED]&client_assertion=[REDACTED] HTTP/1.1"),
@@ -1427,6 +1456,7 @@ def test_hung_call_releases_slot() -> None:
     saved = signin.HEALTH_TIMEOUT_S
     signin.HEALTH_TIMEOUT_S = 0.2
     FakeDuo.health_mode = "hang"
+    host_capabilities.reset_duo_health()      # a gate that never opened shows its latest failure
     try:
         n = len(FakeDuo.health_calls)
         first = signin.run_health_check()
@@ -1465,9 +1495,14 @@ def test_health_timer() -> None:
               str(len(FakeDuo.health_calls)))
         check("each check is a bounded duo-call thread", all(x.name == "duo-call" for x in FakeDuo.health_calls))
         check("start again: the running checker is returned, not a second one", signin.start_health_check() is t)
+        check("...and its first passing check opened the gate", wait_for(lambda: signin.gate()["enabled"]))
+        n_ok = len(FakeDuo.health_calls)
         FakeDuo.health_mode = DuoException({"stat": "FAIL", "code": 40301, "message": "access_denied"})
-        check("Duo starts failing: the next check closes the gate",
-              wait_for(lambda: not signin.gate()["enabled"]) and "40301" in signin.gate()["reason"], str(signin.gate()))
+        closed = wait_for(lambda: not signin.gate()["enabled"])
+        failed = len(FakeDuo.health_calls) - n_ok
+        check("Duo starts failing: the timer closes the gate only after 3 failed checks in a row, not on the first",
+              closed and failed >= host_capabilities.DUO_HEALTH_FAILURES_TO_CLOSE
+              and "40301" in signin.gate()["reason"], f"{failed} failed checks, {signin.gate()}")
         FakeDuo.health_mode = "ok"
         check("Duo recovers: a retry reopens it", wait_for(lambda: signin.gate()["enabled"]), str(signin.gate()))
         signin.stop_health_check()
@@ -1633,6 +1668,356 @@ def test_identity_poll_inert() -> None:
     check("Duo down, no session: not polled", counts["down_no_session"]["me"] == 0, str(counts["down_no_session"]))
 
 
+# Loads the real chat.js with stub #identitySignin / #identityBadge elements,
+# runs refreshIndicators() once per server-info answer in `polls`, and prints
+# whether the "Sign in with Duo" link was shown after each poll.
+_LINK_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const scenarios = JSON.parse(process.argv[3]);
+function el(initial) {
+  const s = new Set(initial || []);
+  return { title: '', textContent: '', dataset: {},
+           classList: { add: (...c) => c.forEach((x) => s.add(x)), remove: (...c) => c.forEach((x) => s.delete(x)),
+                        toggle: (c, force) => { const on = force === undefined ? !s.has(c) : !!force;
+                                                 if (on) s.add(c); else s.delete(c); return on; },
+                        contains: (c) => s.has(c) } };
+}
+(async () => {
+  const out = {};
+  for (const [name, sc] of Object.entries(scenarios)) {
+    const elements = { identitySignin: el(['hidden']), identityBadge: el(['hidden']) };
+    let poll = 0;
+    const requests = [];
+    const ctx = {
+      console: { log() {}, warn() {}, error() {}, debug() {} },
+      fetch: async (input) => {
+        const url = String(input);
+        requests.push(url);
+        const body = url.startsWith('/api/server-info') ? sc.polls[Math.min(poll, sc.polls.length - 1)]
+                   : url.startsWith('/api/identity/me') ? (sc.me || { signed_in: false }) : {};
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body),
+                 headers: { get: (k) => (k.toLowerCase() === 'content-type' ? 'application/json' : null) },
+                 clone() { return this; } };
+      },
+      document: { addEventListener() {}, getElementById: (id) => elements[id] || null, querySelectorAll: () => [],
+                  querySelector: () => null, hidden: false,
+                  documentElement: { classList: { toggle() {}, add() {}, remove() {} } } },
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      history: { replaceState() {} },
+      location: { search: '', pathname: '/app', hash: '', href: '' },
+      setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {},
+      URLSearchParams,
+    };
+    ctx.window = ctx;
+    vm.createContext(ctx);
+    vm.runInContext(src, ctx, { filename: 'chat.js' });
+    const shown = [];
+    for (poll = 0; poll < sc.polls.length; poll++) {
+      vm.runInContext('refreshIndicators()', ctx);
+      for (let j = 0; j < 20; j++) await new Promise((r) => setImmediate(r));
+      shown.push(!elements.identitySignin.classList.contains('hidden'));
+    }
+    out[name] = { shown, me: requests.filter((u) => u.startsWith('/api/identity/me')).length };
+  }
+  console.log(JSON.stringify(out));
+})().catch((e) => { console.error(e && e.stack || e); process.exit(2); });
+"""
+
+
+def test_signin_link_follows_gate() -> None:
+    print("chat.js: the Sign in with Duo link is re-evaluated on every server-info poll")
+    js = (ROOT / "frontend" / "js" / "chat.js").read_text()
+    info = re.search(r"async function refreshServerInfo\(\) \{(.*?)\n\}", js, re.S).group(1)
+    check("refreshServerInfo re-evaluates the link (renderSigninLink) on every answer",
+          "renderSigninLink();" in info)
+    node = shutil.which("node")
+    if not node:
+        print("  SKIP  node is not installed: the behavioural link check did not run")
+        return
+    harness = Path(_TMP, "link_harness.js")
+    harness.write_text(_LINK_HARNESS)
+    up = {"enabled": True, "reason": ""}
+    down = {"enabled": False, "reason": "Duo health check failed: ConnectionError"}
+    off = {"enabled": False, "reason": "Duo sign-in is off (DUO_ENABLED is not true)."}
+
+    def si(gate, session=False):
+        return {"gated": {"duo_signin": gate}, "identity_session": session}
+
+    scenarios = {
+        "gate_closes": {"polls": [si(up), si(down), si(down)]},
+        "gate_reopens": {"polls": [si(down), si(up)]},
+        "signed_in": {"polls": [si(up, True), si(down, True)], "me": {"signed_in": True, "username": "nina.osei"}},
+        "duo_off": {"polls": [si(off), si(off)]},
+    }
+    out = subprocess.run([node, str(harness), str(ROOT / "frontend" / "js" / "chat.js"), json.dumps(scenarios)],
+                         capture_output=True, text=True, timeout=60)
+    try:
+        got = json.loads(out.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        check("the chat.js link harness ran", False, (out.stdout + out.stderr)[-400:])
+        return
+    check("the gate closes, no session: the link goes on the very next poll, and stays gone",
+          got["gate_closes"]["shown"] == [True, False, False], str(got["gate_closes"]))
+    check("the gate reopens: the link comes back", got["gate_reopens"]["shown"] == [False, True],
+          str(got["gate_reopens"]))
+    check("signed in: never the link (the badge instead), gate open or closed",
+          got["signed_in"]["shown"] == [False, False], str(got["signed_in"]))
+    check("Duo off: never the link, and no /api/identity/me", got["duo_off"] == {"shown": [False, False], "me": 0},
+          str(got["duo_off"]))
+
+
+def test_redaction_by_pattern_only() -> None:
+    print("redaction by pattern only: no request registers a string, so no input can blank a username")
+    from backend.logging import redaction
+
+    check("redaction has no run-time registration (register / forget_registered / _registered)",
+          not any(hasattr(redaction, n) for n in ("register", "forget_registered", "_registered")))
+    sources = [(ROOT / p).read_text() for p in ("backend/services/identity_signin.py",
+                                                "backend/services/identity_store.py",
+                                                "backend/services/identity_lookup.py")]
+    check("...and nothing calls it (the Duo code, the identity cookie, the CII token)",
+          not any("redaction.register" in s for s in sources))
+    from backend.middleware import access_key as ak_mw
+    from backend.middleware import settings_gate as sg_mw
+
+    check("APP_COOKIES is exactly this app's cookie names",
+          set(redaction.APP_COOKIES) == {ak_mw.COOKIE_NAME, sg_mw.COOKIE_NAME, idmw.COOKIE_NAME, STATE_COOKIE})
+    check("ACCESS_KEY is one of the configured secrets", "access_key" in redaction.SECRET_SETTINGS)
+
+    def refuse(*_a):
+        raise DuoException({"error": "invalid_grant", "error_description": "code expired"})
+
+    signin.reset()
+    _open_gate()
+    cap = _Capture()
+    root = logging.getLogger()
+    root.addHandler(cap)
+    saved_level = root.level
+    root.setLevel(logging.DEBUG)
+    before = redaction._secrets
+    try:
+        c = client()
+        start(c, "nina.osei")
+        st = FakeDuo.issued[-1]["state"]
+        # The attack the old design allowed: Duo's code is the caller's input, and
+        # arriving at the callback registered it. Another persona's name as the code.
+        FakeDuo.answer = staticmethod(refuse)
+        r = c.get(f"/auth/duo/callback?duo_code=victim.user&state={st}", headers=H, follow_redirects=False)
+        FakeDuo.answer = staticmethod(good_answer)
+        logging.getLogger("backend.agents.graph").info("identity verdict for %s: allow", "victim.user")
+        logging.getLogger("backend.routers.identity_auth").info("Duo sign-in for %s (session %s)",
+                                                                "victim.user", "ref-1")
+    finally:
+        FakeDuo.answer = staticmethod(good_answer)
+        root.removeHandler(cap)
+        root.setLevel(saved_level)
+    lines = [l for _, l in cap.lines]
+    check("the made-up code was exchanged and refused (a fixed error)",
+          location(r) == "/login/duo?error=duo_refused" and FakeDuo.exchanges[-1]["code"] == "victim.user",
+          location(r))
+    check("...and left the redaction state untouched (the same compiled secrets)", redaction._secrets is before)
+    check("a username sent as Duo's code is NOT blanked from other loggers' lines",
+          any(l.endswith("identity verdict for victim.user: allow") for l in lines), str(lines[-3:])[:300])
+    check("...nor from the identity modules' own lines",
+          any(l.endswith("Duo sign-in for victim.user (session ref-1)") for l in lines), str(lines[-3:])[:300])
+    check("the code in its own context (duo_code= in the request line) is still redacted, by pattern",
+          any(n == "httpx" and "/auth/duo/callback?duo_code=[REDACTED]&state=[REDACTED]" in l for n, l in cap.lines)
+          and not any("duo_code=victim.user" in l for l in lines))
+
+
+def test_redaction_bounded_and_safe() -> None:
+    print("redaction: compiled once per configuration, nothing grows, no lock in the record factory")
+    from backend.logging import redaction
+
+    compiles = []
+    real_compile = redaction._compile_secrets
+
+    def counting(values):
+        compiles.append(len(values))
+        return real_compile(values)
+
+    cap = _Capture()
+    root = logging.getLogger()
+    root.addHandler(cap)
+    saved_level = root.level
+    root.setLevel(logging.DEBUG)
+    saved_skey = settings.duo_admin_skey
+    new_skey = "DUO-ADMIN-SKEY-ROTATED-0123456789abcdef"
+    _CODES_SENT.update({"NESTED-CODE-5", "OUTER-CODE-6"})
+    redaction._compile_secrets = counting
+    try:
+        redaction.secrets_pattern()
+        before = redaction._secrets
+        compiles.clear()
+        for i in range(300):
+            logging.getLogger("urllib3.connectionpool").debug("GET /x?code=BOUND-%d&state=s", i)
+            logging.getLogger("backend.agents.graph").info("turn %d for %s", i, "nina.osei")
+        signin.reset()
+        _open_gate()
+        for i in range(20):
+            sign_in(client(), "avery.kim", code=f"CODE-BOUND-{i:04d}")
+        check("600 records and 20 sign-ins: nothing compiled, the same secrets pattern kept",
+              compiles == [] and redaction._secrets is before, f"{len(compiles)} compiles")
+        pattern = before[1]
+        alternatives = pattern.pattern.count("|") + 1 if pattern is not None else 0
+        check("that pattern is the configured secrets only (at most 3 forms of each setting)",
+              0 < alternatives <= 3 * len(redaction.SECRET_SETTINGS), str(alternatives))
+        settings.duo_admin_skey = new_skey
+        for i in range(50):
+            logging.getLogger("some.other.module").info("rotated %s", new_skey if i == 49 else "x")
+        check("a configuration change compiles it once more, and the new secret is redacted from then on",
+              len(compiles) == 1 and any(l.endswith("rotated [REDACTED]") for _, l in cap.lines)
+              and not any(new_skey in l for _, l in cap.lines), f"{len(compiles)} compiles")
+
+        # No lock in the record factory: a log call made while install() holds
+        # its lock, or from inside a record being redacted, never waits.
+        held, release, done = threading.Event(), threading.Event(), threading.Event()
+
+        def holder():
+            with redaction._install_lock:
+                held.set()
+                release.wait(5)
+
+        class Chatty:
+            def __str__(self):
+                logging.getLogger("urllib3.nested").warning("nested ?code=%s", "NESTED-CODE-5")
+                return "chatty ?code=OUTER-CODE-6"
+
+        def log_it():
+            logging.getLogger("requests.outer").warning("outer %s", Chatty())
+            done.set()
+
+        threading.Thread(target=holder, daemon=True).start()
+        held.wait(2)
+        threading.Thread(target=log_it, daemon=True).start()
+        finished = done.wait(3)
+        release.set()
+        check("a log call while install() holds its lock, made from inside a record being redacted, finishes",
+              finished)
+        with redaction._install_lock:
+            redaction.install()           # re-entrant: install() from under its own lock returns
+        check("install()'s lock is re-entrant, and install() stays idempotent",
+              isinstance(redaction._install_lock, type(threading.RLock())) and redaction.installed()
+              and not getattr(redaction._install_lock, "_is_owned", lambda: False)())
+    finally:
+        redaction._compile_secrets = real_compile
+        settings.duo_admin_skey = saved_skey
+        root.removeHandler(cap)
+        root.setLevel(saved_level)
+    text = "\n".join(l for _, l in cap.lines)
+    check("...and both the nested and the outer record are redacted",
+          "NESTED-CODE-5" not in text and "OUTER-CODE-6" not in text
+          and any(l.endswith("nested ?code=[REDACTED]") for _, l in cap.lines)
+          and any(l.endswith("outer chatty ?code=[REDACTED]") for _, l in cap.lines))
+
+
+def test_health_gate_three_failures() -> None:
+    print("the duo_signin gate closes only after 3 failed health checks in a row")
+    failing = DuoException({"stat": "FAIL", "code": 40301, "message": "access_denied"})
+    closed_reason = "Duo health check failed: Duo answered 40301 access_denied"
+    signin.reset()
+    host_capabilities.reset_duo_health()
+    c = client()
+    try:
+        check("DUO_HEALTH_FAILURES_TO_CLOSE is 3", host_capabilities.DUO_HEALTH_FAILURES_TO_CLOSE == 3)
+        FakeDuo.health_mode = "ok"
+        check("a passing check opens the gate", signin.run_health_check() is True and signin.gate()["enabled"])
+        FakeDuo.health_mode = failing
+        first = signin.run_health_check()
+        check("one failed check (a blip on the timer) leaves it open",
+              first is False and signin.gate() == {"enabled": True, "reason": ""}, str(signin.gate()))
+        r = start(c, "nina.osei")
+        check("...so a sign-in still starts", location(r).startswith(f"https://{API_HOST}/"), location(r))
+        second = signin.run_health_check()
+        check("two in a row: still open, and /api/server-info agrees",
+              second is False and signin.gate()["enabled"] is True
+              and c.get("/api/server-info", headers=H).json()["gated"]["duo_signin"]["enabled"] is True,
+              str(signin.gate()))
+        third = signin.run_health_check()
+        check("the third in a row closes it, with Duo's sanitized reason",
+              third is False and signin.gate() == {"enabled": False, "reason": closed_reason}, str(signin.gate()))
+        check("...and /api/server-info says so at once",
+              c.get("/api/server-info", headers=H).json()["gated"]["duo_signin"]["enabled"] is False)
+        check("closed: POST /auth/duo/start -> error=unavailable",
+              location(start(c, "nina.osei")) == "/login/duo?error=unavailable")
+        FakeDuo.health_mode = "ok"
+        check("a passing check reopens it", signin.run_health_check() is True and signin.gate()["enabled"])
+        for mode in (failing, failing, "ok", failing, failing):
+            FakeDuo.health_mode = mode
+            signin.run_health_check()
+        check("only failures in a row count: fail, fail, pass, fail, fail leaves it open",
+              signin.gate()["enabled"] is True, str(signin.gate()))
+        host_capabilities.reset_duo_health()
+        signin.run_health_check()
+        check("a gate that never opened stays closed on its first failure, with that reason",
+              signin.gate() == {"enabled": False, "reason": closed_reason}, str(signin.gate()))
+    finally:
+        FakeDuo.health_mode = "ok"
+        host_capabilities.reset_duo_health()
+        _open_gate()
+        signin.reset()
+
+
+def test_callback_not_gated() -> None:
+    print("GET /auth/duo/callback finishes a started sign-in even if the duo_signin gate closed meanwhile")
+    signin.reset()
+    _wipe_sessions()
+    _open_gate()
+    close_gate = _close_gate
+
+    def duo_down(*_a):
+        raise DuoException(duo_sdk.requests.ConnectionError("down"))
+
+    try:
+        c = client()
+        start(c, "nina.osei")
+        st = FakeDuo.issued[-1]["state"]
+        close_gate()
+        check("the gate closed after the sign-in started", signin.gate()["enabled"] is False)
+        n_ex = len(FakeDuo.exchanges)
+        r = callback(c, st, code="CODE-GATE-CLOSED-1")
+        check("the callback still exchanges the code and signs the user in",
+              location(r) == "/app?signin=ok" and len(FakeDuo.exchanges) == n_ex + 1
+              and len(rows("nina.osei")) == 1, location(r))
+        check("...while a new start is refused (error=unavailable)",
+              location(start(client(), "avery.kim")) == "/login/duo?error=unavailable")
+
+        _open_gate()
+        c = client()
+        start(c, "avery.kim")
+        st = FakeDuo.issued[-1]["state"]
+        close_gate()
+        FakeDuo.answer = staticmethod(duo_down)
+        try:
+            r = callback(c, st, code="CODE-GATE-CLOSED-2")
+        finally:
+            FakeDuo.answer = staticmethod(good_answer)
+        last = _audits("identity_signin_failure")[-1]
+        check("...and a Duo failure there maps to the fixed error, audited (error=duo_unavailable)",
+              location(r) == "/login/duo?error=duo_unavailable" and last.get("details") == {"reason": "duo_unavailable"}
+              and last.get("user") == "avery.kim" and rows("avery.kim") == [], f"{location(r)} {last}")
+
+        _open_gate()
+        c = client()
+        start(c, "victim.user")
+        st = FakeDuo.issued[-1]["state"]
+        _configure(duo_enabled=False)
+        n_ex, n_fail = len(FakeDuo.exchanges), len(_audits("identity_signin_failure"))
+        r = callback(c, st, code="CODE-DUO-OFF")
+        check("Duo sign-in switched off (DUO_ENABLED): the callback is refused (unavailable), "
+              "no exchange, no audit event",
+              location(r) == "/login/duo?error=unavailable" and len(FakeDuo.exchanges) == n_ex
+              and len(_audits("identity_signin_failure")) == n_fail, location(r))
+    finally:
+        _configure()
+        FakeDuo.answer = staticmethod(good_answer)
+        host_capabilities.reset_duo_health()
+        _open_gate()
+        signin.reset()
+
+
 def main() -> int:
     check("temp DB in use (never the app's medadvice.db)", _TMP in str(dbmod.engine.url), str(dbmod.engine.url))
     dbmod.init_db()
@@ -1665,6 +2050,11 @@ def main() -> int:
         test_ca_bundle()
         test_server_info_identity_session()
         test_identity_poll_inert()
+        test_signin_link_follows_gate()
+        test_redaction_by_pattern_only()
+        test_redaction_bounded_and_safe()
+        test_health_gate_three_failures()
+        test_callback_not_gated()
         test_no_leaks()
     finally:
         signin.stop_health_check()

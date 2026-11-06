@@ -21,7 +21,12 @@ The flow, and the rules that keep it honest:
   Duo's code. **The username comes only from that pending entry**, never from
   the query, and Duo's answer must say ``allow`` with a ``preferred_username``
   equal to it (the SDK checks that and the nonce; so do we). Then it creates
-  the identity session and writes ``identity_signin_success``.
+  the identity session and writes ``identity_signin_success``. It does not
+  read the ``duo_signin`` gate: a sign-in that is already at Duo finishes
+  even if the gate closed meanwhile (the exchange is attempted, and a Duo
+  failure is a fixed code). Only ``begin()`` (``POST /auth/duo/start``) and
+  the sign-in link depend on the gate; ``complete()`` needs only Duo sign-in
+  to be configured (``configured()``).
 - The redirect URI is ``settings.duo_redirect_uri`` (``PUBLIC_BASE_URL`` +
   ``/auth/duo/callback``) and nothing else, never the request's Host header.
 - Every failure is a ``SigninError`` carrying one fixed code from
@@ -46,13 +51,17 @@ The flow, and the rules that keep it honest:
 - ``start_health_check`` runs Duo's health check on a daemon thread, at
   startup and then every ``HEALTH_INTERVAL_S`` (every ``HEALTH_RETRY_S`` while
   it fails), and records each result for the ``duo_signin`` host gate
-  (``host_capabilities.record_duo_health``): the gate, and so every sign-in
-  route, is open only while the latest check passed. A check never starts
-  while the previous one is still waiting for Duo.
-- Nothing secret reaches a log: the code being exchanged is registered with
-  ``backend.logging.redaction``, which also redacts every record of the HTTP
-  clients and the Duo SDK (urllib3 logs the token request's query string,
-  with the code and the ``client_assertion`` JWT, at DEBUG).
+  (``host_capabilities.record_duo_health``). The gate opens on a passing
+  check and closes only after ``host_capabilities.DUO_HEALTH_FAILURES_TO_CLOSE``
+  (3) failed checks in a row, so one failed check on the timer never closes
+  it. A check never starts while the previous one is still waiting for Duo.
+- Nothing secret reaches a log: ``backend.logging.redaction`` redacts by
+  pattern (credential query parameters such as ``duo_code`` and
+  ``client_assertion``, credential headers, JWTs) and the configured
+  secrets, in every record of every logger, and every query value in the
+  HTTP clients' and the Duo SDK's (urllib3 logs the token request's query
+  string, with the code and the ``client_assertion`` JWT, at DEBUG). Nothing
+  here registers a value with it: no request can make the logs drop a string.
 
 Inert unless configured: nothing here runs, and ``duo_universal`` is not even
 imported, unless ``DUO_ENABLED`` is on with the Web SDK keys and an https
@@ -72,7 +81,6 @@ from dataclasses import dataclass
 from typing import Any, Callable, Deque, Dict, Optional, Tuple
 
 from backend.config import settings
-from backend.logging import redaction
 from backend.services import identity_store
 
 logger = logging.getLogger(__name__)
@@ -81,7 +89,7 @@ logger = logging.getLogger(__name__)
 # Fixed codes; frontend/login-duo.html has one message for each
 # (tests/test_duo_signin.py pins the two lists together). They double as the
 # ``reason`` of the identity_signin_failure audit event.
-UNAVAILABLE = "unavailable"            # the duo_signin gate is closed
+UNAVAILABLE = "unavailable"            # start: the duo_signin gate is closed; callback: Duo sign-in is off
 BAD_ORIGIN = "bad_origin"              # a cross-site POST
 INVALID_USERNAME = "invalid_username"
 NOT_ALLOWED = "not_allowed"            # not on IDENTITY_ALLOWED_USERS
@@ -264,7 +272,9 @@ def configured() -> bool:
 
 
 def gate() -> Dict[str, Any]:
-    """The ``duo_signin`` host gate, the single rule every route reads."""
+    """The ``duo_signin`` host gate: the single rule ``begin()`` (``POST
+    /auth/duo/start``), the sign-in page's button and the chat page's
+    "Sign in with Duo" link read. The callback does not (``complete()``)."""
     from backend import host_capabilities
 
     return host_capabilities.duo_signin_gate(settings)
@@ -390,31 +400,31 @@ _health_thread: Optional[threading.Thread] = None
 
 def run_health_check() -> bool:
     """Call Duo's health check (bounded) and record the result for the
-    ``duo_signin`` gate. Never raises. Returns whether it passed."""
+    ``duo_signin`` gate, which closes only after
+    ``host_capabilities.DUO_HEALTH_FAILURES_TO_CLOSE`` failures in a row.
+    Never raises. Returns whether it passed."""
     from backend import host_capabilities
 
     try:
         _bounded(_client().health_check, timeout=HEALTH_TIMEOUT_S, exclusive=_health_call)
     except _DuoBusy:
-        host_capabilities.record_duo_health(False, "the previous health check is still waiting for Duo")
-        return False
+        detail = "the previous health check is still waiting for Duo"
     except _DuoTimeout:
-        host_capabilities.record_duo_health(False, f"no answer within {HEALTH_TIMEOUT_S:.0f} s")
-        return False
+        detail = f"no answer within {HEALTH_TIMEOUT_S:.0f} s"
     except ImportError:
-        host_capabilities.record_duo_health(
-            False, "duo_universal is not installed (pip install -r requirements.txt)")
-        return False
-    except Exception as exc:  # noqa: BLE001 - a failed check closes the gate, never the app
+        detail = "duo_universal is not installed (pip install -r requirements.txt)"
+    except Exception as exc:  # noqa: BLE001 - a failed check counts toward closing the gate, never the app
         detail = describe_failure(exc)
-        logger.warning("Duo health check failed: %s", detail)
-        host_capabilities.record_duo_health(False, detail)
-        return False
-    if not host_capabilities.duo_signin_gate().get("enabled"):
-        logger.info("Duo health check passed (TLS checked against %s); Duo sign-in is available",
-                    duo_tls_trust())
-    host_capabilities.record_duo_health(True)
-    return True
+    else:
+        if not host_capabilities.duo_signin_gate().get("enabled"):
+            logger.info("Duo health check passed (TLS checked against %s); Duo sign-in is available",
+                        duo_tls_trust())
+        host_capabilities.record_duo_health(True)
+        return True
+    failures = host_capabilities.record_duo_health(False, detail)
+    logger.warning("Duo health check failed (%d in a row; Duo sign-in closes at %d): %s",
+                   failures, host_capabilities.DUO_HEALTH_FAILURES_TO_CLOSE, detail)
+    return False
 
 
 def _health_loop(stop: threading.Event) -> None:
@@ -601,8 +611,14 @@ def complete(
     """Finish a sign-in from Duo's redirect: ``(identity cookie value, snapshot)``.
 
     Raises ``SigninError``. The username is the pending entry's, never anything
-    in the callback's query."""
-    if not gate().get("enabled"):
+    in the callback's query.
+
+    Not gated: a sign-in started while the ``duo_signin`` gate was open
+    finishes here even if the gate has closed since. The code exchange is
+    attempted and a Duo failure maps to a fixed code (``duo_unavailable``,
+    ``duo_refused``, ...). Only Duo sign-in being off (``configured()``)
+    refuses it up front, unaudited, so Labs 0-4 never write an identity event."""
+    if not configured():
         raise SigninError(UNAVAILABLE, audit=False)
     if not state or not state_cookie or not secrets.compare_digest(
             state.encode("utf-8"), state_cookie.encode("utf-8")):
@@ -619,8 +635,11 @@ def complete(
         raise SigninError(DUO_DENIED, name)
     if not duo_code or not _CODE_RE.fullmatch(duo_code):
         raise SigninError(MISSING_CODE, name)
-    # The code is a credential until it is exchanged: no log line may carry it.
-    redaction.register(duo_code)
+    # The code is a credential until it is exchanged. It is never logged here,
+    # and backend.logging.redaction drops it by pattern wherever it travels as
+    # duo_code= / code= (never by registering it: the code is the caller's
+    # input, and registering it would let a caller blank any string out of
+    # every later log line).
     try:
         token = _bounded(_client().exchange_authorization_code_for_2fa_result, duo_code, name,
                          pending.nonce, timeout=DUO_CALL_TIMEOUT_S)

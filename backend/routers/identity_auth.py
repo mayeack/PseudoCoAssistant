@@ -21,7 +21,9 @@ identity cookie (``REDIRECT_EXEMPT``), so a user can always sign in again.
   single-use state bound to this browser by a ``Secure; HttpOnly;
   SameSite=Lax; Path=/auth/duo/`` cookie.
 - ``GET /auth/duo/callback`` - Duo's redirect. The state must equal the
-  cookie's; the username is the pending sign-in's, never the query's. Sets the
+  cookie's; the username is the pending sign-in's, never the query's. Not
+  gated: a sign-in already at Duo finishes even if the ``duo_signin`` gate
+  closed meanwhile (only the start and the sign-in link read it). Sets the
   identity cookie and goes to ``/app?signin=ok``. Every failure is a 303 to
   ``/login/duo?error=<fixed code>``; no exception reaches the error page, so
   ``DEBUG=True`` never renders a traceback here. The query (Duo's ``duo_code``)
