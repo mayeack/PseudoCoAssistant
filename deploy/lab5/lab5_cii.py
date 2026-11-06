@@ -56,14 +56,20 @@ _USER_NOT_FOUND_RE = re.compile(
     r"\b(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
     r"(?:\s+(?:with|for|having|by)\s+(?:login|email|username|id))?"
     r"(?:(?:\s*:\s*|\s+)(?:\"[^\"\n]{1,200}\"|'[^'\n]{1,200}'|`[^`\n]{1,200}`|\([^()\n]{1,200}\)"
-    r"|[^\s\"'`()]{0,200}[@.][^\s\"'`()]{0,200}))?"
+    r"|[^\s\"'`()]{0,200}[@.](?=\w)[^\s\"'`()]{0,200}))?"
     r"(?:\s*:\s*|\s+)(?:(?:is|was|has|had)\s+)?(?:not\s+(?:been\s+)?found"
     r"|(?:(?:does|did)\s+not|doesn't|didn't|not)\s+exist|(?:could|can)\s*not\s+be\s+found|can't\s+be\s+found)\b"
-    # "No such user", or "no user" at the end of a sentence or before "found", "with", a login.
+    # "No such user" at the end of a sentence (a mark before a space or the end), or before a colon.
+    r"|\bno\s+such\s+(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
+    r"\s*(?:$|[.;!?](?=\s|$)|:(?=\s|$))"
+    # "No user" as the whole message.
+    r"|^\s*no\s+(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?\s*[.!]?\s*$"
+    # "No [such] user" found / exists, or before a login: "with login" (email, ...), quoted, an address.
     r"|\bno\s+(?:such\s+)?(?:end[ _-]?)?user(?:\s+(?:record|account|profile|entry|details))?"
-    r"(?:\s*(?:$|[.:;,!])|\s+(?:found|exists?|with|matching|named)\b|\s+(?:for|by)\s+(?:login|email|username|id)\b"
-    r"|\s+(?:\"[^\"\n]{1,200}\"|'[^'\n]{1,200}'|`[^`\n]{1,200}`|\([^()\n]{1,200}\)"
-    r"|[^\s\"'`()]{0,200}[@.][^\s\"'`()]{0,200}))",
+    r"(?:\s+(?:found|exists?)\b"
+    r"|\s+(?:with|for|by|matching|named)\s+(?:login|email|username|id)\b"
+    r"|(?:\s*:\s*|\s+)(?:(?:with|matching|named)\s+)?(?:\"[^\"\n]{1,200}\"|'[^'\n]{1,200}'|`[^`\n]{1,200}`"
+    r"|\([^()\n]{1,200}\)|[^\s\"'`()@]{1,200}@(?=\w)[^\s\"'`()]{0,200}))",
     re.IGNORECASE)
 
 Transport = Callable[[str, str, Dict[str, str], Optional[bytes], float], Tuple[int, bytes]]

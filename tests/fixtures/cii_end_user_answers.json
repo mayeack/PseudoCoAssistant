@@ -626,7 +626,7 @@
     }
   ],
   "wording": {
-    "_about": "Messages of a code-less error, each tried on getEndUser (getEndUser null) and on its endUserDetails (getEndUser an object, endUserDetails null). not_found: CII's 'no such user'. unavailable: words about something else (a permission, a scope, a pool, a session), never that answer.",
+    "_about": "Messages of a code-less error, each tried on getEndUser (getEndUser null) and on its endUserDetails (getEndUser an object, endUserDetails null). not_found: CII's 'no such user'. unavailable: words about something else (a permission, a scope, a pool, a session), never that answer, including a word that ends a sentence right after 'no user' (no login: a login's '.' or '@' sits inside it), a scope name or list that starts with 'user', and a 'no user' that ends a sentence about something else.",
     "not_found": [
       "End user avery.kim@pseudocoassistant.com not found",
       "User does not exist",
@@ -640,7 +640,11 @@
       "User could not be found",
       "No user found",
       "No user with login avery.kim@pseudocoassistant.com",
-      "End user record not found"
+      "End user record not found",
+      "No user.",
+      "No user: avery.kim@pseudocoassistant.com",
+      "No user matching avery.kim@pseudocoassistant.com",
+      "No such user; check the login"
     ],
     "unavailable": [
       "No user permissions are granted to this API client",
@@ -653,7 +657,23 @@
       "User session not found",
       "Role end-user-reader does not exist",
       "Permission does not exist for this API client",
-      "Upstream timeout"
+      "Upstream timeout",
+      "No user permissions.",
+      "No user scope.",
+      "No user context.",
+      "No user role.",
+      "Forbidden: no user access.",
+      "Access denied: no user permissions.",
+      "The API client has no user permissions.",
+      "Token has no user.",
+      "Forbidden: no user.",
+      "Token has no user.read scope",
+      "Token has no user:read scope",
+      "No user:read permission granted",
+      "No user, group or role permission granted to this API client",
+      "No user with the required permissions",
+      "No such user pool",
+      "Could not resolve user scope. Not found."
     ]
   }
 }
