@@ -326,6 +326,9 @@ def create_participants(ctx: "Ctx", reports: List["BoxReport"]) -> List[str]:
                      "Create temporary password (valid 30 days); write it on that participant's card:")
         for link in links:
             ctx.out.line(f"  {link}")
+    ctx.out.line(f"Participants reach their instance through the Web SDK app {participants.SIGNIN_APP}, whose User "
+                 f"access must admit {participants.CII_READ_ONLY} as well as {env.persona_group}, or Duo refuses "
+                 "every participant (deploy/lab5/README.md, Duo applications: only the Admin Panel can check it)")
     return failed
 
 
@@ -1231,8 +1234,8 @@ def run_expire(args: argparse.Namespace, deps: Deps) -> int:
         admin = duo.admin_api(keychain, deps.duo_transport)
         scope = f"workshop {ws.name}" if ws else "every workshop"
         reporter.line(f"lab5-setup expire{' --dry-run' if args.dry_run else ''}: {scope}; disable at day "
-                      f"{participants.DISABLE_DAYS}, delete at day {participants.DELETE_DAYS}; "
-                      f"{len(cast.personas)} personas and group {cast.group!r} are never touched")
+                      f"{participants.DISABLE_DAYS}, delete at day {participants.DELETE_DAYS}; the "
+                      f"{len(cast.personas)} personas of {_cast_file(ws).name} are never touched")
         counts, failed = participants.expire(admin, root, set(cast.usernames), cast.group, deps.now(),
                                              reporter.line, workshop=ws.name if ws else "", dry_run=args.dry_run)
         reporter.line(f"RESULT: expire: {counts['disabled']} disabled, {counts['deleted']} deleted, "

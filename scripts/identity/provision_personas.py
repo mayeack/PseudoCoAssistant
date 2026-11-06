@@ -19,7 +19,11 @@ codes: HOTP only accepts codes ahead of Duo's counter.
 Only users listed in scripts/identity/personas.yaml whose notes carry the
 persona marker are ever changed or deleted. Users are API-created only (never
 directory-synced: the Admin API cannot disable a synced user). The group is
-kept on teardown, because every lab app is limited to it.
+kept on teardown, because the lab apps' User access names it: PseudoCo VPN
+admits only this group, and PseudoCo Lab: Sign-in admits it and CII Read-Only,
+the group every participant account is in (deploy/lab5/README.md, "Duo
+applications"). A Sign-in app that admits only this group, as plan 4.2 had it
+before the participant accounts (12.2), refuses every participant.
 
 No API clears a risk-based step-up or CII feedback: after --reset or
 --teardown, use Admin Panel > Users > Clear all step-ups, and CII Reset Feedback.
@@ -43,6 +47,14 @@ from lab5_personas import (DEFAULT_CAST, Cast, Persona, PersonaState, is_persona
 
 STEP_UP_NOTE = ("No API clears a risk-based step-up or CII feedback: Admin Panel > Users > Clear all step-ups, "
                 "and CII Reset Feedback on the personas (plan 4.3, 4.6)")
+
+
+def user_access_note(group: str) -> str:
+    """Which lab apps admit whom (deploy/lab5/README.md, "Duo applications").
+    Neither Admin API app here can read or set it, so it is a console step."""
+    return (f"User access, once in the Duo Admin Panel: PseudoCo VPN admits only {group}; PseudoCo Lab: Sign-in "
+            f"admits {group} and CII Read-Only, the group every participant account is in. Never limit Sign-in "
+            f"to {group} alone: Duo would refuse every participant (deploy/lab5/README.md, Duo applications)")
 
 
 @dataclass
@@ -96,9 +108,11 @@ class Run:
             return str(group["group_id"])
         if self.dry:
             self.row("PLAN", "group", f"create {self.cast.group}")
+            self.out.line(user_access_note(self.cast.group))
             return ""
         group = self.admin.create_group(self.cast.group, "Lab 5 persona cast (scripts/identity/personas.yaml)")
-        self.row("CHANGED", "group", f"created {self.cast.group}; limit every lab app to it (plan 4.2)")
+        self.row("CHANGED", "group", f"created {self.cast.group}")
+        self.out.line(user_access_note(self.cast.group))
         return str(group["group_id"])
 
     def ensure(self, p: Persona, group_id: str) -> None:
@@ -271,7 +285,8 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
                 reporter.line("Nothing deleted: deleting through the API is immediate and permanent. "
                               "Re-run with --teardown --yes")
                 return 1
-            reporter.line(f"Group {cast.group!r} kept: every lab app is limited to it. {STEP_UP_NOTE}")
+            reporter.line(f"Group {cast.group!r} kept: the User access of PseudoCo VPN and PseudoCo Lab: Sign-in "
+                          f"names it. {STEP_UP_NOTE}")
         else:
             group_id = run.group_id()
             for p in chosen:

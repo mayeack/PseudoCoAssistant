@@ -188,6 +188,35 @@ deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at
 </tbody>
 </table>
 <p>The names of the first table's items are defaults. A workshop file can rename any of them under <code>keychain:</code>. The Mac-only items have fixed names.</p>
+<h2>Duo applications: who may sign in</h2>
+<p>Duo checks an application's <strong>User access</strong> before an instance sees who signed in. A new application admits no one until it is set (plan 4.2). Only the Admin Panel can set or check it here: reading or changing an application needs the Admin API's <em>Grant applications</em> permission, which neither the Provisioner nor the Status app has. Set it once, after <code>provision_personas.py</code> has created PseudoCo Workforce (<em>Applications</em>, then the application, then <em>User access</em>):</p>
+<table>
+<thead>
+<tr>
+<th>Application</th>
+<th>User access</th>
+<th>Who signs in through it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>PseudoCo Lab: Sign-in</strong> (Web SDK)</td>
+<td><em>Enable only for permitted groups</em>: <strong>PseudoCo Workforce</strong> and <strong>CII Read-Only</strong></td>
+<td>everyone an instance's <code>IDENTITY_ALLOWED_USERS</code> names: the trusted personas and the room's victim (PseudoCo Workforce), and the instance's participant account (CII Read-Only, which <code>up</code> adds every participant account to)</td>
+</tr>
+<tr>
+<td><strong>PseudoCo VPN</strong> (Auth API)</td>
+<td><em>Enable only for permitted groups</em>: <strong>PseudoCo Workforce</strong> only</td>
+<td>the persona scripts</td>
+</tr>
+<tr>
+<td><strong>PseudoCo Provisioner</strong>, <strong>PseudoCo Lab: Status</strong> (Admin API)</td>
+<td>nothing to set</td>
+<td>no one: they are API keys, for the Mac and for the boxes</td>
+</tr>
+</tbody>
+</table>
+<p>Plan section 4.2 limits every lab app to PseudoCo Workforce. That predates the participant accounts (12.2): a Sign-in app limited that way refuses every participant at the Universal Prompt, so no attendee can sign in to their own instance. Participant accounts never need PseudoCo Workforce. If someone adds one to it anyway, it is still a participant: <code>expire</code> disables and deletes it on schedule, and its <code>status</code> and <code>expire</code> rows say it is in the group. <code>up</code> repeats the Sign-in requirement after the participant accounts, because the tools cannot check it.</p>
 <h2>The workshop file</h2>
 <p>Copy <code>deploy/lab5/workshop.example.yaml</code>, one per delivery. It holds no secrets: only names, addresses and Keychain item names.</p>
 <ul>
@@ -268,7 +297,7 @@ deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at
 <ul>
 <li><strong>Username</strong> <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code>, <strong>email</strong> <code>l5-&lt;workshop&gt;-&lt;nn&gt;@pseudocoassistant.com</code> (the zone, or <code>participants.email_domain</code>). Identity Intelligence matches users by email.</li>
 <li><strong>Notes</strong>: <code>lab5-setup participant; workshop=&lt;workshop&gt;; instance=&lt;nn&gt;; created=&lt;UTC time&gt;</code>.</li>
-<li><strong>Groups</strong>: <strong>CII Read-Only</strong>, which gives Duo SSO into Identity Intelligence as read-only, and <strong><code>l5-&lt;workshop&gt;</code></strong>, created on the first <code>up</code>. <code>up</code> refuses to start if Duo has no CII Read-Only group.</li>
+<li><strong>Groups</strong>: <strong>CII Read-Only</strong>, which gives Duo SSO into Identity Intelligence as read-only, and <strong><code>l5-&lt;workshop&gt;</code></strong>, created on the first <code>up</code>. <code>up</code> refuses to start if Duo has no CII Read-Only group. CII Read-Only is also the group that gets the account through the Sign-in app, whose User access must admit it (see &quot;Duo applications&quot; above). Never PseudoCo Workforce: that is the persona cast's group.</li>
 <li><strong>Its own HOTP token</strong> (type h6, serial = the username), created through the API and attached. <code>up</code> computes the token's first 10 passcodes for the handout and then discards the secret, so the passcodes cannot be printed again. <code>--reissue-passcodes</code> replaces the token, and the old passcodes stop working.</li>
 <li>The account stays <strong>active</strong> and MFA-required. It never gets bypass status or bypass codes.</li>
 </ul>
@@ -276,7 +305,7 @@ deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at
 <p><strong>The handout</strong> is <code>~/.pseudoco-lab5/workshops/&lt;workshop&gt;/handout.html</code>, a printable card per instance, plus <code>handout.csv</code> with the same rows. Both are 0600. A card holds the instance URL, the box's access key, the username, the email, a blank for the temporary password, the 10 passcodes in order and the sign-in steps. It also tells the participant that other read-only users can see their sign-ins and IP address. A card leaves the handout once its account is disabled. Delete the files after the workshop. They are the only place the tool writes a participant's sign-in details.</p>
 <p><strong>The password is a console step.</strong> The Admin API cannot set a Duo Directory password. <code>up</code> prints each account's Admin Panel link. Open each one and click <strong>Create temporary password</strong> (valid 30 days), then write it on that participant's card. The token is attached first, because that flow expects an enrolled device. The participant signs in with the temporary password and a passcode, then sets their own password. <code>status</code> shows who has done so (<code>has_password</code>).</p>
 <p><strong><code>status</code></strong> prints one row per account: its Duo status, whether its token is attached and whether it has a password, plus its age and the dates it is disabled and deleted. A missing or locked-out account fails the run. For a locked-out account, unlock it in the Admin Panel and turn on lockout auto-revert.</p>
-<p><strong><code>expire</code></strong> lists every Duo user whose name starts with <code>l5-</code> and acts only when all three markers match: the <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code> username, the notes marker naming that same workshop and instance, and membership of <code>l5-&lt;workshop&gt;</code>. It never acts on a user in the persona group, on a user whose notes carry the persona marker, or on a username in <code>scripts/identity/personas.yaml</code>. Age is counted from Duo's own <code>created</code> time, or from the notes if that is missing.</p>
+<p><strong><code>expire</code></strong> lists every Duo user whose name starts with <code>l5-</code> and acts only when all three markers match: the <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code> username, the notes marker naming that same workshop and instance, and membership of <code>l5-&lt;workshop&gt;</code>. It never acts on a persona: a username in <code>scripts/identity/personas.yaml</code>, or a user whose notes carry the persona marker. <code>personas.yaml</code> refuses <code>l5-</code> names, so a persona can never carry the participant markers. Membership of PseudoCo Workforce does not make an account a persona: a participant account that someone added to that group is still disabled and deleted on schedule, so its seat is freed, and its row says it is in the group. Age is counted from Duo's own <code>created</code> time, or from the notes if that is missing.</p>
 <ul>
 <li>At day 7 it sets <code>status=disabled</code>. That denies sign-in and invalidates remembered devices, though an open CII tab may last until CII's idle timeout.</li>
 <li>At day 14 it deletes the account's HOTP token, then the account. Deleting through the API is immediate and permanent and skips Duo's Trash. That is why it needs all three markers, and why <code>--dry-run</code> exists. If the token cannot be deleted, the account is kept for the next run.</li>
@@ -305,7 +334,7 @@ deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at
 <tbody>
 <tr>
 <td><code>provision_personas.py [--dry-run]</code></td>
-<td>Creates what is missing: the <strong>PseudoCo Workforce</strong> group, each user (API-created, email on <code>pseudocoassistant.com</code>, a persona notes marker), and one HOTP token each. The token's secret goes into the Keychain first, through <code>security -i</code> on stdin and never in argv. Its counter starts at 0 in <code>~/.pseudoco-lab5/personas/hotp/</code>.</td>
+<td>Creates what is missing: the <strong>PseudoCo Workforce</strong> group, each user (API-created, email on <code>pseudocoassistant.com</code>, a persona notes marker), and one HOTP token each. The token's secret goes into the Keychain first, through <code>security -i</code> on stdin and never in argv. Its counter starts at 0 in <code>~/.pseudoco-lab5/personas/hotp/</code>. When it creates the group, it prints the User access each lab app needs (see &quot;Duo applications&quot;).</td>
 </tr>
 <tr>
 <td><code>provision_personas.py --status</code></td>
@@ -317,7 +346,7 @@ deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at
 </tr>
 <tr>
 <td><code>provision_personas.py --teardown --yes</code></td>
-<td>Deletes the cast's users and tokens, their Keychain secrets and their counters. Without <code>--yes</code> it only lists what it would delete. It keeps the group, because every lab app is limited to it.</td>
+<td>Deletes the cast's users and tokens, their Keychain secrets and their counters. Without <code>--yes</code> it only lists what it would delete. It keeps the group, because the User access of PseudoCo VPN and PseudoCo Lab: Sign-in names it.</td>
 </tr>
 <tr>
 <td><code>persona_activity.py baseline</code></td>
@@ -383,7 +412,8 @@ deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at
 <p><code>tests/test_lab5_participants.py</code> and <code>tests/test_identity_personas.py</code> cover the participant accounts, <code>expire</code>, the persona scripts and the launchd templates. They run against an in-memory Duo, CII and Keychain (<code>tests/lab5_fakes.py</code>), and pin the following:</p>
 <ul>
 <li><code>up</code> creates the accounts with all three markers and a handout whose passcodes Duo accepts;</li>
-<li><code>expire</code> acts only on fully marked accounts, at day 7 and day 14, and never on a persona;</li>
+<li><code>expire</code> acts only on fully marked accounts, at day 7 and day 14, and never on a persona, while a participant account that is also in PseudoCo Workforce is still expired;</li>
+<li>the persona tool, the README and the runbook say which groups each lab app admits: Sign-in admits CII Read-Only too, and no text limits every lab app to PseudoCo Workforce;</li>
 <li>each secret reaches Duo once, in a POST body, and the Keychain only on stdin;</li>
 <li>the cast is disjoint from the app's synthetic users and synthetic PII;</li>
 <li>the takeover stays within MFA Flood's window and under the lockout limit.</li>

@@ -26,9 +26,14 @@ Everything here runs from your Mac. There is no broker and nothing in AWS. Secre
 1. Create the tool's venv and add the Keychain items. `deploy/lab5/README.md` lists every item, including the Mac-only Provisioner and VPN keys.
 2. Once spike S1 says how Duo geolocates addresses, put real home and foreign addresses in `scripts/identity/personas.yaml`. Until then the scripts refuse to send any sign-in.
 3. Run `py scripts/identity/provision_personas.py` to create the cast: the PseudoCo Workforce group, the users and one HOTP token each. In CII, add the trusted personas' exclusions (Impossible Travel, MFA Flood, *A Bypass Code Was Used*, *Users Sharing Authenticators*).
-4. Run `deploy/launchd/install-lab5.sh` from the main checkout. It installs the daily `lab5-setup expire` (08:15) and the persona baseline plus self-check (09:20).
-5. After spikes S1, S2 and S7 pass, at least 4 weeks before the first delivery, set `baseline.enabled: true` in `personas.yaml`. From then on every persona signs in once a day. If anything is wrong, the self-check raises a macOS notification: a failed sign-in, a missing Keychain secret or counter, a disabled or locked-out persona, or a trusted persona failing a CII check.
-6. **T-18 gate:** `py scripts/identity/persona_activity.py selfcheck --gate`. Every persona must be out of "Unknown". If one is not, the delivery date moves.
+4. **User access, in the Duo Admin Panel** (*Applications*, the application, *User access*). The tools cannot set or check it. `deploy/lab5/README.md` ("Duo applications") has the reasons.
+   - **PseudoCo Lab: Sign-in**: *Enable only for permitted groups*, with **PseudoCo Workforce** and **CII Read-Only**. The personas are in the first group, and every participant account is in the second.
+   - **PseudoCo VPN**: *Enable only for permitted groups*, with **PseudoCo Workforce** only. Only the persona scripts sign in through it.
+
+   Plan section 4.2 limits every lab app to PseudoCo Workforce. That was written before the participant accounts: Sign-in limited that way refuses every participant, so no attendee can sign in to their own instance. Never add a participant account to PseudoCo Workforce to get around it.
+5. Run `deploy/launchd/install-lab5.sh` from the main checkout. It installs the daily `lab5-setup expire` (08:15) and the persona baseline plus self-check (09:20).
+6. After spikes S1, S2 and S7 pass, at least 4 weeks before the first delivery, set `baseline.enabled: true` in `personas.yaml`. From then on every persona signs in once a day. If anything is wrong, the self-check raises a macOS notification: a failed sign-in, a missing Keychain secret or counter, a disabled or locked-out persona, or a trusted persona failing a CII check.
+7. **T-18 gate:** `py scripts/identity/persona_activity.py selfcheck --gate`. Every persona must be out of "Unknown". If one is not, the delivery date moves.
 
 Long trips with the Mac shut down stop the baseline. A few missed days are fine. A missed week before a delivery is not, and the self-check fails after three days without a sign-in.
 
@@ -60,7 +65,7 @@ For the live replay, one victim has Duo Mobile on a facilitator phone (`replay_d
    - `participants.cii_url`, the link printed on the handouts.
 2. `deploy/lab5/lab5-setup check <workshop.yaml>`. Every box should say **ready, nothing to upgrade**, and every participant account `PLAN`. It changes nothing.
 3. `deploy/lab5/lab5-setup up <workshop.yaml>`. The boxes get their Lab 5 keys, tunnel and DNS name, HEC host and restart. Then every box that came up gets its participant account `l5-<workshop>-<nn>`, and the handout is written.
-4. **Temporary passwords.** `up` prints an Admin Panel link per account. Open each one, click *Create temporary password* (valid 30 days) and write it on that participant's card. The Admin API cannot set passwords.
+4. **Temporary passwords.** `up` prints an Admin Panel link per account. Open each one, click *Create temporary password* (valid 30 days) and write it on that participant's card. The Admin API cannot set passwords. While you are in the Admin Panel, check that **PseudoCo Lab: Sign-in** still admits **CII Read-Only** (step 4 of "Once, before the first delivery"). `up` reminds you, because it cannot check.
 5. Print `~/.pseudoco-lab5/workshops/<workshop>/handout.html` and cut the cards apart.
 6. `deploy/lab5/lab5-setup status <workshop.yaml>`. Every box should be green. Participants show "no password yet" until they sign in to CII and set their own.
 
@@ -118,6 +123,7 @@ That way the AI Defense blocks in the room stack belong to the victim alone, and
 | When | Command |
 |---|---|
 | once | `py scripts/identity/provision_personas.py` (`--status`, `--dry-run`) |
+| once | Admin Panel User access: Sign-in admits PseudoCo Workforce and CII Read-Only; VPN admits PseudoCo Workforce |
 | once | `deploy/launchd/install-lab5.sh` |
 | daily (launchd) | `persona_activity.py baseline`, then the self-check; `lab5-setup expire` |
 | T-18 | `py scripts/identity/persona_activity.py selfcheck --gate` |

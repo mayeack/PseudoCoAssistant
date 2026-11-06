@@ -12,7 +12,9 @@
 # adding it (priya.raman and omar.haddad were dropped for colliding).
 
 email_domain: pseudocoassistant.com   # CII's login is the email
-group: PseudoCo Workforce             # every lab app is limited to this group (4.2)
+group: PseudoCo Workforce             # User access: PseudoCo VPN admits only this group, PseudoCo Lab:
+                                      # Sign-in admits it and CII Read-Only (the participant accounts);
+                                      # deploy/lab5/README.md, "Duo applications"
 
 hotp:
   # How the secret is sent to Duo and kept in the Keychain. Spike S7 settles it.

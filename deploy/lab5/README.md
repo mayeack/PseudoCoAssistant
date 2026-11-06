@@ -65,6 +65,18 @@ Exit codes: `0` means every box and participant account is fine. `1` means at le
 
 The names of the first table's items are defaults. A workshop file can rename any of them under `keychain:`. The Mac-only items have fixed names.
 
+## Duo applications: who may sign in
+
+Duo checks an application's **User access** before an instance sees who signed in. A new application admits no one until it is set (plan 4.2). Only the Admin Panel can set or check it here: reading or changing an application needs the Admin API's *Grant applications* permission, which neither the Provisioner nor the Status app has. Set it once, after `provision_personas.py` has created PseudoCo Workforce (*Applications*, then the application, then *User access*):
+
+| Application | User access | Who signs in through it |
+|---|---|---|
+| **PseudoCo Lab: Sign-in** (Web SDK) | *Enable only for permitted groups*: **PseudoCo Workforce** and **CII Read-Only** | everyone an instance's `IDENTITY_ALLOWED_USERS` names: the trusted personas and the room's victim (PseudoCo Workforce), and the instance's participant account (CII Read-Only, which `up` adds every participant account to) |
+| **PseudoCo VPN** (Auth API) | *Enable only for permitted groups*: **PseudoCo Workforce** only | the persona scripts |
+| **PseudoCo Provisioner**, **PseudoCo Lab: Status** (Admin API) | nothing to set | no one: they are API keys, for the Mac and for the boxes |
+
+Plan section 4.2 limits every lab app to PseudoCo Workforce. That predates the participant accounts (12.2): a Sign-in app limited that way refuses every participant at the Universal Prompt, so no attendee can sign in to their own instance. Participant accounts never need PseudoCo Workforce. If someone adds one to it anyway, it is still a participant: `expire` disables and deletes it on schedule, and its `status` and `expire` rows say it is in the group. `up` repeats the Sign-in requirement after the participant accounts, because the tools cannot check it.
+
 ## The workshop file
 
 Copy `deploy/lab5/workshop.example.yaml`, one per delivery. It holds no secrets: only names, addresses and Keychain item names.
@@ -124,7 +136,7 @@ Participant accounts stay until `expire` disables them at day 7 and deletes them
 
 - **Username** `l5-<workshop>-<nn>`, **email** `l5-<workshop>-<nn>@pseudocoassistant.com` (the zone, or `participants.email_domain`). Identity Intelligence matches users by email.
 - **Notes**: `lab5-setup participant; workshop=<workshop>; instance=<nn>; created=<UTC time>`.
-- **Groups**: **CII Read-Only**, which gives Duo SSO into Identity Intelligence as read-only, and **`l5-<workshop>`**, created on the first `up`. `up` refuses to start if Duo has no CII Read-Only group.
+- **Groups**: **CII Read-Only**, which gives Duo SSO into Identity Intelligence as read-only, and **`l5-<workshop>`**, created on the first `up`. `up` refuses to start if Duo has no CII Read-Only group. CII Read-Only is also the group that gets the account through the Sign-in app, whose User access must admit it (see "Duo applications" above). Never PseudoCo Workforce: that is the persona cast's group.
 - **Its own HOTP token** (type h6, serial = the username), created through the API and attached. `up` computes the token's first 10 passcodes for the handout and then discards the secret, so the passcodes cannot be printed again. `--reissue-passcodes` replaces the token, and the old passcodes stop working.
 - The account stays **active** and MFA-required. It never gets bypass status or bypass codes.
 
@@ -136,7 +148,7 @@ An account with the participant's name that `up` did not create (its notes lack 
 
 **`status`** prints one row per account: its Duo status, whether its token is attached and whether it has a password, plus its age and the dates it is disabled and deleted. A missing or locked-out account fails the run. For a locked-out account, unlock it in the Admin Panel and turn on lockout auto-revert.
 
-**`expire`** lists every Duo user whose name starts with `l5-` and acts only when all three markers match: the `l5-<workshop>-<nn>` username, the notes marker naming that same workshop and instance, and membership of `l5-<workshop>`. It never acts on a user in the persona group, on a user whose notes carry the persona marker, or on a username in `scripts/identity/personas.yaml`. Age is counted from Duo's own `created` time, or from the notes if that is missing.
+**`expire`** lists every Duo user whose name starts with `l5-` and acts only when all three markers match: the `l5-<workshop>-<nn>` username, the notes marker naming that same workshop and instance, and membership of `l5-<workshop>`. It never acts on a persona: a username in `scripts/identity/personas.yaml`, or a user whose notes carry the persona marker. `personas.yaml` refuses `l5-` names, so a persona can never carry the participant markers. Membership of PseudoCo Workforce does not make an account a persona: a participant account that someone added to that group is still disabled and deleted on schedule, so its seat is freed, and its row says it is in the group. Age is counted from Duo's own `created` time, or from the notes if that is missing.
 
 - At day 7 it sets `status=disabled`. That denies sign-in and invalidates remembered devices, though an open CII tab may last until CII's idle timeout.
 - At day 14 it deletes the account's HOTP token, then the account. Deleting through the API is immediate and permanent and skips Duo's Trash. That is why it needs all three markers, and why `--dry-run` exists. If the token cannot be deleted, the account is kept for the next run.
@@ -160,10 +172,10 @@ The cast is `scripts/identity/personas.yaml`: 3 trusted personas, the victims (a
 
 | Command | What it does |
 |---|---|
-| `provision_personas.py [--dry-run]` | Creates what is missing: the **PseudoCo Workforce** group, each user (API-created, email on `pseudocoassistant.com`, a persona notes marker), and one HOTP token each. The token's secret goes into the Keychain first, through `security -i` on stdin and never in argv. Its counter starts at 0 in `~/.pseudoco-lab5/personas/hotp/`. |
+| `provision_personas.py [--dry-run]` | Creates what is missing: the **PseudoCo Workforce** group, each user (API-created, email on `pseudocoassistant.com`, a persona notes marker), and one HOTP token each. The token's secret goes into the Keychain first, through `security -i` on stdin and never in argv. Its counter starts at 0 in `~/.pseudoco-lab5/personas/hotp/`. When it creates the group, it prints the User access each lab app needs (see "Duo applications"). |
 | `provision_personas.py --status` | Read-only: each persona's Duo status, its token, its Keychain secret (present or missing, never the value), its counter and its last baseline success. |
 | `provision_personas.py --reset [--only U,...]` | Re-enables and unlocks (`status=active`), then resyncs each HOTP token to the Mac's counter with three codes. Afterwards, clear all step-ups in the Admin Panel and run CII Reset Feedback, which have no API. |
-| `provision_personas.py --teardown --yes` | Deletes the cast's users and tokens, their Keychain secrets and their counters. Without `--yes` it only lists what it would delete. It keeps the group, because every lab app is limited to it. |
+| `provision_personas.py --teardown --yes` | Deletes the cast's users and tokens, their Keychain secrets and their counters. Without `--yes` it only lists what it would delete. It keeps the group, because the User access of PseudoCo VPN and PseudoCo Lab: Sign-in names it. |
 | `persona_activity.py baseline` | One successful passcode sign-in per persona from its home address and device, at random points in `baseline.jitter_minutes`, then the self-check. It does nothing while `baseline.enabled` is false. It refuses documentation addresses, so set real ones once spike S1 says how Duo geolocates them. A rejected passcode is never retried. |
 | `persona_activity.py takeover --victim U` | A home sign-in, then 5 to 9 wrong passcodes from the next foreign address within MFA Flood's 2 minutes (under the lockout limit of 10), then a success from that address with the attacker's device. It refuses a trusted persona, a victim that preauth does not accept, and a victim taken over in the last 8 days unless you pass `--force`. Its record in `personas/takeovers/` is the takeover time. When to run it depends on the S1 decision. |
 | `persona_activity.py replay --victim U` | A short push flood, 5 pushes by default and never more than 9, to the one victim with `replay_device: true` (Duo Mobile on a facilitator phone). The facilitator denies each push. An approved push fails the run. |
@@ -206,7 +218,8 @@ An `APP_VERSION` line left in the template's `.env` overrides what `/health` rep
 `tests/test_lab5_participants.py` and `tests/test_identity_personas.py` cover the participant accounts, `expire`, the persona scripts and the launchd templates. They run against an in-memory Duo, CII and Keychain (`tests/lab5_fakes.py`), and pin the following:
 
 - `up` creates the accounts with all three markers and a handout whose passcodes Duo accepts;
-- `expire` acts only on fully marked accounts, at day 7 and day 14, and never on a persona;
+- `expire` acts only on fully marked accounts, at day 7 and day 14, and never on a persona, while a participant account that is also in PseudoCo Workforce is still expired;
+- the persona tool, the README and the runbook say which groups each lab app admits: Sign-in admits CII Read-Only too, and no text limits every lab app to PseudoCo Workforce;
 - each secret reaches Duo once, in a POST body, and the Keychain only on stdin;
 - the cast is disjoint from the app's synthetic users and synthetic PII;
 - the takeover stays within MFA Flood's window and under the lockout limit.

@@ -16,7 +16,13 @@ temporary password*; ``status`` shows who has a password (``has_password``).
 its token, which frees the Duo seat. It acts only on accounts that carry all
 three markers -- the ``l5-<workshop>-<nn>`` username, the notes marker naming
 that same workshop and instance, and membership of ``l5-<workshop>`` -- and
-never on a persona.
+never on a persona (a name in the cast, or persona notes). A participant that
+someone also put in the persona group is still a participant: see ownership().
+
+Participants sign in to their instance through the Web SDK app **PseudoCo
+Lab: Sign-in**, whose User access must admit **CII Read-Only** besides the
+persona group (deploy/lab5/README.md, "Duo applications"); the Provisioner app
+cannot read or set it.
 
 Files (no secret except in the handout): ``workshops/<ws>/participants/<nn>.json``
 records ids and times; ``workshops/<ws>/handout.csv`` and ``handout.html`` (0600)
@@ -42,6 +48,7 @@ from lab5_personas import is_persona_notes
 
 MARKER = "lab5-setup participant"
 CII_READ_ONLY = "CII Read-Only"
+SIGNIN_APP = "PseudoCo Lab: Sign-in"     # the Web SDK app (12.1): its User access must admit CII_READ_ONLY
 DISABLE_DAYS = 7
 DELETE_DAYS = 14
 PASSCODES = 10
@@ -100,22 +107,38 @@ def age_text(seconds: float) -> str:
 
 def ownership(user: Dict[str, Any], personas: Set[str], persona_group: str,
               require_group: bool = True) -> Tuple[Optional[Dict[str, str]], str]:
-    """``(markers, "")`` when lab5-setup created this account, else ``(None, why)``."""
+    """``(markers, "")`` when lab5-setup created this account, else ``(None, why)``.
+
+    A persona is a name in the cast or a user whose notes carry the persona
+    marker; personas.yaml reserves ``l5-`` for participants, so neither ever
+    matches a participant. Membership of the persona group does not make an
+    account a persona: anyone can add a participant to it in the Admin Panel
+    (say, to get it past a Sign-in app limited to that group), and it is
+    still disabled and deleted on schedule, or its seat is never freed.
+    ``markers["persona_group"]`` names the group then, for the report."""
     name = str(user.get("username") or "")
     m = USERNAME_RE.match(name)
     if not m:
         return None, "not an l5-<workshop>-<nn> username"
-    groups = group_names(user)
-    if name in personas or is_persona_notes(user.get("notes")) or persona_group in groups:
+    if name in personas or is_persona_notes(user.get("notes")):
         return None, "it is a persona"
     notes = parse_notes(user.get("notes"))
     if not notes:
         return None, "its notes do not carry the lab5-setup participant marker"
     if notes["workshop"] != m.group("workshop") or notes["nn"] != m.group("nn"):
         return None, "its notes name another workshop or instance"
+    groups = group_names(user)
     if require_group and group_name(m.group("workshop")) not in groups:
         return None, f"it is not in group {group_name(m.group('workshop'))}"
-    return {"workshop": m.group("workshop"), "nn": m.group("nn"), "created": notes["created"]}, ""
+    return {"workshop": m.group("workshop"), "nn": m.group("nn"), "created": notes["created"],
+            "persona_group": persona_group if persona_group in groups else ""}, ""
+
+
+def persona_group_note(markers: Dict[str, str]) -> str:
+    """The report's note on a participant someone added to the persona group."""
+    group = markers.get("persona_group")
+    return (f"; also in {group}, which no participant needs ({SIGNIN_APP} admits participants through "
+            f"{CII_READ_ONLY})" if group else "")
 
 
 # =========================================================================== handout
@@ -413,7 +436,8 @@ def status_rows(env: Env, numbers: Iterable[str]) -> List[Row]:
             rows.append(("FAIL", name, f"not a lab5-setup participant account of this workshop ({why})"))
             continue
         start = created_at(user) or now
-        when = f"age {age_text(now - start)}; disabled {day(start + DISABLE_DAYS * DAY)}, deleted {day(start + DELETE_DAYS * DAY)}"
+        when = (f"age {age_text(now - start)}; disabled {day(start + DISABLE_DAYS * DAY)}, deleted "
+                f"{day(start + DELETE_DAYS * DAY)}{persona_group_note(markers)}")
         status = str(user.get("status") or "?")
         tokens = [t for t in (user.get("tokens") or []) if t.get("serial") == name]
         token = "token attached" if tokens else "NO token"
@@ -440,29 +464,34 @@ class Decision:
     detail: str
     workshop: str = ""
     nn: str = ""
+    note: str = ""         # persona_group_note(), appended to the report line
 
 
 def decide(user: Dict[str, Any], personas: Set[str], persona_group: str, now: float) -> Decision:
     markers, why = ownership(user, personas, persona_group)
     if not markers:
         return Decision(user, "skip", f"left alone: {why}")
+    action, detail = _schedule(user, now)
+    return Decision(user, action, detail, markers["workshop"], markers["nn"], persona_group_note(markers))
+
+
+def _schedule(user: Dict[str, Any], now: float) -> Tuple[str, str]:
+    """What day 7 and day 14 mean for an account lab5-setup created."""
     start = created_at(user)
     if start is None:
-        return Decision(user, "skip", "left alone: no creation time", markers["workshop"], markers["nn"])
+        return "skip", "left alone: no creation time"
     age = now - start
     status = str(user.get("status") or "")
     when = f"age {age_text(age)}"
     if status == "pending deletion":
-        return Decision(user, "none", f"{when}; already in Duo's Trash", markers["workshop"], markers["nn"])
+        return "none", f"{when}; already in Duo's Trash"
     if age >= DELETE_DAYS * DAY:
-        return Decision(user, "delete", f"{when}, past day {DELETE_DAYS}", markers["workshop"], markers["nn"])
+        return "delete", f"{when}, past day {DELETE_DAYS}"
     if age >= DISABLE_DAYS * DAY:
         if status == "disabled":
-            return Decision(user, "none", f"{when}; disabled, deleted on {day(start + DELETE_DAYS * DAY)}",
-                            markers["workshop"], markers["nn"])
-        return Decision(user, "disable", f"{when}, past day {DISABLE_DAYS}", markers["workshop"], markers["nn"])
-    return Decision(user, "none", f"{when}; {status}, disabled on {day(start + DISABLE_DAYS * DAY)}",
-                    markers["workshop"], markers["nn"])
+            return "none", f"{when}; disabled, deleted on {day(start + DELETE_DAYS * DAY)}"
+        return "disable", f"{when}, past day {DISABLE_DAYS}"
+    return "none", f"{when}; {status}, disabled on {day(start + DISABLE_DAYS * DAY)}"
 
 
 def expire(admin: AdminAPI, root: Path, personas: Set[str], persona_group: str, now: float,
@@ -478,31 +507,31 @@ def expire(admin: AdminAPI, root: Path, personas: Set[str], persona_group: str, 
             continue
         if d.action == "skip":
             counts["skipped"] += 1
-            line(f"  SKIP     {name:<24} {d.detail}")
+            line(f"  SKIP     {name:<24} {d.detail}{d.note}")
             continue
         if d.action == "none":
             counts["unchanged"] += 1
-            line(f"  OK       {name:<24} {d.detail}")
+            line(f"  OK       {name:<24} {d.detail}{d.note}")
             continue
         if dry_run:
             line(f"  PLAN     {name:<24} {d.detail}: would {d.action} it"
-                 + (" and its HOTP token" if d.action == "delete" else ""))
+                 + (" and its HOTP token" if d.action == "delete" else "") + d.note)
             continue
         try:
             if d.action == "disable":
                 admin.set_status(str(user["user_id"]), "disabled")
                 counts["disabled"] += 1
-                line(f"  CHANGED  {name:<24} {d.detail}: disabled")
+                line(f"  CHANGED  {name:<24} {d.detail}: disabled{d.note}")
                 _mark(root, d, disabled_at=utc_now())
             else:
                 gone = _delete(admin, user)
                 counts["deleted"] += 1
-                line(f"  CHANGED  {name:<24} {d.detail}: deleted with {gone} (the Duo seat is free)")
+                line(f"  CHANGED  {name:<24} {d.detail}: deleted with {gone} (the Duo seat is free){d.note}")
                 _mark(root, d, deleted_at=utc_now())
             Handout(root / "workshops" / d.workshop, d.workshop).remove(name)
         except Lab5Error as exc:
             failed.append(name)
-            line(f"  FAIL     {name:<24} {d.detail}: {exc}")
+            line(f"  FAIL     {name:<24} {d.detail}: {exc}{d.note}")
     return counts, failed
 
 

@@ -8,7 +8,9 @@ What it pins (plan 4.3, 4.5, 12.4 and the secrets rule):
     t.nguyen) and from the synthetic-PII name pools and records of all 8 themes;
   * provision_personas creates the group, users and HOTP tokens; each secret
     reaches the Keychain through `security -i` stdin, never argv; it is
-    idempotent, and never touches a user without the persona marker;
+    idempotent, and never touches a user without the persona marker; when it
+    creates the group it says which lab apps admit it (VPN: only the group;
+    Sign-in: the group and CII Read-Only, or no participant gets in);
   * baseline signs every persona in once from home with ipaddr + hostname
     (never client_supports_verified_push), with a locked counter; it does
     nothing while off and refuses documentation addresses;
@@ -243,6 +245,8 @@ def test_provision() -> None:
         rc, out = w.pp("--dry-run")
         check("--dry-run exits 0 and changes nothing",
               rc == 0 and not w.duo.mutations() and not w.keychain.stdin, out)
+        check("--dry-run plans the group and prints the User access it needs",
+              "PLAN     group" in out and "PseudoCo Lab: Sign-in admits PseudoCo Workforce and CII Read-Only" in out, out)
         squatter = w.duo.add_user("casey.wong", notes="someone else's account")
         rc, out = w.pp()
         check("provision exits 1 because of the foreign casey.wong", rc == 1 and "left alone" in out, out)
@@ -250,6 +254,10 @@ def test_provision() -> None:
               and not w.duo.users[squatter["user_id"]]["tokens"] and not w.duo.users[squatter["user_id"]]["groups"])
         cast = lpers.load_cast(w.cast_path)
         check("group PseudoCo Workforce created", any(g["name"] == "PseudoCo Workforce" for g in w.duo.groups.values()))
+        check("creating it says which lab apps admit whom: VPN only the cast, Sign-in the cast and the participants",
+              "created PseudoCo Workforce" in out and "PseudoCo VPN admits only PseudoCo Workforce" in out
+              and "PseudoCo Lab: Sign-in admits PseudoCo Workforce and CII Read-Only" in out
+              and "every lab app" not in out, out)
         for p in cast.personas:
             if p.username == "casey.wong":
                 continue
@@ -499,8 +507,9 @@ def test_reset_and_teardown() -> None:
         check("its Keychain secrets and counters are gone",
               not any(k.startswith("pseudoco-lab5-hotp-") for k in w.keychain.items)
               and not any((w.root / "personas" / "hotp").glob("*.json")))
-        check("the group stays (every lab app is limited to it)",
-              any(g["name"] == "PseudoCo Workforce" for g in w.duo.groups.values()) and "kept" in out)
+        check("the group stays (the User access of the VPN and Sign-in apps names it)",
+              any(g["name"] == "PseudoCo Workforce" for g in w.duo.groups.values()) and "kept" in out
+              and "PseudoCo Lab: Sign-in" in out and "every lab app" not in out, out)
         check("a user outside the cast is untouched", w.duo.users.get(squatter["user_id"]) is not None)
         check("Keychain deletes name the item only", all(len(a) <= 6 for a in w.keychain.argv
                                                            if a[1:2] == ["delete-generic-password"]))

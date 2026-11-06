@@ -15,7 +15,11 @@ What it pins:
   * `status` shows each account's state and age; `check` changes nothing;
   * `expire` disables at day 7 and deletes user + token at day 14, is
     idempotent, honours --dry-run and the workshop filter, and never touches a
-    persona or an account missing any of the three markers.
+    persona (a cast name or persona notes) or an account missing any of the
+    three markers; a participant someone also put in the persona group is
+    still a participant, so its seat is still freed;
+  * participants can sign in: `up` says the Sign-in app must admit CII
+    Read-Only, and no doc or tool limits every lab app to the persona group.
 
 Run:  .venv/bin/python tests/test_lab5_participants.py
 """
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -143,6 +148,9 @@ def test_up_creates_participants() -> None:
               "<link" not in html_text and "<script" not in html_text and "src=" not in html_text)
         check("output prints the Admin Panel link per account for its temporary password",
               out.count(f"https://admin-xxxxxxxx.duosecurity.com/users/DU") == 2 and "Create temporary password" in out, out)
+        check("up says the Sign-in app's User access must admit CII Read-Only (no tool can check it)",
+              "app PseudoCo Lab: Sign-in, whose User access must admit CII Read-Only as well as PseudoCo Workforce"
+              in out, out)
         # the passcodes work, and the secret went to Duo exactly once, in a POST body
         auth = duo.AuthAPI(h.duo.transport("auth", *tls_vpn()), API_HOST)
         first = rows["l5-acme-01"]["passcodes"].split()[0]
@@ -189,6 +197,14 @@ def test_up_creates_participants() -> None:
         h.duo.by_name("l5-acme-02")["status"] = "locked out"
         rc, out5 = h.run("status")
         check("status: a locked-out participant fails the run", rc == 1 and "locked out: unlock it" in out5, out5)
+        h.duo.by_name("l5-acme-02")["status"] = "active"
+        workforce = h.duo.add_group("PseudoCo Workforce", "the persona cast")
+        h.duo.by_name("l5-acme-01")["groups"].append(dict(workforce))
+        rc, out6 = h.run("status")
+        check("status: a participant someone also put in PseudoCo Workforce is still this workshop's participant, "
+              "and its row says it is in that group",
+              "password set; age 0.0 d" in out6 and "also in PseudoCo Workforce" in out6
+              and "not a lab5-setup participant" not in out6, out6)
 
 
 def tls_vpn() -> Tuple[str, str, str]:
@@ -254,11 +270,15 @@ def _seed_expire(h: Harness) -> Dict[str, str]:
     ids["day8"] = mk("l5-acme-02", "acme", "02", 8, ("CII Read-Only", "l5-acme"))["user_id"]
     ids["day15"] = mk("l5-acme-03", "acme", "03", 15, ("CII Read-Only", "l5-acme"))["user_id"]
     ids["other_ws"] = mk("l5-globex-01", "globex", "01", 9, ("CII Read-Only", "l5-globex"))["user_id"]
+    # a participant someone also added to the persona group (say, to get it past a Sign-in app
+    # limited to that group): still a participant, so expire still frees its seat
+    ids["persona_grp"] = mk("l5-acme-08", "acme", "08", 30, ("CII Read-Only", "l5-acme", "PseudoCo Workforce"))["user_id"]
     # left alone, whatever their age
     ids["no_marker"] = mk("l5-acme-04", "acme", "04", 30, ("CII Read-Only", "l5-acme"), notes="hand-made")["user_id"]
     ids["no_group"] = mk("l5-acme-05", "acme", "05", 30, ("CII Read-Only",))["user_id"]
     ids["wrong_nn"] = mk("l5-acme-06", "acme", "07", 30, ("CII Read-Only", "l5-acme"))["user_id"]
-    ids["persona_grp"] = mk("l5-acme-08", "acme", "08", 30, ("CII Read-Only", "l5-acme", "PseudoCo Workforce"))["user_id"]
+    ids["persona_notes"] = mk("l5-acme-09", "acme", "09", 30, ("CII Read-Only", "l5-acme", "PseudoCo Workforce"),
+                              notes="lab5 persona (scripts/identity/provision_personas.py); role=victim")["user_id"]
     ids["persona"] = h.duo.add_user("avery.kim", notes="lab5 persona (scripts/identity/provision_personas.py); "
                                     "role=victim", groups=("PseudoCo Workforce",), created=now - 60 * DAY)["user_id"]
     ids["admin"] = h.duo.add_user("myeack", created=now - 90 * DAY)["user_id"]
@@ -276,7 +296,7 @@ def test_expire() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         h = Harness(Path(tmp))
         ids = _seed_expire(h)
-        untouched = {k: dict(h.duo.users[ids[k]]) for k in ("no_marker", "no_group", "wrong_nn", "persona_grp",
+        untouched = {k: dict(h.duo.users[ids[k]]) for k in ("no_marker", "no_group", "wrong_nn", "persona_notes",
                                                              "persona", "admin", "young")}
         rc, out = h.run("expire", "--dry-run", yaml=False)
         check("--dry-run exits 0 and changes nothing", rc == 0 and not h.duo.mutations(), out + str(h.duo.mutations()))
@@ -289,6 +309,11 @@ def test_expire() -> None:
               h.duo.users[ids["other_ws"]]["status"] == "disabled")
         check("day 15: user and its HOTP token deleted (the seat is free)",
               ids["day15"] not in h.duo.users and not any(t["serial"] == "l5-acme-03" for t in h.duo.tokens.values()))
+        check("day 30 and also in PseudoCo Workforce: still a participant, deleted (the seat is free)",
+              ids["persona_grp"] not in h.duo.users, out)
+        check("... and its row says it was in the persona group",
+              any("l5-acme-08" in l and "deleted" in l and "also in PseudoCo Workforce" in l for l in out.splitlines()),
+              out)
         for key, before in untouched.items():
             check(f"left alone: {key}", h.duo.users.get(ids[key]) == before, str(h.duo.users.get(ids[key])))
         check("the persona is never even a candidate", "avery.kim" not in out)
@@ -305,7 +330,7 @@ def test_expire() -> None:
         check("a week later: the day-8 account (now 15 days) is deleted",
               rc == 0 and ids["day8"] not in h.duo.users, out3)
         check("and the young one (now 10 days) is disabled", h.duo.users[ids["young"]]["status"] == "disabled", out3)
-        for key in ("no_marker", "no_group", "wrong_nn", "persona_grp", "persona", "admin"):
+        for key in ("no_marker", "no_group", "wrong_nn", "persona_notes", "persona", "admin"):
             check(f"still left alone: {key}", h.duo.users.get(ids[key]) == untouched[key])
     with tempfile.TemporaryDirectory() as tmp:
         h = Harness(Path(tmp))
@@ -387,6 +412,17 @@ def test_units() -> None:
     check("already disabled at day 8: nothing to do", d.action == "none")
     d = lp.decide(dict(base, created=now - 30 * DAY, username="l5-acme-01"), {"l5-acme-01"}, "PseudoCo Workforce", now)
     check("a name in the persona cast is never acted on", d.action == "skip")
+    d = lp.decide(dict(base, created=now - 30 * DAY, notes="lab5 persona (scripts/identity/provision_personas.py); "
+                                                          "role=victim"), set(), "PseudoCo Workforce", now)
+    check("persona notes are never acted on, whatever the name", d.action == "skip" and "persona" in d.detail, d.detail)
+    in_group = dict(base, groups=base["groups"] + [{"name": "PseudoCo Workforce"}])
+    d = lp.decide(dict(in_group, created=now - 8 * DAY), set(), "PseudoCo Workforce", now)
+    check("a participant also in the persona group is still a participant: disabled at day 8, and noted",
+          d.action == "disable" and "also in PseudoCo Workforce" in d.note, d.detail + d.note)
+    d = lp.decide(dict(in_group, created=now - 15 * DAY), set(), "PseudoCo Workforce", now)
+    check("... and deleted at day 15, which frees its seat", d.action == "delete", d.detail)
+    d = lp.decide(dict(base, created=now - 8 * DAY), set(), "PseudoCo Workforce", now)
+    check("no note for a participant outside the persona group", d.note == "", d.note)
     no_created = dict(base, notes=lp.notes_for("acme", "01", "2026-01-01T00:00:00+00:00"))
     d = lp.decide(no_created, set(), "PseudoCo Workforce", lp._parse_time("2026-01-09T00:00:00+00:00"))
     check("without Duo's created, the notes' time is used", d.action == "disable", d.detail)
@@ -394,9 +430,31 @@ def test_units() -> None:
           duo.admin_panel_url(API_HOST, "DUABC") == "https://admin-xxxxxxxx.duosecurity.com/users/DUABC")
 
 
+def test_signin_user_access_docs() -> None:
+    print("== the docs and tools say participants get through PseudoCo Lab: Sign-in (CII Read-Only) ==")
+    stale = re.compile(r"every lab app is limited|limit every lab app to it|limited to this group")
+    paths = ("deploy/lab5/README.md", "deploy/lab5/README.html", "docs/identity-lab-facilitator.md",
+             "docs/identity-lab-facilitator.html", "scripts/identity/provision_personas.py",
+             "scripts/identity/personas.yaml", "deploy/lab5/lab5_participants.py", "deploy/lab5/lab5_setup.py")
+    for path in paths:
+        text = (ROOT / path).read_text()
+        check(f"{path}: never says every lab app is limited to the persona group", not stale.search(text),
+              str(stale.findall(text)))
+    for path in ("deploy/lab5/README.md", "docs/identity-lab-facilitator.md"):
+        rows = [l for l in (ROOT / path).read_text().splitlines()
+                if "PseudoCo Lab: Sign-in" in l and "permitted groups" in l]
+        check(f"{path}: Sign-in's User access admits PseudoCo Workforce and CII Read-Only",
+              bool(rows) and all("PseudoCo Workforce" in l and "CII Read-Only" in l for l in rows), str(rows))
+        rows = [l for l in (ROOT / path).read_text().splitlines() if "PseudoCo VPN" in l and "permitted groups" in l]
+        check(f"{path}: VPN's User access admits PseudoCo Workforce only",
+              bool(rows) and all("PseudoCo Workforce" in l and "CII Read-Only" not in l for l in rows), str(rows))
+    check("the group every participant account joins is the one Sign-in must admit",
+          lp.CII_READ_ONLY == "CII Read-Only" and lp.SIGNIN_APP == "PseudoCo Lab: Sign-in")
+
+
 def main() -> int:
     for test in (test_units, test_up_creates_participants, test_check_and_refusals, test_expire,
-                 test_expire_after_up_cleans_the_handout):
+                 test_expire_after_up_cleans_the_handout, test_signin_user_access_docs):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

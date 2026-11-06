@@ -59,12 +59,32 @@ ul,ol{padding-left:1.4rem}
 </ul>
 <p><strong>Your Mac:</strong></p>
 <ol>
-<li>Create the tool's venv and add the Keychain items. <code>deploy/lab5/README.md</code> lists every item, including the Mac-only Provisioner and VPN keys.</li>
-<li>Once spike S1 says how Duo geolocates addresses, put real home and foreign addresses in <code>scripts/identity/personas.yaml</code>. Until then the scripts refuse to send any sign-in.</li>
-<li>Run <code>py scripts/identity/provision_personas.py</code> to create the cast: the PseudoCo Workforce group, the users and one HOTP token each. In CII, add the trusted personas' exclusions (Impossible Travel, MFA Flood, <em>A Bypass Code Was Used</em>, <em>Users Sharing Authenticators</em>).</li>
-<li>Run <code>deploy/launchd/install-lab5.sh</code> from the main checkout. It installs the daily <code>lab5-setup expire</code> (08:15) and the persona baseline plus self-check (09:20).</li>
-<li>After spikes S1, S2 and S7 pass, at least 4 weeks before the first delivery, set <code>baseline.enabled: true</code> in <code>personas.yaml</code>. From then on every persona signs in once a day. If anything is wrong, the self-check raises a macOS notification: a failed sign-in, a missing Keychain secret or counter, a disabled or locked-out persona, or a trusted persona failing a CII check.</li>
-<li><strong>T-18 gate:</strong> <code>py scripts/identity/persona_activity.py selfcheck --gate</code>. Every persona must be out of &quot;Unknown&quot;. If one is not, the delivery date moves.</li>
+<li>
+<p>Create the tool's venv and add the Keychain items. <code>deploy/lab5/README.md</code> lists every item, including the Mac-only Provisioner and VPN keys.</p>
+</li>
+<li>
+<p>Once spike S1 says how Duo geolocates addresses, put real home and foreign addresses in <code>scripts/identity/personas.yaml</code>. Until then the scripts refuse to send any sign-in.</p>
+</li>
+<li>
+<p>Run <code>py scripts/identity/provision_personas.py</code> to create the cast: the PseudoCo Workforce group, the users and one HOTP token each. In CII, add the trusted personas' exclusions (Impossible Travel, MFA Flood, <em>A Bypass Code Was Used</em>, <em>Users Sharing Authenticators</em>).</p>
+</li>
+<li>
+<p><strong>User access, in the Duo Admin Panel</strong> (<em>Applications</em>, the application, <em>User access</em>). The tools cannot set or check it. <code>deploy/lab5/README.md</code> (&quot;Duo applications&quot;) has the reasons.</p>
+<ul>
+<li><strong>PseudoCo Lab: Sign-in</strong>: <em>Enable only for permitted groups</em>, with <strong>PseudoCo Workforce</strong> and <strong>CII Read-Only</strong>. The personas are in the first group, and every participant account is in the second.</li>
+<li><strong>PseudoCo VPN</strong>: <em>Enable only for permitted groups</em>, with <strong>PseudoCo Workforce</strong> only. Only the persona scripts sign in through it.</li>
+</ul>
+<p>Plan section 4.2 limits every lab app to PseudoCo Workforce. That was written before the participant accounts: Sign-in limited that way refuses every participant, so no attendee can sign in to their own instance. Never add a participant account to PseudoCo Workforce to get around it.</p>
+</li>
+<li>
+<p>Run <code>deploy/launchd/install-lab5.sh</code> from the main checkout. It installs the daily <code>lab5-setup expire</code> (08:15) and the persona baseline plus self-check (09:20).</p>
+</li>
+<li>
+<p>After spikes S1, S2 and S7 pass, at least 4 weeks before the first delivery, set <code>baseline.enabled: true</code> in <code>personas.yaml</code>. From then on every persona signs in once a day. If anything is wrong, the self-check raises a macOS notification: a failed sign-in, a missing Keychain secret or counter, a disabled or locked-out persona, or a trusted persona failing a CII check.</p>
+</li>
+<li>
+<p><strong>T-18 gate:</strong> <code>py scripts/identity/persona_activity.py selfcheck --gate</code>. Every persona must be out of &quot;Unknown&quot;. If one is not, the delivery date moves.</p>
+</li>
 </ol>
 <p>Long trips with the Mac shut down stop the baseline. A few missed days are fine. A missed week before a delivery is not, and the self-check fails after three days without a sign-in.</p>
 <h2>The victim's takeover</h2>
@@ -96,7 +116,7 @@ ul,ol{padding-left:1.4rem}
 </li>
 <li><code>deploy/lab5/lab5-setup check &lt;workshop.yaml&gt;</code>. Every box should say <strong>ready, nothing to upgrade</strong>, and every participant account <code>PLAN</code>. It changes nothing.</li>
 <li><code>deploy/lab5/lab5-setup up &lt;workshop.yaml&gt;</code>. The boxes get their Lab 5 keys, tunnel and DNS name, HEC host and restart. Then every box that came up gets its participant account <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code>, and the handout is written.</li>
-<li><strong>Temporary passwords.</strong> <code>up</code> prints an Admin Panel link per account. Open each one, click <em>Create temporary password</em> (valid 30 days) and write it on that participant's card. The Admin API cannot set passwords.</li>
+<li><strong>Temporary passwords.</strong> <code>up</code> prints an Admin Panel link per account. Open each one, click <em>Create temporary password</em> (valid 30 days) and write it on that participant's card. The Admin API cannot set passwords. While you are in the Admin Panel, check that <strong>PseudoCo Lab: Sign-in</strong> still admits <strong>CII Read-Only</strong> (step 4 of &quot;Once, before the first delivery&quot;). <code>up</code> reminds you, because it cannot check.</li>
 <li>Print <code>~/.pseudoco-lab5/workshops/&lt;workshop&gt;/handout.html</code> and cut the cards apart.</li>
 <li><code>deploy/lab5/lab5-setup status &lt;workshop.yaml&gt;</code>. Every box should be green. Participants show &quot;no password yet&quot; until they sign in to CII and set their own.</li>
 </ol>
@@ -161,6 +181,10 @@ ul,ol{padding-left:1.4rem}
 <tr>
 <td>once</td>
 <td><code>py scripts/identity/provision_personas.py</code> (<code>--status</code>, <code>--dry-run</code>)</td>
+</tr>
+<tr>
+<td>once</td>
+<td>Admin Panel User access: Sign-in admits PseudoCo Workforce and CII Read-Only; VPN admits PseudoCo Workforce</td>
 </tr>
 <tr>
 <td>once</td>
