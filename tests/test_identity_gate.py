@@ -69,6 +69,7 @@ def _configure(on: bool = True) -> None:
 
 
 _configure(False)
+import cii_end_user_answers as cii_answers  # noqa: E402  (the shared table's coded errors, built as the Mac's are)
 import identity_isolation  # noqa: E402  (no real Duo / CII, whatever .env holds)
 
 identity_isolation.isolate(settings)
@@ -451,24 +452,46 @@ def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
     # No error is ever "no such user", whatever it says or what code it
     # carries: every code-less message of the shared table, and every error
     # of it that carries a code, in every shape such an error takes, is
-    # unavailable with nothing learned.
+    # unavailable with nothing learned. Each code is tried in each place the
+    # table covers (tests/cii_end_user_answers.py builds them, for the Mac's
+    # suite too), so a rule on a code in one place cannot pass because the
+    # table only ever put that code in another.
     shapes = table["error_shapes"]["shapes"]
     check("the shared table tries each error with data null and the error on getEndUser too (the shape the "
           "published schema gives an error there: GetEndUserOutput! is non-null)",
           any(s["data"] is None and s["path"] == ["getEndUser"] for s in shapes), str(shapes))
-    coded = table["coded_errors"]["errors"]
+    section = table["coded_errors"]
+    coded = cii_answers.coded_errors(table)
     places = {"extensions.code": lambda e: (e.get("extensions") or {}).get("code"),
               "extensions.errorType": lambda e: (e.get("extensions") or {}).get("errorType"),
               "extensions.classification": lambda e: (e.get("extensions") or {}).get("classification"),
               "errorType": lambda e: e.get("errorType"), "type": lambda e: e.get("type")}
-    check("the shared table's coded errors carry a code in each of these places (extensions.code, "
-          "extensions.errorType, extensions.classification, errorType, type), a user-not-found code among them, "
-          "and each is an error with a message and no path of its own (the shape gives it)",
-          all(any(read(c["error"]) for c in coded) for read in places.values())
-          and any(places["extensions.code"](c["error"]) == "USER_NOT_FOUND" for c in coded)
-          and all(c["error"].get("message") and "path" not in c["error"] for c in coded), str(coded)[:400])
+    spellings = {spell(words.split()) for words in ("not found", "user not found", "end user not found")
+                 for spell in (lambda w: "_".join(w).upper(), lambda w: "".join(x.capitalize() for x in w),
+                               lambda w: "-".join(w), lambda w: "_".join(w))}
+    check("the shared table's coded errors cover these places (extensions.code, extensions.errorType, "
+          "extensions.classification, errorType, type), its codes are not found, user not found and end user "
+          "not found, each spelled four ways (NOT_FOUND, NotFound, not-found, not_found), and a refused API "
+          "client's message is among its messages",
+          sorted(section["places"]) == sorted(places) and spellings <= set(section["codes"])
+          and "Permission read:user not found for this API client" in section["messages"],
+          f"{section['places']}, codes missing {sorted(spellings - set(section['codes']))}")
+    alone, together = set(), set()
+    for _, error in coded:
+        held = {place: read(error) for place, read in places.items() if read(error) is not None}
+        if len(held) == 1:
+            [(place, code)] = held.items()
+            alone.add((place, code, error.get("message")))
+        elif set(held) == set(places) and len(set(held.values())) == 1:
+            together.add((next(iter(held.values())), error.get("message")))
+    want = {(code, message) for code in section["codes"] for message in section["messages"]}
+    check("every code of the shared table is tried in each of those places alone and in all of them at once, on "
+          "each of its messages, and each is an error with a message and no path of its own (the shape gives it)",
+          alone >= {(place, code, message) for place in places for code, message in want} and together >= want
+          and all(error.get("message") and "path" not in error for _, error in coded),
+          f"{len(alone)} alone of {len(places) * len(want)}, {len(together)} at once of {len(want)}")
     for what, errors in (("code-less error message", [(m, m) for m in table["error_messages"]["messages"]]),
-                         ("error that carries a code", [(c["name"], c["error"]) for c in coded])):
+                         ("error that carries a code", coded)):
         misread = []
         for name, error in errors:
             for shape in shapes:
@@ -576,8 +599,9 @@ def test_victim_self_check_on_a_refused_client() -> None:
     # a role, a quoted word or another principal taken for the user or its
     # login), so the row said WARN "trust no record in CII yet". Each is tried
     # in every shape of the shared table, data null on getEndUser included,
-    # and so is every error of the table that carries a code: a code that
-    # reads "user not found" never makes it "no record in CII" either.
+    # and so is every error of the table that carries a code, each code in
+    # each place: a code that reads "user not found" never makes it "no
+    # record in CII" either.
     messages = ("No user (or group) permission granted to this API client",
                 "No user 'read' scope granted to this API client",
                 "Required scope user:read.all not found in access token",
@@ -586,23 +610,47 @@ def test_victim_self_check_on_a_refused_client() -> None:
                 "No user for abc123XYZ@clients",
                 "User abc123XYZ@clients not found",
                 "End user avery.kim@pseudocoassistant.com not found")
-    for message, error in [(m, m) for m in messages] + [(c["name"], c["error"])
-                                                        for c in table["coded_errors"]["errors"]]:
+
+    def row_and_advice(status, detail):
+        """Whether the row is FAIL (cannot verify), never WARN "no record in
+        CII"; and whether its advice names the API client's role or scopes and
+        the Mac's self-check, never the query alone. The row carries only the
+        code, so its advice is the facilitator's only pointer: a refused client
+        is the API client's role or scopes (its token was issued), never only
+        "the query does not match"."""
+        return ((status == "FAIL" and "cannot verify avery.kim (cii graphql_error)" in detail
+                 and "no record in CII" not in detail),
+                (all(n in detail for n in ("the CII API client's role or scopes", "persona_activity.py selfcheck",
+                                           "spikes S5/S6"))
+                 and "query does not match the tenant" not in detail and "pseudoco-lab5-cii-" not in detail))
+
+    for message in messages:
         for shape in shapes:
             where = shape["where"]
-            status, detail = _box_victim_row(fake, _error_answer(shape, error))
+            status, detail = _box_victim_row(fake, _error_answer(shape, message))
+            row, advice = row_and_advice(status, detail)
             check(f"{message!r} {where}: the box's victim row is FAIL (cannot verify), never WARN 'no record in CII'",
-                  status == "FAIL" and "cannot verify avery.kim (cii graphql_error)" in detail
-                  and "no record in CII" not in detail, f"{status}: {detail}")
-            # The row carries only the code, so its advice is the facilitator's
-            # only pointer: a refused client is the API client's role or scopes
-            # (its token was issued), never only "the query does not match".
+                  row, f"{status}: {detail}")
             check(f"{message!r} {where}: the row's advice names the API client's role or scopes and the Mac's "
                   "self-check (which prints CII's message), and never says the query alone is at fault",
-                  all(n in detail for n in ("the CII API client's role or scopes", "persona_activity.py selfcheck",
-                                            "spikes S5/S6"))
-                  and "query does not match the tenant" not in detail and "pseudoco-lab5-cii-" not in detail,
-                  detail)
+                  advice, detail)
+    coded = cii_answers.coded_errors(table)
+    wrong_row, wrong_advice = [], []
+    for name, error in coded:
+        for shape in shapes:
+            status, detail = _box_victim_row(fake, _error_answer(shape, error))
+            row, advice = row_and_advice(status, detail)
+            if not row:
+                wrong_row.append(f"{name} {shape['where']}: {status}: {detail}")
+            if not advice:
+                wrong_advice.append(f"{name} {shape['where']}: {detail}")
+    what = (f"every error of the shared table that carries a code ({len(coded)}: each code in each place, alone and "
+            f"all at once, on each message), in each of its {len(shapes)} shapes")
+    check(f"{what}: the box's victim row is FAIL (cannot verify), never WARN 'no record in CII'",
+          not wrong_row, "; ".join(wrong_row)[:2000])
+    check(f"{what}: the row's advice names the API client's role or scopes and the Mac's self-check (which prints "
+          "CII's message), and never says the query alone is at fault",
+          not wrong_advice, "; ".join(wrong_advice)[:2000])
     fake.cii_body = None
     lookup.clear_cache()
 

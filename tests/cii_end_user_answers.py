@@ -1,0 +1,49 @@
+"""The errors of the shared getEndUser answer table that carry a code.
+
+Not a suite (tests/run_all.sh does not run it): tests/test_identity_gate.py
+(the app's gate, ``identity_lookup._cii_parse``) and
+tests/test_identity_personas.py (the Mac's self-check,
+``lab5_cii.parse_end_user``) both build the coded errors of
+tests/fixtures/cii_end_user_answers.json here, so the two try the same ones.
+
+``coded_errors`` crosses the table's ``coded_errors`` section: each of its
+``codes`` in each of its ``places``, alone and then in all of them at once,
+on each of its ``messages``, then the ``errors`` it lists (two different codes
+on one error). A code the table holds is so tried in every place it covers,
+never only where an entry happened to put it.
+"""
+from __future__ import annotations
+
+import copy
+from typing import Any, Dict, List, Tuple
+
+
+def with_code(error: Dict[str, Any], place: str, code: Any) -> Dict[str, Any]:
+    """A copy of ``error`` with ``code`` at ``place``, a dotted path such as
+    ``extensions.errorType`` (``errorType`` is on the error itself)."""
+    out = copy.deepcopy(error)
+    *parents, leaf = place.split(".")
+    node = out
+    for key in parents:
+        node = node.setdefault(key, {})
+    node[leaf] = code
+    return out
+
+
+def coded_errors(table: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+    """Every error of the table's ``coded_errors``, as ``(name, error)``: each
+    code in each place alone and in every place at once, on each message, then
+    the listed errors. None carries a path: the shape it is tried in gives it."""
+    section = table["coded_errors"]
+    places = list(section["places"])
+    out: List[Tuple[str, Dict[str, Any]]] = []
+    for where in [[place] for place in places] + [places]:
+        label = where[0] if len(where) == 1 else "every place at once"
+        for code in section["codes"]:
+            for message in section["messages"]:
+                error: Dict[str, Any] = {"message": message}
+                for place in where:
+                    error = with_code(error, place, code)
+                out.append((f"{code} in {label}, on {message!r}", error))
+    out += [(entry["name"], copy.deepcopy(entry["error"])) for entry in section["errors"]]
+    return out

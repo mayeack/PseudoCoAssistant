@@ -48,6 +48,7 @@ import lab5_cii as cii  # noqa: E402
 import lab5_personas as lpers  # noqa: E402
 from lab5_common import Keychain, Lab5Error, Redactor  # noqa: E402
 from lab5_fakes import API_HOST, CII, KEYCHAIN_SECRETS, Clock, FakeCII, FakeDuo, FakeKeychain  # noqa: E402
+import cii_end_user_answers as cii_answers  # noqa: E402  (the shared table's coded errors, built as the gate's are)
 import provision_personas as pp  # noqa: E402
 import persona_activity as pa  # noqa: E402
 
@@ -623,16 +624,17 @@ def test_cii_client() -> None:
             check(f"{case['name']}: the user's details", got is not None and got["found"] is True
                   and got["trust"] == case["trust"] and got["failing_checks"] == sorted(case["failing"]), str(got))
     # No error is ever "not in CII yet", whatever it says, what code it
-    # carries or in which shape it comes (the gate runs the same table and
-    # shapes): every code-less message, and every error that carries a code.
+    # carries, where the code sits or in which shape it comes (the gate runs
+    # the same table and shapes): every code-less message, and every error
+    # that carries a code, each code in each place the table covers
+    # (tests/cii_end_user_answers.py builds them for both suites).
     shapes = table["error_shapes"]["shapes"]
     check("the shared table tries each error with data null and the error on getEndUser too (the shape the "
           "published schema gives an error there: GetEndUserOutput! is non-null)",
           any(s["data"] is None and s["path"] == ["getEndUser"] for s in shapes), str(shapes))
     for what, errors in (("code-less error message",
                           [(m, {"message": m}) for m in table["error_messages"]["messages"]]),
-                         ("error that carries a code",
-                          [(c["name"], c["error"]) for c in table["coded_errors"]["errors"]])):
+                         ("error that carries a code", cii_answers.coded_errors(table))):
         misread = []
         for name, error in errors:
             for shape in shapes:
