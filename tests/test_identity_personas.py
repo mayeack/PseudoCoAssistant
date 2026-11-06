@@ -843,15 +843,19 @@ def test_daily_job_crash_notifies() -> None:
         check("selfcheck: the crash propagates (its traceback reaches the log)", raised is not None)
         check("...after a notification naming it", w.notes and w.notes[-1][0] == "Lab 5 persona selfcheck"
               and "crashed (RuntimeError)" in w.notes[-1][1], str(w.notes))
-        bad = Path(tmp) / "broken.yaml"
+        # A long checkout path: what is wrong must still reach the notification,
+        # which keeps only its first 150 characters.
+        bad = Path(tmp) / ("a-checkout-path-" * 10) / "broken.yaml"
+        bad.parent.mkdir()
         bad.write_text("personas: [\n")
         out = io.StringIO()
         deps = pa.Deps(keychain_runner=w.keychain.runner, state_root=w.root, out=out,
                        notify=lambda title, msg: w.notes.append((title, msg)))
         rc = pa.main(["baseline", "--cast", str(bad)], deps=deps)
-        check("baseline with a personas.yaml it cannot load: exit 2, and a notification (it used to say nothing)",
-              rc == 2 and w.notes[-1][0] == "Lab 5 persona baseline" and "did not run" in w.notes[-1][1],
-              out.getvalue() + str(w.notes[-1:]))
+        check("baseline with a personas.yaml it cannot load: exit 2, and a notification (it used to say nothing) "
+              "that says why, even under a long path",
+              rc == 2 and w.notes[-1][0] == "Lab 5 persona baseline" and "did not run" in w.notes[-1][1]
+              and "not valid YAML" in w.notes[-1][1], out.getvalue() + str(w.notes[-1:]))
         # Valid YAML with a value of the wrong type: cast_from_dict raised ValueError / AttributeError, outside
         # every handler, so the 09:20 job died with a traceback and no notification.
         good = w.cast_path.read_text()

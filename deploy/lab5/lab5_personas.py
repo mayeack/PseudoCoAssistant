@@ -200,21 +200,24 @@ def load_cast(path: Optional[Path] = None) -> Cast:
         import yaml  # lazy: deploy/lab5/requirements.txt
     except ImportError:
         raise Lab5Error("PyYAML is not installed: pip install -r deploy/lab5/requirements.txt")
+    # What is wrong comes before the path in each message below: the daily
+    # jobs' notification keeps only its first 150 characters, and a long
+    # checkout path would otherwise push the reason out of it.
     try:
         doc = yaml.safe_load(path.read_text())
     except OSError as exc:
-        raise Lab5Error(f"cannot read the persona cast {path}: {exc.strerror}")
+        raise Lab5Error(f"cannot read the persona cast ({exc.strerror}): {path}")
     except yaml.YAMLError as exc:      # a typo in the file: a Lab5Error, so the daily jobs report it
         mark = getattr(exc, "problem_mark", None)
         where = f" (line {mark.line + 1})" if mark is not None else ""
-        raise Lab5Error(f"the persona cast {path} is not valid YAML{where}: fix the file")
+        raise Lab5Error(f"the persona cast is not valid YAML{where}: fix {path}")
     try:
         return cast_from_dict(doc or {})
     except (TypeError, ValueError, AttributeError) as exc:
         # Valid YAML with a value of the wrong type (`jitter_minutes: 40m`, `baseline: true`): a Lab5Error
         # too, so the daily jobs report it instead of dying with a traceback no one reads.
-        raise Lab5Error(f"the persona cast {path} has a value of the wrong type ({type(exc).__name__}: "
-                        f"{str(exc)[:120]}): fix the file")
+        raise Lab5Error(f"the persona cast has a value of the wrong type ({type(exc).__name__}: "
+                        f"{str(exc)[:120]}): fix {path}")
 
 
 # =========================================================================== state
