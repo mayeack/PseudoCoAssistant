@@ -626,7 +626,42 @@
     }
   ],
   "error_messages": {
-    "_about": "Messages of a code-less error, each tried on getEndUser (getEndUser null) and on its endUserDetails (getEndUser an object, endUserDetails null). Every one is unavailable, whatever it says: the first ones read like CII saying 'no such user', the rest are about something else (a permission, a scope, a role, a pool, a session, another principal). No error is ever read as that answer by its words.",
+    "_about": "Messages of a code-less error, each tried in every shape below: on getEndUser (getEndUser null), on its endUserDetails (getEndUser an object, endUserDetails null), on getEndUser with data null (the shape the published schema gives such an error: getEndUser returns the non-null GetEndUserOutput!, so an error on it nulls the whole of data), and with no path (data null). Every one is unavailable, whatever it says: the first ones read like CII saying 'no such user', the rest are about something else (a permission, a scope, a role, a pool, a session, another principal). No error is ever read as that answer by its words.",
+    "shapes": [
+      {
+        "where": "on getEndUser",
+        "data": {
+          "getEndUser": null
+        },
+        "path": [
+          "getEndUser"
+        ]
+      },
+      {
+        "where": "on endUserDetails",
+        "data": {
+          "getEndUser": {
+            "endUserDetails": null
+          }
+        },
+        "path": [
+          "getEndUser",
+          "endUserDetails"
+        ]
+      },
+      {
+        "where": "on getEndUser, data null (its non-null GetEndUserOutput! failed)",
+        "data": null,
+        "path": [
+          "getEndUser"
+        ]
+      },
+      {
+        "where": "with no path, data null",
+        "data": null,
+        "path": null
+      }
+    ],
     "messages": [
       "End user avery.kim@pseudocoassistant.com not found",
       "User does not exist",

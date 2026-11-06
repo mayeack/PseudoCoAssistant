@@ -18,6 +18,7 @@ httpx.MockTransport. Run standalone:
     .venv/bin/python tests/test_identity_gate.py      # exit 0 = pass
 """
 import base64
+import copy
 import inspect
 import json
 import os
@@ -447,25 +448,34 @@ def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
                   and st["trust_level"] == case["trust"]
                   and sorted(st["failing_checks"]) == sorted(case["failing"]), str(st))
     # No error is ever "no such user", whatever it says: every message of the
-    # shared table, on both places such an error could sit, is unavailable.
-    shapes = (("on getEndUser", {"getEndUser": None}, ["getEndUser"]),
-              ("on endUserDetails", {"getEndUser": {"endUserDetails": None}}, ["getEndUser", "endUserDetails"]))
+    # shared table, in every shape such an error takes, is unavailable.
+    shapes = table["error_messages"]["shapes"]
+    check("the shared table tries each message with data null and the error on getEndUser too (the shape the "
+          "published schema gives an error there: GetEndUserOutput! is non-null)",
+          any(s["data"] is None and s["path"] == ["getEndUser"] for s in shapes), str(shapes))
     misread = []
     for message in table["error_messages"]["messages"]:
-        for where, data, path in shapes:
-            fake.cii_body = {"data": data, "errors": [{"message": message, "path": path}]}
+        for shape in shapes:
+            fake.cii_body = _error_answer(shape, message)
             lookup.clear_cache()
             st = lookup.lookup("avery.kim")
             closed = gate.decide(st, fail_open=False)
             opened = gate.decide(st, fail_open=True)
             if (st["sources"]["cii"] != "unavailable" or closed["reasons"] != ["identity_unavailable"]
                     or opened["check"] != "unavailable"):
-                misread.append(f"{message!r} {where}: {st['sources']['cii']}, {closed['verdict']}")
-    check("every error message of the shared table, on getEndUser and on endUserDetails: unavailable, never "
-          "'no such user' (fail-closed blocks it as not verifiable, fail-open says unavailable)",
-          not misread, "; ".join(misread))
+                misread.append(f"{message!r} {shape['where']}: {st['sources']['cii']}, {closed['verdict']}")
+    check(f"every error message of the shared table, in each of its {len(shapes)} shapes (on getEndUser, on "
+          "endUserDetails, on getEndUser with data null, with no path): unavailable, never 'no such user' "
+          "(fail-closed blocks it as not verifiable, fail-open says unavailable)", not misread, "; ".join(misread))
     fake.cii_body = None
     lookup.clear_cache()
+
+
+def _error_answer(shape, message):
+    """A getEndUser answer carrying one code-less error with this message, in
+    one of the shared table's shapes (``error_messages.shapes``)."""
+    error = {"message": message, **({"path": shape["path"]} if shape["path"] else {})}
+    return {"data": copy.deepcopy(shape["data"]), "errors": [error]}
 
 
 def _box_victim_row(fake, body=None):
@@ -524,20 +534,23 @@ def test_victim_self_check_on_a_refused_client() -> None:
     _configure(True)
     fake = _fresh_fake()
     fake.set_user("avery.kim", trust="NEUTRAL")
+    shapes = json.loads((ROOT / "tests" / "fixtures" / "cii_end_user_answers.json").read_text())[
+        "error_messages"]["shapes"]
     # Each once read as CII's "no such user" through the wording rule (a scope,
     # a role, a quoted word or another principal taken for the user or its
-    # login), so the row said WARN "trust no record in CII yet".
+    # login), so the row said WARN "trust no record in CII yet". Each is tried
+    # in every shape of the shared table, data null on getEndUser included.
     for message in ("No user (or group) permission granted to this API client",
                     "No user 'read' scope granted to this API client",
                     "Required scope user:read.all not found in access token",
                     "Permission read:user not found for this API client",
                     "Role end-user does not exist",
                     "No user for abc123XYZ@clients",
-                    "User abc123XYZ@clients not found"):
-        for where, data, path in (("on getEndUser", {"getEndUser": None}, ["getEndUser"]),
-                                  ("on endUserDetails", {"getEndUser": {"endUserDetails": None}},
-                                   ["getEndUser", "endUserDetails"])):
-            status, detail = _box_victim_row(fake, {"data": data, "errors": [{"message": message, "path": path}]})
+                    "User abc123XYZ@clients not found",
+                    "End user avery.kim@pseudocoassistant.com not found"):
+        for shape in shapes:
+            where = shape["where"]
+            status, detail = _box_victim_row(fake, _error_answer(shape, message))
             check(f"{message!r} {where}: the box's victim row is FAIL (cannot verify), never WARN 'no record in CII'",
                   status == "FAIL" and "cannot verify avery.kim (cii graphql_error)" in detail
                   and "no record in CII" not in detail, f"{status}: {detail}")

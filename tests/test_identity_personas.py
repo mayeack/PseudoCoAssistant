@@ -626,22 +626,27 @@ def test_cii_client() -> None:
         else:
             check(f"{case['name']}: the user's details", got is not None and got["found"] is True
                   and got["trust"] == case["trust"] and got["failing_checks"] == sorted(case["failing"]), str(got))
-    # No error is ever "not in CII yet", whatever it says (the gate runs the same table).
-    shapes = (("on getEndUser", {"getEndUser": None}, ["getEndUser"]),
-              ("on endUserDetails", {"getEndUser": {"endUserDetails": None}}, ["getEndUser", "endUserDetails"]))
+    # No error is ever "not in CII yet", whatever it says or in which shape it
+    # comes (the gate runs the same table and shapes).
+    shapes = table["error_messages"]["shapes"]
+    check("the shared table tries each message with data null and the error on getEndUser too (the shape the "
+          "published schema gives an error there: GetEndUserOutput! is non-null)",
+          any(s["data"] is None and s["path"] == ["getEndUser"] for s in shapes), str(shapes))
     misread = []
     for message in table["error_messages"]["messages"]:
-        for where, data, path in shapes:
+        for shape in shapes:
+            error = {"message": message, **({"path": shape["path"]} if shape["path"] else {})}
             try:
-                got = cii.parse_end_user({"data": data, "errors": [{"message": message, "path": path}]})
+                got = cii.parse_end_user({"data": copy.deepcopy(shape["data"]), "errors": [error]})
             except Lab5Error as exc:
                 got = None
                 if "never read as" not in str(exc):
-                    misread.append(f"{message!r} {where}: the error does not say why ({exc})")
+                    misread.append(f"{message!r} {shape['where']}: the error does not say why ({exc})")
             if got is not None:
-                misread.append(f"{message!r} {where}: {got}")
-    check("every error message of the shared table, on getEndUser and on endUserDetails: a failed query "
-          "(Lab5Error), never 'not in CII yet'", not misread, "; ".join(misread)[:600])
+                misread.append(f"{message!r} {shape['where']}: {got}")
+    check(f"every error message of the shared table, in each of its {len(shapes)} shapes (on getEndUser, on "
+          "endUserDetails, on getEndUser with data null, with no path): a failed query (Lab5Error), never 'not in "
+          "CII yet'", not misread, "; ".join(misread)[:600])
 
 
 # =========================================================================== launchd
