@@ -9,10 +9,30 @@ the app side of two of them:
   identity's session.
 
 Everything here is **inert unless `DUO_ENABLED`**. With it off, Labs 0-4
-behave exactly as before. The only additive differences are an `identity_risk`
-stage frame on every turn, which the UI hides on anonymous turns,
-`identity_session: false` in `GET /api/server-info`, and the identity fields
-on the events of a signed-in turn. The chat page sends no identity request.
+behave exactly as before, and the chat page sends no identity request. The
+only differences are additive (plan section 5 lists them for the Labs 0-4
+regression):
+
+- an `identity_risk` stage frame on every turn, which the UI hides on
+  anonymous turns;
+- `identity_session: false` and the closed `gated.duo_signin` gate (with its
+  reason) in `GET /api/server-info`, so the Settings page's host capabilities
+  show a grey "Duo sign-in: unavailable" chip, as they do for NIM and
+  NemoClaw on a box without them;
+- `enduser.id` and `client.address` on the workflow span, from both graph
+  call sites. It is a GenAI span, so with `SPLUNK_AO_O11Y_TOKEN` set the
+  collector's Agent Observability overlay carries the client address there
+  too; the HTTP server span (`net.peer.ip`) and the governance events'
+  `client_address` already carried it;
+- an indexed `enduser_id` column on `audit_logs`, filled from each audit
+  event's `enduser_id` (the `session_started` event already carried one);
+- every log record's text cut to 64 KB before it is redacted
+  (`backend/logging/redaction.py` `MAX_SCAN_CHARS`), with a
+  ` [TRUNCATED: N more characters]` marker. A longer console line, such as
+  the console-only governance JSON of a very long chat message, is therefore
+  no longer valid JSON. The governance JSONL files, the database and HEC are
+  written directly, not through a log record, and are never cut;
+- the identity fields on the events of a signed-in turn.
 
 There is no identity broker. Each instance holds its own Duo and Cisco
 Identity Intelligence (CII) credentials in `.env` for the workshop's lifetime,

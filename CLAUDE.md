@@ -229,7 +229,9 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   Nothing a request sends is ever registered, so no input can blank a username
   out of the logs. A new credential goes on that configured-secrets list.
   Every pattern must stay linear-time: a test times them all on adversarial
-  input.
+  input. Every record's text is first cut to 64 KB (`MAX_SCAN_CHARS`, with a
+  `[TRUNCATED: N more characters]` marker), Duo on or off; the governance
+  JSONL, the database and HEC are not log records and are never cut.
 - **Inert means no requests.** `chat.js` polls `GET /api/identity/me` only
   while `gated.duo_signin` is open or `/api/server-info` `identity_session`
   says this browser holds a session (or the page already shows one). With

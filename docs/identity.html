@@ -32,10 +32,31 @@ identity before the model runs.</li>
 identity's session.</li>
 </ul>
 <p>Everything here is <strong>inert unless <code>DUO_ENABLED</code></strong>. With it off, Labs 0-4
-behave exactly as before. The only additive differences are an <code>identity_risk</code>
-stage frame on every turn, which the UI hides on anonymous turns,
-<code>identity_session: false</code> in <code>GET /api/server-info</code>, and the identity fields
-on the events of a signed-in turn. The chat page sends no identity request.</p>
+behave exactly as before, and the chat page sends no identity request. The
+only differences are additive (plan section 5 lists them for the Labs 0-4
+regression):</p>
+<ul>
+<li>an <code>identity_risk</code> stage frame on every turn, which the UI hides on
+anonymous turns;</li>
+<li><code>identity_session: false</code> and the closed <code>gated.duo_signin</code> gate (with its
+reason) in <code>GET /api/server-info</code>, so the Settings page's host capabilities
+show a grey &quot;Duo sign-in: unavailable&quot; chip, as they do for NIM and
+NemoClaw on a box without them;</li>
+<li><code>enduser.id</code> and <code>client.address</code> on the workflow span, from both graph
+call sites. It is a GenAI span, so with <code>SPLUNK_AO_O11Y_TOKEN</code> set the
+collector's Agent Observability overlay carries the client address there
+too; the HTTP server span (<code>net.peer.ip</code>) and the governance events'
+<code>client_address</code> already carried it;</li>
+<li>an indexed <code>enduser_id</code> column on <code>audit_logs</code>, filled from each audit
+event's <code>enduser_id</code> (the <code>session_started</code> event already carried one);</li>
+<li>every log record's text cut to 64 KB before it is redacted
+(<code>backend/logging/redaction.py</code> <code>MAX_SCAN_CHARS</code>), with a
+<code> [TRUNCATED: N more characters]</code> marker. A longer console line, such as
+the console-only governance JSON of a very long chat message, is therefore
+no longer valid JSON. The governance JSONL files, the database and HEC are
+written directly, not through a log record, and are never cut;</li>
+<li>the identity fields on the events of a signed-in turn.</li>
+</ul>
 <p>There is no identity broker. Each instance holds its own Duo and Cisco
 Identity Intelligence (CII) credentials in <code>.env</code> for the workshop's lifetime,
 and they are rotated afterwards (plan section 12.1).</p>

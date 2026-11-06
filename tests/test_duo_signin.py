@@ -2145,6 +2145,12 @@ def test_redaction_cap() -> None:
     finally:
         root.removeHandler(lines)
         root.setLevel(saved_level)
+    note = "z" * (cap + 30000)
+    governance_logger.file_handler.write_governance_log({"event_id": "cap-check", "note": note})
+    kept = [json.loads(x) for x in governance_logger.file_handler.governance_log.read_text().splitlines()
+            if '"cap-check"' in x]
+    check("the governance JSONL is written directly, never cut by the log cap (docs/identity.md)",
+          len(kept) == 1 and kept[0]["note"] == note)
     line = lines.lines[-1][1] if lines.lines else ""
     m = marker.search(line)
     check("a 1 MB chat message logged by any module: logged at once, cut to 64 KB and marked",
