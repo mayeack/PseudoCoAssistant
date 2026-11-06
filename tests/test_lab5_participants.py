@@ -2016,11 +2016,19 @@ def test_victim_clash_codes_and_handouts() -> None:
         rc, out = h.run("up")
         check("acme swaps to jordan.reyes on every box and card", rc == 0, out)
         rc, out = globex("check")
-        check("...globex is still refused avery.kim: Duo holds the codes acme's old cards carried, and down can "
-              "delete them (or they expire)",
+        check("...globex is still refused avery.kim: Duo holds the codes acme's old cards carried; acme is still "
+              "running, so the refusal offers handouts --revoke (no box touched), never down (or they expire)",
               rc == 2 and "Duo still holds bypass codes for avery.kim from its cards" in out
-              and "run `lab5-setup down` with acme's workshop file first, or wait until" in out
+              and "run `lab5-setup handouts --revoke` with acme's workshop file" in out
+              and "run `lab5-setup down`" not in out and ", or wait until" in out
               and "still admit" not in out, out)
+        boxes_before = {nn: len(b.commands) for nn, b in h.world.boxes.items()}
+        rc, out = h.run("handouts", "--revoke")
+        check("...acme follows that advice: handouts --revoke deletes its cards' earlier codes and runs nothing on a box",
+              rc == 0 and {nn: len(b.commands) for nn, b in h.world.boxes.items()} == boxes_before, out)
+        rc, out = globex("check")
+        check("...and globex may take avery.kim while acme keeps running on jordan.reyes",
+              "is still in use by workshop" not in out, out)
         rc, out = h.run("down")
         rc, out = globex("handouts")
         check("once acme has run down (its boxes gone, the recorded codes deleted), globex may take avery.kim",
