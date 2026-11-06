@@ -533,29 +533,39 @@ def _cii_not_found(body: Any) -> bool:
     return True
 
 
+def _cii_details(details: Mapping[str, Any]) -> Dict[str, Any]:
+    """The level of trust and the failing checks an ``endUserDetails`` holds."""
+    score = details.get("endUserTrustScore") if isinstance(details.get("endUserTrustScore"), Mapping) else {}
+    level = str(score.get("levelOfTrust") or "").strip().upper() or None
+    return {"trust_level": level if level in TRUST_LEVELS or level is None else "OTHER",
+            "failing_checks": _sanitize_checks(details.get("failingChecks"))}
+
+
 def _cii_parse(body: Any) -> Dict[str, Any]:
     """One GraphQL answer to ``{state, trust_level, failing_checks, [error], fetched_at}``.
 
-    CII's "no such user" (``_cii_not_found``) is ``not_found``. Any other
-    answer that carries errors is ``unavailable``, even with details in it: a
-    partial answer (say, ``failingChecks`` failed and came back null) would
-    otherwise read as a user with no failing checks. Details with no error
-    are ``ok``; anything else is ``unavailable``."""
+    CII's "no such user" (``_cii_not_found``) is ``not_found``. Details with no
+    error are ``ok``. Any other answer that carries errors is ``unavailable``,
+    details or not: a partial answer (say, ``failingChecks`` failed and came
+    back null) would otherwise read as a user with no failing checks. What a
+    partial answer did say is kept, though: GraphQL nulls only the fields that
+    failed, so a level of trust or failing checks in its details are CII's
+    own, and the gate blocks on them (a block resting on what was learned
+    still blocks) while the check stays ``unavailable``. Anything else is
+    ``unavailable`` with nothing learned."""
     if _cii_not_found(body):
         return {"state": NOT_FOUND, "trust_level": None, "failing_checks": [], "fetched_at": _now_iso()}
     if not isinstance(body, Mapping):
         return _unavailable("bad_response")
-    if body.get("errors"):
-        return _unavailable("graphql_error")
     data = body.get("data")
     end_user = data.get("getEndUser") if isinstance(data, Mapping) else None
     details = end_user.get("endUserDetails") if isinstance(end_user, Mapping) else None
-    if not isinstance(details, Mapping):
+    learned = _cii_details(details) if isinstance(details, Mapping) else {}
+    if body.get("errors"):
+        return {**_unavailable("graphql_error"), "trust_level": None, "failing_checks": [], **learned}
+    if not learned:
         return _unavailable("bad_response")
-    score = details.get("endUserTrustScore") if isinstance(details.get("endUserTrustScore"), Mapping) else {}
-    level = str(score.get("levelOfTrust") or "").strip().upper() or None
-    return {"state": OK, "trust_level": level if level in TRUST_LEVELS or level is None else "OTHER",
-            "failing_checks": _sanitize_checks(details.get("failingChecks")), "fetched_at": _now_iso()}
+    return {"state": OK, **learned, "fetched_at": _now_iso()}
 
 
 def _cii_fetch(login: str) -> Dict[str, Any]:

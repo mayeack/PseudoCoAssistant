@@ -422,10 +422,21 @@ def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
         closed = gate.decide(st, fail_open=False)
         opened = gate.decide(st, fail_open=True)
         if expect == "unavailable":
-            check(f"{name}: CII unavailable, never not_found; fail-closed blocks, fail-open says unavailable",
+            check(f"{name}: CII unavailable, never not_found, and never a clean check",
                   st["sources"] == {"duo": "ok", "cii": "unavailable"} and st["available"] is False
-                  and closed["verdict"] == "block" and closed["reasons"] == ["identity_unavailable"]
-                  and opened["verdict"] == "allow" and opened["check"] == "unavailable", f"{st} {closed}")
+                  and closed["check"] == "unavailable" and opened["check"] == "unavailable", f"{st} {closed}")
+            check(f"{name}: what it did say is kept (trust {case.get('trust')}, failing {case.get('failing', [])})",
+                  st["trust_level"] == case.get("trust")
+                  and sorted(st["failing_checks"]) == sorted(case.get("failing", [])), str(st))
+            if case.get("reasons"):
+                check(f"{name}: a block resting on what was learned blocks under fail-open and fail-closed alike",
+                      closed["verdict"] == opened["verdict"] == "block"
+                      and closed["reasons"] == opened["reasons"] == case["reasons"]
+                      and not gate.unverified_only(opened), f"{opened} {closed}")
+            else:
+                check(f"{name}: nothing against the user: fail-closed blocks as not verifiable, fail-open allows",
+                      closed["verdict"] == "block" and closed["reasons"] == ["identity_unavailable"]
+                      and opened["verdict"] == "allow" and opened["reasons"] == [], f"{opened} {closed}")
         elif expect == "not_found":
             check(f"{name}: CII's 'no such user', an answer (check ok)",
                   st["sources"] == {"duo": "ok", "cii": "not_found"} and st["available"] is True
@@ -435,6 +446,55 @@ def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
                   st["sources"] == {"duo": "ok", "cii": "ok"} and st["available"] is True
                   and st["trust_level"] == case["trust"]
                   and sorted(st["failing_checks"]) == sorted(case["failing"]), str(st))
+    fake.cii_body = None
+    lookup.clear_cache()
+
+
+def test_victim_self_check_on_a_partial_answer() -> None:
+    print("lab5-setup status: the box's own victim check (VICTIM_CHECK_SCRIPT) blocks on what a partial answer said")
+    import contextlib
+    import io
+    from types import SimpleNamespace
+
+    sys.path.insert(0, str(ROOT / "deploy" / "lab5"))
+    import lab5_setup  # noqa: E402  (imports cleanly without paramiko / PyYAML / duo_client)
+
+    _configure(True)
+    fake = _fresh_fake()
+    fake.set_user("avery.kim", trust="NEUTRAL")
+    table = json.loads((ROOT / "tests" / "fixtures" / "cii_end_user_answers.json").read_text())
+    cwd, argv = os.getcwd(), list(sys.argv)
+
+    def box_says(body):
+        """The script's own output on the box, here against the fakes."""
+        fake.cii_body = body
+        lookup.clear_cache()
+        out = io.StringIO()
+        sys.argv = ["-", str(ROOT), "avery.kim"]
+        try:
+            with contextlib.redirect_stdout(out):
+                exec(compile(lab5_setup.VICTIM_CHECK_SCRIPT, "<victim-check>", "exec"), {"__name__": "__main__"})
+        finally:
+            sys.argv = argv
+            os.chdir(cwd)
+        return out.getvalue()
+
+    ctx = SimpleNamespace(ws=SimpleNamespace(victim="avery.kim"))
+    box = SimpleNamespace(checkout=str(ROOT))
+    for name, verdict, needles in (
+            ("details present, but failingChecks failed and came back null (an untrusted user)", "OK",
+             ["blocks avery.kim: trust_untrusted", "cii graphql_error"]),
+            ("details present, the trust score failed, two blocking checks known", "OK",
+             ["blocks avery.kim: mfa_flood, impossible_travel"]),
+            ("details present, a neutral user whose failingChecks failed (never a clean check)", "FAIL",
+             ["cannot verify avery.kim (cii graphql_error)", "spikes S5/S6"])):
+        body = next(c["body"] for c in table["cases"] if c["name"] == name)
+        printed = box_says(body)
+        rem = SimpleNamespace(run=lambda argv, stdin=None, timeout=60.0: SimpleNamespace(rc=0, out=printed, err=""))
+        status, detail = lab5_setup.victim_blocked(ctx, box, rem)
+        check(f"{name}: the box's victim row is {verdict}, and never sends the facilitator to the Keychain",
+              status == verdict and all(n in detail for n in needles) and "pseudoco-lab5-cii-" not in detail,
+              f"{status}: {detail}")
     fake.cii_body = None
     lookup.clear_cache()
 
@@ -998,6 +1058,7 @@ def main() -> int:
         test_signer()
         test_lookup()
         test_cii_not_found_is_an_answer_only_by_its_shape()
+        test_victim_self_check_on_a_partial_answer()
         test_decide()
         test_engines()
         test_store_generation()

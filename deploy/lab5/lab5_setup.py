@@ -465,6 +465,16 @@ print(json.dumps(answer))
 # What to fix when a box's lookup cannot ask one source about the victim.
 _SOURCE_FIX = {"duo": "the Status app's keys (Keychain items pseudoco-lab5-duo-status-ikey / -skey, then re-run up)",
                "cii": "the CII API client (Keychain items pseudoco-lab5-cii-*, then re-run up)"}
+# CII did answer, but with an error (a partial answer) or in a shape the gate
+# cannot read: its credentials worked, so they are not the thing to check.
+_CII_ANSWER_ERRORS = ("graphql_error", "bad_response")
+_CII_ANSWER_FIX = ("CII's answer, which carried an error or a shape the gate cannot read (a passing upstream "
+                   "failure is gone by the next status; one that stays means the query does not match the tenant: "
+                   "spikes S5/S6 pin it)")
+
+
+def _source_fix(source: str, error: Optional[str]) -> str:
+    return _CII_ANSWER_FIX if source == "cii" and error in _CII_ANSWER_ERRORS else _SOURCE_FIX[source]
 
 
 def victim_check_command(box: BoxSpec, victim: str) -> Tuple[List[str], bytes]:
@@ -478,9 +488,12 @@ def victim_blocked(ctx: "Ctx", box: BoxSpec, rem: Any) -> Tuple[str, str]:
     the box's own Status and CII credentials, so a key Duo or CII refuses is
     caught here instead of on lab day: with IDENTITY_FAIL_OPEN (the default)
     a lookup that cannot answer lets the victim chat, and nothing else says
-    so. FAIL when the box cannot ask Duo or CII about the victim, or Duo has
-    no such user; WARN while CII does not show it failing yet (before the
-    takeover); OK when the gate blocks it (contained included)."""
+    so. FAIL when Duo has no such user, or when the box cannot ask Duo or CII
+    about the victim and its gate would let it chat; WARN while CII does not
+    show it failing yet (before the takeover); OK when the gate blocks it
+    (contained included), even on a lookup that did not answer in full: a
+    block resting on what was learned holds (the row names what did not
+    answer)."""
     victim = ctx.ws.victim
     argv, script = victim_check_command(box, victim)
     try:
@@ -505,15 +518,17 @@ def victim_blocked(ctx: "Ctx", box: BoxSpec, rem: Any) -> Tuple[str, str]:
     down = [k for k in ("duo", "cii") if sources.get(k) not in ("ok", "not_found")]
     if sources.get("duo") == "not_found":
         return "FAIL", f"Duo has no user {victim}: provision the cast (scripts/identity/provision_personas.py)"
-    if down:
-        said = ", ".join(f"{k} {errors.get(k) or sources.get(k) or 'no answer'}" for k in down)
-        fixes = "; ".join(_SOURCE_FIX[k] for k in down if not (k == "cii" and errors.get("cii") == "no_login"))
-        return "FAIL", (f"the box cannot verify {victim} ({said}): with IDENTITY_FAIL_OPEN on, its gate would let "
-                        f"the victim chat. Check {fixes or _SOURCE_FIX['duo']}")
+    said = ", ".join(f"{k} {errors.get(k) or sources.get(k) or 'no answer'}" for k in down)
+    fixes = "; ".join(_source_fix(k, errors.get(k)) for k in down if not (k == "cii" and errors.get("cii") == "no_login"))
     reasons = list(answer.get("reasons") or [])
     if answer.get("verdict") == "block":
         contained = " (contained: its Duo account is disabled)" if "duo_disabled" in reasons else ""
-        return "OK", f"the box's Identity Risk Gate blocks {victim}: {', '.join(reasons)}{contained}"
+        partial = (f"; {said} did not answer in full, so the block rests on what was learned "
+                   f"(check {fixes or _SOURCE_FIX['duo']})" if down else "")
+        return "OK", f"the box's Identity Risk Gate blocks {victim}: {', '.join(reasons)}{contained}{partial}"
+    if down:
+        return "FAIL", (f"the box cannot verify {victim} ({said}): with IDENTITY_FAIL_OPEN on, its gate would let "
+                        f"the victim chat. Check {fixes or _SOURCE_FIX['duo']}")
     trust = answer.get("trust_level") or ("no record in CII yet" if sources.get("cii") == "not_found" else "unknown")
     checks = ", ".join(answer.get("failing_checks") or []) or "none"
     return "WARN", (f"the box's Identity Risk Gate would let {victim} chat now (trust {trust}, failing checks: "

@@ -131,6 +131,12 @@ before any screen or model.
      a request-level error (no `data`), an error elsewhere or without a path,
      or a partial answer (say, `failingChecks` failed and came back null), so
      it can never pass for a clean check.
+   - What a partial answer did say still counts. GraphQL nulls only the
+     fields that failed, so a trust level of `UNTRUSTED`, or a failing MFA
+     Flood or Impossible Travel check, in its details blocks the turn whether
+     or not the gate fails open, while `identity_check` stays `unavailable`.
+     The box's victim row in `lab5-setup status` is then OK and names what
+     did not answer.
    - The Mac's persona self-check (`deploy/lab5/lab5_cii.py`) reads CII by
      the same rule, and both run the cases in
      `tests/fixtures/cii_end_user_answers.json`.

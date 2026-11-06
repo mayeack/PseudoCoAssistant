@@ -1112,13 +1112,27 @@ def test_status_victim_check() -> None:
              {"sources": {"duo": "ok", "cii": "ok"}, "errors": {}, "available": True, "verdict": "block",
               "reasons": ["duo_disabled", "mfa_flood"]},
              "OK", ["blocks avery.kim: duo_disabled, mfa_flood (contained"]),
+            ("after the takeover, a partial CII answer that still says UNTRUSTED: the gate blocks on it",
+             {"sources": {"duo": "ok", "cii": "unavailable"}, "errors": {"cii": "graphql_error"}, "available": False,
+              "verdict": "block", "reasons": ["trust_untrusted"], "trust_level": "UNTRUSTED", "failing_checks": []},
+             "OK", ["blocks avery.kim: trust_untrusted", "cii graphql_error did not answer in full",
+                    "spikes S5/S6"], ["pseudoco-lab5-cii-"]),
+            ("a partial CII answer with nothing against the victim: FAIL, and CII's answer is what to check",
+             {"sources": {"duo": "ok", "cii": "unavailable"}, "errors": {"cii": "graphql_error"}, "available": False,
+              "verdict": "allow", "reasons": [], "trust_level": "NEUTRAL", "failing_checks": []},
+             "FAIL", ["cannot verify avery.kim (cii graphql_error)", "spikes S5/S6"], ["pseudoco-lab5-cii-"]),
+            ("contained while CII refuses the API client: still OK, and the row says what to check",
+             {"sources": {"duo": "ok", "cii": "unavailable"}, "errors": {"cii": "token_http_401"}, "available": False,
+              "verdict": "block", "reasons": ["duo_disabled"]},
+             "OK", ["blocks avery.kim: duo_disabled (contained", "cii token_http_401", "pseudoco-lab5-cii-"]),
         )
-        for name, answer, status, needles in cases:
+        for name, answer, status, needles, *absent in cases:
             box.victim_answer = answer
             rc, out = run_cli(world, tmp, "status", "--only", "1")
             row = next((l for l in out.splitlines() if l.split()[1:2] == ["victim"]), "")
             check(f"{name}: {status}" + (" (the run fails)" if status == "FAIL" else ""),
                   row.split()[:1] == [status] and all(n in row for n in needles)
+                  and not any(n in row for n in (absent[0] if absent else []))
                   and (rc == 1) == (status == "FAIL"), row or out)
         real = box._dispatch
         box._dispatch = lambda argv, stdin, sudo: (remote.CmdResult(1, "", "ModuleNotFoundError: No module named "

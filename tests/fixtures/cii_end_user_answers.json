@@ -1,5 +1,5 @@
 {
-  "_about": "getEndUser answers that the app's gate (backend/services/identity_lookup._cii_parse) and the Mac's persona self-check (deploy/lab5/lab5_cii.parse_end_user) must read the same way. expect: found (details), not_found (CII's 'no such user'), unavailable (anything else). Run by tests/test_identity_gate.py and tests/test_identity_personas.py.",
+  "_about": "getEndUser answers that the app's gate (backend/services/identity_lookup._cii_parse) and the Mac's persona self-check (deploy/lab5/lab5_cii.parse_end_user) must read the same way. expect: found (details), not_found (CII's 'no such user'), unavailable (anything else). An unavailable case may carry trust, failing and reasons: what a partial answer did say, which the gate keeps and still blocks on (reasons: its block; none: nothing against the user), while the self-check reads every unavailable answer as a failed query. Run by tests/test_identity_gate.py and tests/test_identity_personas.py.",
   "login": "avery.kim@pseudocoassistant.com",
   "cases": [
     {
@@ -206,8 +206,13 @@
       }
     },
     {
-      "name": "details present, but failingChecks failed and came back null",
+      "name": "details present, but failingChecks failed and came back null (an untrusted user)",
       "expect": "unavailable",
+      "trust": "UNTRUSTED",
+      "failing": [],
+      "reasons": [
+        "trust_untrusted"
+      ],
       "body": {
         "data": {
           "getEndUser": {
@@ -229,6 +234,116 @@
               "getEndUser",
               "endUserDetails",
               "failingChecks"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "details present, a neutral user whose failingChecks failed (never a clean check)",
+      "expect": "unavailable",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "reasons": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": null,
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": [
+          {
+            "message": "Upstream timeout",
+            "path": [
+              "getEndUser",
+              "endUserDetails",
+              "failingChecks"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "details present, the trust score failed, two blocking checks known",
+      "expect": "unavailable",
+      "trust": null,
+      "failing": [
+        "MFA Flood",
+        "Impossible Travel"
+      ],
+      "reasons": [
+        "mfa_flood",
+        "impossible_travel"
+      ],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [
+                "MFA Flood",
+                "Impossible Travel"
+              ],
+              "endUserTrustScore": null
+            }
+          }
+        },
+        "errors": [
+          {
+            "message": "Upstream timeout",
+            "path": [
+              "getEndUser",
+              "endUserDetails",
+              "endUserTrustScore"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "details present, only lastUpdated failed (a field the gate never reads)",
+      "expect": "unavailable",
+      "trust": "UNTRUSTED",
+      "failing": [
+        "MFA Flood"
+      ],
+      "reasons": [
+        "trust_untrusted",
+        "mfa_flood"
+      ],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [
+                "MFA Flood"
+              ],
+              "endUserTrustScore": {
+                "levelOfTrust": "UNTRUSTED",
+                "lastUpdated": null
+              }
+            }
+          }
+        },
+        "errors": [
+          {
+            "message": "Upstream timeout",
+            "path": [
+              "getEndUser",
+              "endUserDetails",
+              "endUserTrustScore",
+              "lastUpdated"
             ]
           }
         ]

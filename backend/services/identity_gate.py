@@ -17,8 +17,10 @@ verdict. **Block** when any of these is known:
 says ``check: "unavailable"``. With ``IDENTITY_FAIL_OPEN`` (the default, A3)
 the turn is allowed; with it off the turn is blocked as not verifiable. A block
 that rests on what *was* learned wins over either: a disabled Duo account is
-a block even while CII is down, and a CII block holds while Duo is down (the
-lookup asks CII with the email Duo last gave). "No such user" is an answer,
+a block even while CII is down, a CII block holds while Duo is down (the
+lookup asks CII with the email Duo last gave), and so does an ``UNTRUSTED``
+or a failing check in a partial CII answer (one with an error elsewhere in
+it, which leaves the check unavailable). "No such user" is an answer,
 not an outage: a user CII has no record of yet is checked (``ok``) and,
 with nothing against it, allowed.
 

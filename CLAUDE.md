@@ -259,11 +259,13 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   The CII query is the one constant `CII_END_USER_QUERY`.
 - **Fail open (A3):** an unavailable lookup allows the turn with
   `identity_check="unavailable"`; a block resting on what WAS learned still
-  blocks. CII is asked with the email Duo last gave (`remembered_email`, in
-  memory only), so once Duo has answered for a user since the app started, a
-  Duo outage never hides that user's CII block; a source that was not asked is
-  `unavailable`, never `not_found`, and "no such user" from CII is an answer
-  (`identity_check="ok"`), not an outage.
+  blocks, an `UNTRUSTED` or failing check in a partial CII answer included
+  (`_cii_parse` keeps what the answer did say; the check stays
+  `unavailable`). CII is asked with the email Duo last gave
+  (`remembered_email`, in memory only), so once Duo has answered for a user
+  since the app started, a Duo outage never hides that user's CII block; a
+  source that was not asked is `unavailable`, never `not_found`, and "no such
+  user" from CII is an answer (`identity_check="ok"`), not an outage.
 - **No side effects in the chain.** The gate never revokes and never writes
   to Duo or CII. Revocation is the middleware's pull: Duo `disabled` revokes
   the session (a tombstone); `locked out` only blocks turns. `revoke()` is one
