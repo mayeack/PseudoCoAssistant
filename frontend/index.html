@@ -477,12 +477,12 @@
                                 </label>
                                 <div>
                                     <span class="text-sm font-semibold text-gray-700">Auto-Generate Sessions</span>
-                                    <p class="text-xs text-gray-500">Automatically creates realistic consultation sessions (1 per minute)</p>
+                                    <p class="text-xs text-gray-500">Automatically creates realistic consultation sessions (1 per minute). Turns off after 60 minutes.</p>
                                 </div>
                             </div>
                             <div class="flex items-center space-x-3">
-                                <div id="autoPromptStats" class="text-xs text-indigo-600 hidden">
-                                    Sessions: <span id="autoPromptCount">0</span>
+                                <div id="autoPromptStats" class="text-xs text-indigo-600 text-right whitespace-nowrap hidden">
+                                    Sessions: <span id="autoPromptCount">0</span><span id="autoPromptRemaining" class="block hidden"></span>
                                 </div>
                                 <div id="autoPromptStatus" class="px-3 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-600">
                                     Off
@@ -758,6 +758,6 @@
         </div>
     </div>
 
-    <script src="/static/js/chat.js?v=33"></script>
+    <script src="/static/js/chat.js?v=34"></script>
 </body>
 </html>

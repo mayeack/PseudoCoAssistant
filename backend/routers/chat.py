@@ -733,12 +733,12 @@ Do you accept these terms and wish to continue?
 # Auto-prompter endpoints
 @router.post("/auto-prompt/start")
 async def start_auto_prompter():
-    """Start automatic session generation (one session per minute)"""
+    """Start automatic session generation (one session per minute, off after 60 minutes)"""
     if auto_prompter.is_running:
         return {"status": "already_running", "message": "Auto-prompter is already running", **auto_prompter.stats}
     
     await auto_prompter.start()
-    return {"status": "started", "message": "Auto-prompter started - will create one session per minute", **auto_prompter.stats}
+    return {"status": "started", "message": f"Auto-prompter started - will create one session per minute and turn off after {(auto_prompter.stats['duration_s'] or auto_prompter.DEFAULT_DURATION_S) // 60} minutes", **auto_prompter.stats}
 
 
 @router.post("/auto-prompt/stop")
