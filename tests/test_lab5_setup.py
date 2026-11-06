@@ -1287,6 +1287,20 @@ def test_victim_clash_after_down() -> None:
           len(out) == 1 and "run `lab5-setup handouts --revoke` with acme's workshop file" in out[0]
           and "instance(s) 01" in out[0] and "run `lab5-setup down`" not in out[0]
           and f"or wait until {lp_minute(now + 7200)}" in out[0], str(out))
+    check("...one sentence of steps, `first` right after the step and the wait after it, then a sentence of what "
+          "the step costs that room: the codes its teams hold now stop working until the new cards are handed out",
+          len(out) == 1 and f"run `lab5-setup handouts --revoke` with acme's workshop file first, or wait until "
+                            f"{lp_minute(now + 7200)}. Workshop acme is still running (instance(s) 01), and `down` "
+                            "would end it: `handouts --revoke` touches no box" in out[0]
+          and "end that room first" not in out[0] and "the ones its teams hold now" in out[0]
+          and out[0].endswith("persona sign-ins fail until the new cards are printed and handed out"), str(out))
+    late = batch(revoked_at=iso(now - 60), codes=[{"persona": "avery.kim", "user_id": "U1", "ids": ["DU1"]}],
+                 unknown=[{"persona": "avery.kim", "user_id": "U1", "until": iso(now + 900)}])
+    out = ls.victim_clashes(world({"01": swapped, "02": gone}, [late], saved_victim="jordan.reyes"), ws, now)
+    check("...and with a lost create as well: the step first, then its wait, or the long wait alone; the cost after",
+          len(out) == 1 and f"run `lab5-setup handouts --revoke` with acme's workshop file first, then wait until "
+                            f"{lp_minute(now + 900)}, or wait until {lp_minute(now + 7200)}. Workshop acme is still "
+                            "running" in out[0] and "end that room first" not in out[0], str(out))
     root = world({"01": gone}, [failed], saved_victim="jordan.reyes")
     check("...once that room has run down, a re-run of down retries the delete",
           "run `lab5-setup down` with acme's workshop file first" in ls.victim_clashes(root, ws, now)[0])

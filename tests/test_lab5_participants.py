@@ -2015,6 +2015,7 @@ def test_victim_clash_codes_and_handouts() -> None:
                                                  .replace("  fallback: jordan.reyes\n", "  fallback: casey.wong\n"))
         rc, out = h.run("up")
         check("acme swaps to jordan.reyes on every box and card", rc == 0, out)
+        held = card_codes(h.handout()["l5-acme-01"])       # the card team 01 holds now
         rc, out = globex("check")
         check("...globex is still refused avery.kim: Duo holds the codes acme's old cards carried; acme is still "
               "running, so the refusal offers handouts --revoke (no box touched), never down (or they expire)",
@@ -2022,10 +2023,23 @@ def test_victim_clash_codes_and_handouts() -> None:
               and "run `lab5-setup handouts --revoke` with acme's workshop file" in out
               and "run `lab5-setup down`" not in out and ", or wait until" in out
               and "still admit" not in out, out)
+        check("...and it says what that costs acme: the codes on the cards its teams hold now stop working until the "
+              "new cards are printed and handed out",
+              "the ones its teams hold now" in out
+              and "persona sign-ins fail until the new cards are printed and handed out" in out, out)
         boxes_before = {nn: len(b.commands) for nn, b in h.world.boxes.items()}
         rc, out = h.run("handouts", "--revoke")
         check("...acme follows that advice: handouts --revoke deletes its cards' earlier codes and runs nothing on a box",
               rc == 0 and {nn: len(b.commands) for nn, b in h.world.boxes.items()} == boxes_before, out)
+        auth = duo.AuthAPI(h.duo.transport("auth", *tls_vpn()), API_HOST)
+        sign_in = lambda user, code: auth.auth_passcode(user, code, "198.51.100.200", "ATTENDEE-LAPTOP")["result"]  # noqa
+        fresh = card_codes(h.handout()["l5-acme-01"])
+        check("...as the refusal said: every code on the card team 01 holds now (jordan.reyes and the trusted "
+              "personas) is denied, and the new card's codes work",
+              sorted(held) == sorted(fresh) == sorted(["jordan.reyes", "marcus.bell", "elena.sousa", "grace.lin"])
+              and all(sign_in(user, codes[0]) == "deny" for user, codes in held.items())
+              and all(sign_in(user, codes[0]) == "allow" for user, codes in fresh.items()),
+              f"held {held} fresh {fresh}")
         rc, out = globex("check")
         check("...and globex may take avery.kim while acme keeps running on jordan.reyes",
               "is still in use by workshop" not in out, out)

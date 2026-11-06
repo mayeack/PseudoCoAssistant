@@ -1601,8 +1601,12 @@ def _clash_advice(other: Path, admits: Sequence[str], unknown_boxes: Sequence[st
     When only codes hold the victim and the other room is still running on
     another victim (a swap to its fallback leaves the old victim's codes on
     its cards), `down` would end that room: `handouts --revoke` deletes its
-    cards' earlier codes and touches no box, so that is the step offered."""
+    cards' earlier codes and touches no box, so that is the step offered.
+    Its cost follows the steps, in a sentence of its own: it deletes the
+    codes on the cards that room's teams hold now too, so their persona
+    sign-ins fail until the new cards are printed and handed out."""
     acts: List[str] = []
+    note = ""
     restore = ([f"the box record(s) of instance(s) {', '.join(unknown_boxes)}"] if unknown_boxes else []) + \
               ([f"the participant record(s) of instance(s) {', '.join(unread_cards)}"] if unread_cards else [])
     if restore:
@@ -1610,9 +1614,11 @@ def _clash_advice(other: Path, admits: Sequence[str], unknown_boxes: Sequence[st
     if admits or unknown_boxes:
         acts.append(f"run `lab5-setup down` with {other.name}'s workshop file")
     elif (deletable or unread_cards) and running:
-        acts.append(f"run `lab5-setup handouts --revoke` with {other.name}'s workshop file, which is still running "
-                    f"(instance(s) {', '.join(running)}): it deletes the earlier codes on its cards, these included, "
-                    f"and puts fresh ones on them to print again, and it touches no box; `down` would end that room")
+        acts.append(f"run `lab5-setup handouts --revoke` with {other.name}'s workshop file")
+        note = (f". Workshop {other.name} is still running (instance(s) {', '.join(running)}), and `down` would end "
+                f"it: `handouts --revoke` touches no box, but it deletes every earlier code on the cards its workshop "
+                f"file lists, these and the ones its teams hold now, and puts fresh ones on them, so its teams' "
+                f"persona sign-ins fail until the new cards are printed and handed out")
     elif deletable or unread_cards:
         acts.append(f"run `lab5-setup down` with {other.name}'s workshop file")
     last_wait = max(undeletable) if undeletable else None
@@ -1625,7 +1631,7 @@ def _clash_advice(other: Path, admits: Sequence[str], unknown_boxes: Sequence[st
         advice += f"{', then ' if acts else ''}wait until {participants.minute(last_wait)}"
     if wait_alone is not None and acts:
         advice += f", or wait until {participants.minute(wait_alone)}"
-    return advice
+    return advice + note
 
 
 def run_parallel(ctx: Ctx, boxes: Sequence[BoxSpec], fn: Callable[[Ctx, BoxSpec], BoxReport]) -> List[BoxReport]:
