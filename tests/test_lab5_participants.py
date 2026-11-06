@@ -27,14 +27,19 @@ What it pins:
     reuse_count sign-ins and until valid_secs; they reach no output, log or
     state file; the personas' HOTP tokens stay script-only; a re-run keeps a
     valid batch and reissues one whose count, reuse_count or valid_hours
-    changed, `handouts` issues a fresh one; a room persona in bypass status,
-    disabled or locked out stops every card's batch in check, up and
-    handouts, and status shows each persona's Duo status; a Duo error or a
+    changed, `handouts` issues a fresh one; a room persona in bypass status
+    or disabled stops every card's batch in check, up and handouts, and
+    status shows each persona's Duo status; a locked-out one (temporary,
+    plan 4.4) gets no reset advice: the other personas' codes go on and the
+    card is partial, not failed, until handouts is retried; a Duo error or a
     handout lock that times out fails only its card, and up still prints its
     RESULT, the handout, the password links and the reminders (exit 1, not
     2), recording a partial batch as incomplete; each batch records the ids
     that Duo lists as new around each create (none when that is ambiguous),
     `down` and `handouts --revoke` delete exactly those, and `expire` none;
+    a create whose answer is lost is checked by listing again: exactly count
+    new ids are recorded (down deletes them), and a listing that fails too
+    records unknown ids, which down names instead of claiming all deleted;
   * a room persona in a Duo group whose status is Bypass or Disabled (read
     with GET /admin/v1/users/{id}/groups, in either case) stops every card's
     batch like one that is not active, and `status` names the group;
@@ -889,9 +894,8 @@ def deletes_since(h: Harness, start: int) -> List[str]:
 
 
 def test_bypass_persona_status() -> None:
-    print("== a room persona that is not active in Duo (bypass, disabled, locked out): no batch, each card fails ==")
-    for status, said in (("bypass", "is in bypass status in Duo"), ("disabled", "is disabled in Duo"),
-                         ("locked out", "is locked out in Duo")):
+    print("== a room persona that is not active in Duo (bypass, disabled): no batch, each card fails ==")
+    for status, said in (("bypass", "is in bypass status in Duo"), ("disabled", "is disabled in Duo")):
         with tempfile.TemporaryDirectory() as tmp:
             h = Harness(Path(tmp))
             h.duo.by_name("marcus.bell")["status"] = status
@@ -1267,7 +1271,7 @@ def test_handouts_revoke_waits_for_the_new_batch() -> None:
               and "print the changed card(s) again, instance 01. " in out
               and "--revoke deleted none of its earlier codes" in out, out)
 
-        h.duo.by_name("grace.lin")["status"] = "locked out"
+        h.duo.by_name("grace.lin")["status"] = "disabled"
         cards = h.handout()
         start = len(h.duo.calls)
         rc, out = h.run("handouts", "--revoke")
@@ -1477,6 +1481,127 @@ def test_contained_victim() -> None:
         check("... and up issues no code (exit 1)", rc == 1 and not bypass_posts(h), out)
 
 
+def test_bypass_locked_out_is_temporary() -> None:
+    print("== a locked-out room persona: no reset advice, the other codes go on, the card is partial (plan 4.4) ==")
+    others = ["avery.kim", "elena.sousa", "grace.lin"]
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        rc, out = h.run("up")
+        before = {r["instance"]: card_codes(r) for r in h.handout().values()}
+        h.duo.by_name("marcus.bell")["status"] = "locked out"      # an attendee's typos, mid-lab
+        changes = len(h.duo.mutations())
+        rc, out = h.run("check")
+        row = persona_row(out, "marcus.bell")
+        check("check: the locked-out persona is a WARN that says it unlocks on its own and to retry handouts, with "
+              "no reset; the cards keep their batches (exit 0)",
+              rc == 0 and row.startswith("  WARN") and "locked out in Duo" in row and "unlocks it on its own" in row
+              and "about 15 minutes" in row and "lab5-setup handouts" in row and "--reset" not in out
+              and out.count("OK       instance 0") == 2 and len(h.duo.mutations()) == changes, out)
+        start = len(h.duo.calls)
+        rc, out = h.run("handouts", "--only", "1")
+        new1 = card_codes(h.handout()["l5-acme-01"])
+        partial = [l for l in out.splitlines() if l.split()[:3] == ["PARTIAL", "instance", "01"]]
+        check("handouts --only 1: card 01 gets the other personas' codes, none for the locked-out one, and is "
+              "reported partial, not failed (exit 0, no reset advice)",
+              rc == 0 and list(new1) == others and posted_users(h, start) == others and partial
+              and "none for marcus.bell, locked out in Duo" in partial[0] and "--only 1` once it is unlocked" in partial[0]
+              and "--reset" not in out and "set it active" not in out
+              and "RESULT: handouts: 0 card(s) ok, 0 failed; 1 partial (instance 01)" in out
+              and card_codes(h.handout()["l5-acme-02"]) == before["02"], out)
+        check("... the new codes work; the locked-out persona's code on card 02 is left on it",
+              all(try_code(h, n, c[0]) == "allow" for n, c in new1.items())
+              and "marcus.bell" in card_codes(h.handout()["l5-acme-02"]))
+        start = len(h.duo.calls)
+        rc, out = h.run("up")
+        check("up while it is still locked out: no new code, card 01 kept but partial, card 02 kept, RESULT names "
+              "the partial card (exit 0)",
+              rc == 0 and not posted_users(h, start) and "PARTIAL  instance 01" in out
+              and "OK       instance 02" in out
+              and "persona bypass codes partial on 1 card(s) (instance 01)" in out and "--reset" not in out, out)
+        rc, out = h.run("status")
+        check("status: the persona is a WARN, card 01 partial, card 02's code for it works again once unlocked "
+              "(exit 0)",
+              rc == 0 and persona_row(out, "marcus.bell").startswith("  WARN") and "PARTIAL  instance 01" in out
+              and "marcus.bell (locked out: its code works again once Duo unlocks it)" in out, out)
+        h.duo.by_name("marcus.bell")["status"] = "active"          # auto-revert, about 15 minutes later
+        rc, out = h.run("handouts", "--only", "1")
+        check("once Duo unlocks it, a retried handouts --only 1 gives card 01 the whole room's codes (exit 0)",
+              rc == 0 and list(card_codes(h.handout()["l5-acme-01"])) == CARD_PERSONAS
+              and "CHANGED  instance 01" in out and "partial" not in out, out)
+        h.duo.by_name("marcus.bell")["status"] = "locked out"
+        h.duo.join_group("marcus.bell", "Lab Shortcuts", "Bypass")
+        start = len(h.duo.calls)
+        rc, out = h.run("handouts")
+        check("a locked-out persona in a bypass group still stops every card (plan 4.3)",
+              rc == 1 and persona_row(out, "marcus.bell").startswith("  FAIL")
+              and "Lab Shortcuts (status Bypass)" in out and not posted_users(h, start)
+              and out.count("no bypass codes issued") == 2, out)
+
+
+def test_bypass_lost_create_answer() -> None:
+    print("== a create whose answer is lost: the ids are listed again, recorded, and down deletes them ==")
+    import http.client
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        elena = h.duo.by_name("elena.sousa")["user_id"]
+        seen: List[str] = []
+
+        def lost(uid: str) -> None:      # Duo makes elena.sousa's code for card 02, then the answer is cut off
+            seen.append(uid)
+            if uid == elena and seen.count(elena) == 2:
+                raise http.client.IncompleteRead(b'["1', 20)
+        h.duo.bypass_hooks.append(lost)
+        rc, out = h.run("up")
+        h.duo.bypass_hooks.clear()
+        batch = record(h, "02")["bypass_batches"][-1]
+        ids = {e["persona"]: e["ids"] for e in batch["codes"]}
+        on_cards = {c for r in h.handout().values() for cs in card_codes(r).values() for c in cs}
+        check("the lost answer: card 02 fails with Duo's answer lost and checked, not 'cannot reach Duo'",
+              rc == 1 and "Duo's answer was lost (IncompleteRead); checked which codes were created: 1" in out
+              and "cannot reach Duo" not in out and "(instance 02)" in out, out)
+        check("... the code Duo made is on no card, and its id is recorded under its persona",
+              len(ids.get("elena.sousa", [])) == 1 and code_value(h, ids["elena.sousa"][0])
+              and code_value(h, ids["elena.sousa"][0]) not in on_cards and batch["complete"] is False
+              and batch["unknown"] == [], str(batch))
+        rc, out = h.run("down", "--only", "2")
+        check("down deletes it with the rest of the incomplete batch",
+              rc == 0 and code_value(h, ids["elena.sousa"][0]) == "" and "deleted 3 bypass code(s)" in out
+              and "every batch these cards had is deleted or has expired" in out, out)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        elena = h.duo.by_name("elena.sousa")["user_id"]
+        seen = []
+
+        def lost_twice(uid: str) -> None:  # the answer is lost, and the listing that checks it fails too
+            seen.append(uid)
+            if uid == elena and seen.count(elena) == 2:
+                h.duo.fail[("GET", f"/admin/v1/users/{elena}/bypass_codes")] = DuoFailure(500, 50000, "Internal error")
+                raise socket_timeout()
+        h.duo.bypass_hooks.append(lost_twice)
+        rc, out = h.run("up")
+        h.duo.bypass_hooks.clear()
+        h.duo.fail.clear()
+        batch = record(h, "02")["bypass_batches"][-1]
+        check("the check fails too: card 02 says so, and its batch records elena.sousa's ids as unknown",
+              rc == 1 and "Duo's answer was lost" in out and "that listing failed too" in out
+              and "their ids are unknown" in out and "cannot reach Duo" not in out
+              and batch["unknown"] == ["elena.sousa"] and "elena.sousa" not in [e["persona"] for e in batch["codes"]],
+              str(batch) + out)
+        lost_code = len(h.duo.live_codes("elena.sousa"))
+        rc, out = h.run("down")
+        check("down deletes what it recorded, names the unknown ids and never claims every batch is deleted",
+              "every batch these cards had is deleted or has expired" not in out
+              and "elena.sousa: Duo's answer to a create of the batch issued" in out
+              and "on instance 02, Duo's answer to a create was lost" in out
+              and len(h.duo.live_codes("elena.sousa")) == 1 == lost_code - 1, out)
+
+
+def socket_timeout() -> OSError:
+    import socket
+    return socket.timeout("timed out")
+
+
 def test_signin_policy_docs() -> None:
     print("== the Sign-in policy allows bypass code + hardware token (plan 4.4) ==")
     sys.path.insert(0, str(ROOT / "scripts" / "identity"))
@@ -1519,7 +1644,7 @@ def main() -> int:
                  test_old_handout_gets_codes, test_bypass_persona_status, test_bypass_errors_are_per_card,
                  test_bypass_settings_change_reissues, test_bypass_revocation, test_bypass_persona_groups,
                  test_handouts_revoke_waits_for_the_new_batch, test_duo_transport_errors, test_contained_victim,
-                 test_signin_policy_docs):
+                 test_bypass_locked_out_is_temporary, test_bypass_lost_create_answer, test_signin_policy_docs):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

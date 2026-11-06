@@ -22,11 +22,16 @@ module never reads their secrets or computes their passcodes.
   workshop.yaml names. A room persona whose Duo status is anything but
   ``active`` stops every card's batch: bypass status (plan 4.3 forbids it: Duo
   skips the second factor, so anyone with an instance's access key could sign
-  in as it), disabled, locked out. So does one in any Duo group that is not
-  Active (``GET /admin/v1/users/{id}/groups``): plan 4.3 forbids a bypass group
-  too, and Duo lets no member of a disabled group sign in. ``check``, ``up``
-  and ``handouts`` fail each card and name the persona; ``status`` shows each
+  in as it), disabled. So does one in any Duo group that is not Active
+  (``GET /admin/v1/users/{id}/groups``): plan 4.3 forbids a bypass group too,
+  and Duo lets no member of a disabled group sign in. ``check``, ``up`` and
+  ``handouts`` fail each card and name the persona; ``status`` shows each
   persona's Duo status and groups.
+* **Locked out is temporary.** Duo unlocks a locked-out persona on its own in
+  about 15 minutes (lockout auto-revert, plan 4.4), so it gets no reset advice
+  mid-lab: a card issued meanwhile carries the other personas' codes and is
+  reported partial, not failed, with ``handouts --only N`` to retry once it is
+  unlocked. Its groups still refuse every card as above.
 * **A contained victim is skipped, not refused.** The lab ends with the room
   disabling its victim in Duo (claim 4). Once this workshop has given the
   victim codes, a disabled victim is that containment: its codes are left off
@@ -48,8 +53,12 @@ their ids. So each create is bracketed by two listings of the persona's
 bypass_code ids: exactly ``count`` new ids are this batch's and go in the
 participant record. Any other difference (another room issued codes for the
 same persona in between) records none for that persona: those codes stop only
-at ``valid_secs``. ``down`` and ``handouts --revoke`` delete the recorded ids
-with ``DELETE /admin/v1/bypass_codes/{id}``, and only ids that are still listed
+at ``valid_secs``. A create whose answer is lost (a timeout, an answer cut off
+or unreadable) may still have made its codes, which are then on no card: the
+ids are listed again and exactly ``count`` new ones are recorded the same way;
+if that listing fails too, the batch records the persona as ``unknown`` and
+``down`` says those codes were not deleted. ``down`` and ``handouts --revoke``
+delete the recorded ids with ``DELETE /admin/v1/bypass_codes/{id}``, and only ids that are still listed
 under the persona they were recorded for. ``valid_hours`` is capped at 72, so
 an untracked batch is dead long before ``expire`` disables a participant at
 day 7.
@@ -66,7 +75,8 @@ only the cards that really changed are named for printing.
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
@@ -106,6 +116,12 @@ CONTAINED = ("contained: disabled in Duo after this workshop gave it bypass code
              "on. Keep it disabled through the debrief, and reset it after the workshop ({reset})")
 NOT_CONTAINED = ("; this workshop has given it no bypass code yet, so this is not the lab's containment: an earlier "
                  "delivery left it disabled")
+# A room persona locked out by failed sign-ins: lockout auto-reverts in about 15 minutes (plan 4.4), so no reset.
+LOCKED = ("is locked out in Duo (too many failed sign-ins). Duo unlocks it on its own in about 15 minutes (lockout "
+          "auto-revert, plan 4.4), so it needs no reset. Until then none of its bypass codes work and it gets no new "
+          "one: a card issued now goes without its codes (partial), and the other personas' codes go on. Retry "
+          "`lab5-setup handouts <workshop.yaml> --only N` for those cards once it is unlocked (if it stays locked out, "
+          "auto-revert is off: unlock it in the Admin Panel)")
 
 Row = Tuple[str, str, str]
 Persona = Tuple[str, str]              # (role on the card: victim | trusted, username)
@@ -200,21 +216,34 @@ def setting_changes(batch: Batch, settings: Settings) -> List[str]:
 
 
 def _state(batch: Optional[Batch], personas: Sequence[Persona], settings: Settings, now: float,
-           contained: Sequence[str] = ()) -> str:
-    """A card's batch against the personas it should cover. A contained
-    victim counts on neither side: a batch issued before the containment,
-    with its codes, still covers the room, and so does one issued after it,
-    without them."""
+           absent: Sequence[str] = ()) -> str:
+    """A card's batch against the personas it should cover. A persona that
+    gets no code in this run (``absent``: the contained victim, a locked-out
+    persona) counts on neither side: a batch issued before, with its codes,
+    still covers the room, and so does one issued meanwhile, without them
+    (missing() tells that partial one apart)."""
     if batch is None:
         return "none"
-    if ({p for p in batch.personas if p[1] not in contained}
-            != {p for p in personas if p[1] not in contained}):
+    if ({p for p in batch.personas if p[1] not in absent}
+            != {p for p in personas if p[1] not in absent}):
         return "other"
     if batch.valid_until is None or batch.valid_until <= now:
         return "expired"
     if setting_changes(batch, settings):
         return "settings"
     return "valid"
+
+
+def missing(batch: Optional[Batch], locked: Sequence[str]) -> List[str]:
+    """The locked-out personas a card's batch has no codes for: that card is
+    partial until a batch issued after they unlock covers them."""
+    have = {name for _, name in batch.personas} if batch else set()
+    return [name for name in locked if name not in have]
+
+
+def _partial_note(nn: str, names: Sequence[str]) -> str:
+    return (f"none for {', '.join(names)}, locked out in Duo (see its row above): partial. Retry `lab5-setup handouts "
+            f"<workshop.yaml> --only {int(nn)}` once it is unlocked (about 15 minutes), then print the card again")
 
 
 WHY = {"none": "no persona codes on its card yet", "other": "its codes are for other personas",
@@ -229,19 +258,23 @@ def why(state: str, batch: Optional[Batch], settings: Settings) -> str:
 
 
 # =========================================================================== Duo
-def persona_users(admin: AdminAPI, personas: Sequence[Persona],
-                  victim_issued: bool = False) -> Tuple[Dict[str, Dict[str, Any]], List[Row], List[str]]:
+def persona_users(admin: AdminAPI, personas: Sequence[Persona], victim_issued: bool = False
+                  ) -> Tuple[Dict[str, Dict[str, Any]], List[Row], List[str], List[str]]:
     """Each room persona's Duo user, status and groups, looked up once.
     ``victim_issued``: this workshop has given the room's victim codes
     (victim_had_codes), so a disabled victim is the lab's containment.
 
     Returns (the users that get codes, by name; one report row per persona;
-    the contained victim, if any). A FAIL row means no code may be issued to
-    that name, so no card gets a batch in that run. The contained victim gets
-    a SKIP row: no code, and no reset before the debrief."""
+    the contained victim, if any; the locked-out personas). A FAIL row means
+    no code may be issued to that name, so no card gets a batch in that run.
+    The contained victim gets a SKIP row: no code, and no reset before the
+    debrief. A locked-out persona (in Active groups only) gets a WARN row: no
+    code in this run, no reset (Duo unlocks it on its own, plan 4.4), and the
+    cards issued meanwhile are partial."""
     users: Dict[str, Dict[str, Any]] = {}
     rows: List[Row] = []
     contained: List[str] = []
+    locked: List[str] = []
     for role, name in personas:
         try:
             user = admin.user_by_name(name)
@@ -257,7 +290,8 @@ def persona_users(admin: AdminAPI, personas: Sequence[Persona],
             continue
         status = str(user.get("status") or "").strip().lower()
         held = role == "victim" and status == "disabled" and victim_issued
-        if status != "active" and not held:
+        lockout = status == "locked out"     # temporary: its groups still decide whether the cards are refused
+        if status != "active" and not held and not lockout:
             reason = STATUS_WHY.get(status, f"is {status or 'without a status'} in Duo, not active")
             if role == "victim" and status == "disabled":
                 reason += NOT_CONTAINED
@@ -278,11 +312,15 @@ def persona_users(admin: AdminAPI, personas: Sequence[Persona],
             contained.append(name)
             rows.append(("SKIP", name, CONTAINED.format(reset=RESET.format(name=name))))
             continue
+        if lockout:
+            locked.append(name)
+            rows.append(("WARN", name, LOCKED))
+            continue
         users[name] = user
         named = ", ".join(str(g.get("name") or g.get("group_id") or "?") for g in groups)
         rows.append(("OK", name, f"active in Duo ({'the room victim' if role == 'victim' else 'trusted'}); "
                                  + (f"its Duo groups are Active: {named}" if groups else "in no Duo group")))
-    return users, rows, contained
+    return users, rows, contained, locked
 
 
 def _group_failure(bad: Sequence[Dict[str, Any]]) -> str:
@@ -346,11 +384,14 @@ def headroom_rows(admin: AdminAPI, users: Dict[str, Dict[str, Any]], needed: int
 
 
 def _record(env: participants.Env, nn: str, now: float, settings: Settings, entries: Sequence[Entry],
-            tracked: Dict[str, Tuple[str, List[str]]], untracked: Sequence[str], complete: bool) -> str:
+            tracked: Dict[str, Tuple[str, List[str]]], untracked: Sequence[str], complete: bool,
+            unknown: Sequence[str] = ()) -> str:
     """The participant record keeps every batch's times and the ids of its
     codes (never a code), so `down` and `handouts --revoke` can delete them
     and `down` can say when an untracked one stops working after the handout
-    is gone. Returns the batch's id in the record."""
+    is gone. ``unknown``: personas whose create lost its answer and could not
+    be checked, so Duo may hold codes of theirs whose ids nobody knows.
+    Returns the batch's id in the record."""
     path = env.record_path(nn)
     rec = read_json(path)
     batch_id = secrets.token_hex(4)
@@ -359,7 +400,7 @@ def _record(env: participants.Env, nn: str, now: float, settings: Settings, entr
         "personas": [name for _, name, _ in entries], "codes_each": settings.count,
         "reuse_count": settings.reuse_count, "valid_hours": settings.valid_hours, "complete": complete,
         "codes": [{"persona": name, "user_id": uid, "ids": ids} for name, (uid, ids) in tracked.items()],
-        "untracked": list(untracked)})
+        "untracked": list(untracked), "unknown": list(unknown)})
     write_json_private(path, rec)
     return batch_id
 
@@ -379,11 +420,13 @@ def _blocked(checks: Sequence[Row]) -> List[str]:
 @dataclass
 class Issued:
     """What issue() did: the report rows, the instance numbers whose card did
-    not end up as it should, and those whose card now carries a new batch
-    (print them again)."""
+    not end up as it should, those whose card now carries a new batch (print
+    them again), and those whose batch lacks a locked-out persona's codes
+    (partial, not failed: retry handouts once it is unlocked)."""
     rows: List[Row]
     failed: List[str]
     changed: List[str]
+    partial: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -420,14 +463,16 @@ def issue(env: participants.Env, numbers: Sequence[str], personas: Sequence[Pers
 
     checks: List[Row] = []
     issued: Dict[str, str] = {}
+    partial: List[str] = []
     if present:
-        users, checks, contained = persona_users(env.admin, personas, victim_had_codes(env, personas))
+        users, checks, contained, locked = persona_users(env.admin, personas, victim_had_codes(env, personas))
         blocked = _blocked(checks)
-        wanted = [p for p in personas if p[1] not in contained]
+        absent = contained + locked
+        wanted = [p for p in personas if p[1] not in absent]
         todo: List[Tuple[str, str, Optional[Batch], str]] = []
         kept: List[Tuple[str, Batch]] = []
         for nn, name, batch in present:
-            state = _state(batch, wanted, settings, now, contained)
+            state = _state(batch, wanted, settings, now, absent)
             if state == "valid" and not force:
                 kept.append((nn, batch))
             else:
@@ -439,23 +484,30 @@ def issue(env: participants.Env, numbers: Sequence[str], personas: Sequence[Pers
                 rows.append(("FAIL", f"instance {nn}", f"keeps its batch (valid until {until}), but "
                                                        f"{', '.join(blocked)} must be fixed: see the persona "
                                                        "row(s) above"))
+            elif missing(batch, locked):        # issued during the lockout: still partial
+                partial.append(nn)
+                rows.append(("PARTIAL", f"instance {nn}", f"kept: valid until {until}; "
+                                                          + _partial_note(nn, missing(batch, locked))))
             else:
                 rows.append(("OK", f"instance {nn}", f"kept: valid until {until}; `lab5-setup handouts` issues a "
                                                      "fresh batch"))
-        if todo and not blocked:
+        if todo and not blocked and wanted:
             room = headroom_rows(env.admin, users, settings.count * len(todo), now)
             checks += room
             blocked = _blocked(room)
         for nn, name, old, reason in todo:
-            if blocked:
+            if blocked or not wanted:           # not wanted: every room persona is locked out or contained
                 failed.append(nn)
                 rows.append(("FAIL", f"instance {nn}", "no bypass codes issued: see the persona row(s) above. The card "
                                                        f"keeps {'its earlier codes' if old else 'no persona codes'}"))
                 continue
-            done = _issue_card(env, nn, name, wanted, users, settings, redactor, handout, now, old, reason, contained)
+            done = _issue_card(env, nn, name, wanted, users, settings, redactor, handout, now, old, reason, contained,
+                               locked)
             rows.append(done.row)
             if done.row[0] == "FAIL":
                 failed.append(nn)
+            elif done.row[0] == "PARTIAL":
+                partial.append(nn)
             if done.written:
                 changed.append(nn)
             if done.batch_id:
@@ -475,26 +527,35 @@ def issue(env: participants.Env, numbers: Sequence[str], personas: Sequence[Pers
             rows += more
             if not ok and nn not in failed:
                 failed.append(nn)
-    return Issued(checks + rows, failed, changed)
+    return Issued(checks + rows, failed, changed, partial)
 
 
 def _issue_card(env: participants.Env, nn: str, name: str, personas: Sequence[Persona],
                 users: Dict[str, Dict[str, Any]], settings: Settings, redactor: Redactor,
                 handout: participants.Handout, now: float, old: Optional[Batch],
-                reason: str, contained: Sequence[str] = ()) -> _CardResult:
-    """One card's batch for ``personas`` (the room's, less a contained victim)."""
+                reason: str, contained: Sequence[str] = (), locked: Sequence[str] = ()) -> _CardResult:
+    """One card's batch for ``personas`` (the room's, less a contained victim
+    and any locked-out persona, which makes the card partial)."""
     label = f"instance {nn}"
     entries: List[Entry] = []
     tracked: Dict[str, Tuple[str, List[str]]] = {}
     untracked: List[str] = []
+    unknown: List[str] = []
     error = ""
+    until = now + settings.valid_secs
     for role, persona in personas:
         uid = str(users[persona]["user_id"])
         try:
             before = _code_ids(env.admin, uid)
-            codes = env.admin.create_bypass_codes(uid, settings.count, settings.reuse_count, settings.valid_secs)
         except Lab5Error as exc:
             error = f"bypass codes not issued for {persona}: {_why_failed(exc)}"
+            break
+        try:
+            codes = env.admin.create_bypass_codes(uid, settings.count, settings.reuse_count, settings.valid_secs)
+        except Lab5Error as exc:
+            found = (_lost_answer(env.admin, uid, persona, before, settings, until, exc, tracked, untracked, unknown)
+                     if _answer_lost(exc) else _why_failed(exc))
+            error = f"bypass codes not issued for {persona}: {found}"
             break
         for code in codes:
             redactor.add(code)
@@ -507,7 +568,6 @@ def _issue_card(env: participants.Env, nn: str, name: str, personas: Sequence[Pe
             tracked[persona] = (uid, new)
         else:
             untracked.append(persona)
-    until = now + settings.valid_secs
     written = False
     if not error:
         try:
@@ -520,28 +580,64 @@ def _issue_card(env: participants.Env, nn: str, name: str, personas: Sequence[Pe
             error = f"the handout was not written ({exc})"
     batch_id: Optional[str] = None
     unrecorded = ""
-    if entries:
+    if entries or tracked or untracked or unknown:     # a lost answer may have made codes that are on no card
         try:
-            batch_id = _record(env, nn, now, settings, entries, tracked, untracked, complete=written)
+            batch_id = _record(env, nn, now, settings, entries, tracked, untracked, complete=written, unknown=unknown)
         except (Lab5Error, OSError, ValueError) as exc:     # ValueError: an unreadable record
             unrecorded = (f"; its participant record was not written ({exc}), so down cannot delete these codes: "
                           f"they stop working at {participants.minute(until)}")
     keeps = f"The card keeps {'its earlier codes' if old else 'no persona codes'}"
     if error:
-        partial = ""
+        incomplete = ""
         if entries and batch_id:
             made = sum(len(codes) for _, _, codes in entries)
-            partial = (f". The {made} code(s) issued before that ({', '.join(p for _, p, _ in entries)}) are recorded "
-                       "as an incomplete batch, which down and handouts --revoke delete")
-        return _CardResult(("FAIL", label, f"{error}. {keeps}{partial}{unrecorded}; re-run"))
+            incomplete = (f". The {made} code(s) issued before that ({', '.join(p for _, p, _ in entries)}) are "
+                          "recorded as an incomplete batch, which down and handouts --revoke delete")
+        return _CardResult(("FAIL", label, f"{error}. {keeps}{incomplete}{unrecorded}; re-run"))
     done = f"{reason}: {describe(personas, settings)}, valid until {participants.minute(until)}"
     if contained:
         done += f"; none for {', '.join(contained)}, which is contained (see its row above)"
+    if locked:
+        done += "; " + _partial_note(nn, locked)
     if unrecorded:
         return _CardResult(("FAIL", label, done + unrecorded), written=True)
     loose = (f"; the ids of {', '.join(untracked)}'s codes could not be told apart from another room's, so down "
              "leaves those to valid_secs" if untracked else "")
-    return _CardResult(("CHANGED", label, done + loose), batch_id, written=True)
+    return _CardResult(("PARTIAL" if locked else "CHANGED", label, done + loose), batch_id, written=True)
+
+
+def _answer_lost(exc: Lab5Error) -> bool:
+    """A create that got no usable answer (lab5_duo: a timeout, TLS error, an
+    answer cut off or not the JSON Duo documents) may have made its codes. A
+    refusal from Duo carries its HTTP status and made none."""
+    return isinstance(exc, DuoError) and exc.status in (None, 200)
+
+
+def _lost_answer(admin: AdminAPI, uid: str, persona: str, before: Set[str], settings: Settings, until: float,
+                 exc: Lab5Error, tracked: Dict[str, Tuple[str, List[str]]], untracked: List[str],
+                 unknown: List[str]) -> str:
+    """After a lost answer, list the persona's code ids again: exactly
+    ``count`` new ids are the codes Duo made, on no card, and are recorded so
+    down and handouts --revoke delete them. Any other difference is another
+    room's too (untracked); a listing that fails as well leaves their ids
+    unknown, and down says so. Returns what the card's row says."""
+    kind = re.search(r"\(([A-Za-z_][A-Za-z0-9_.]*)\)", str(exc))
+    head = f"Duo's answer was lost{f' ({kind.group(1)})' if kind else ''}; checked which codes were created"
+    try:
+        new = sorted(_code_ids(admin, uid) - before)
+    except Lab5Error as again:
+        unknown.append(persona)
+        return (f"{head}, but that listing failed too ({again}), so their ids are unknown: down cannot delete any "
+                f"Duo made, and they stop working at {participants.minute(until)} (valid_secs)")
+    if not new:
+        return f"{head}: none"
+    if len(new) == settings.count:
+        tracked[persona] = (uid, new)
+        return (f"{head}: {len(new)}, which are on no card and are recorded, so down and handouts --revoke delete "
+                "them")
+    untracked.append(persona)
+    return (f"{head}: they could not be told apart from another room's, so they stop working only at "
+            f"{participants.minute(until)} (valid_secs)")
 
 
 # =========================================================================== revocation
@@ -581,10 +677,15 @@ def _revoke_card(env: participants.Env, nn: str, now: float, keep: Optional[str]
             if "codes" not in batch:
                 loose.append(f"the batch issued {when} has no recorded code ids, so it was not deleted: it stops "
                              f"working at {participants.minute(until)} (valid_secs)")
-            elif batch.get("untracked"):
+            if batch.get("codes") is not None and batch.get("untracked"):
                 loose.append(f"{', '.join(batch['untracked'])}: the codes of the batch issued {when} could not be told "
                              "apart from another room's, so they were not deleted: they stop working at "
                              f"{participants.minute(until)} (valid_secs)")
+            if batch.get("unknown"):
+                loose.append(f"{', '.join(batch['unknown'])}: Duo's answer to a create of the batch issued {when} was "
+                             "lost and the check that followed failed, so the ids of any codes Duo made are unknown "
+                             f"and none of them was deleted: they stop working at {participants.minute(until)} "
+                             "(valid_secs)")
         for entry in batch.get("codes") or []:
             ids = [str(i) for i in entry.get("ids") or []]
             if not ids:
@@ -676,6 +777,7 @@ def down_note(root: Path, workshop: str, now: float, numbers: Sequence[str]) -> 
     deleted what it could: when the last one it could not delete stops."""
     latest: Optional[float] = None
     seen = False
+    unknown: List[str] = []              # cards with a batch whose ids Duo's lost answer left unknown
     for nn in numbers:
         try:
             batches = read_json(_record_path(root, workshop, nn)).get("bypass_batches") or []
@@ -686,7 +788,9 @@ def down_note(root: Path, workshop: str, now: float, numbers: Sequence[str]) -> 
             until = participants.parse_time(str(batch.get("valid_until") or ""))
             if until is None or until <= now:
                 continue
-            if ("codes" not in batch or batch.get("untracked")
+            if batch.get("unknown") and nn not in unknown:
+                unknown.append(nn)
+            if ("codes" not in batch or batch.get("untracked") or batch.get("unknown")
                     or any(e.get("ids") for e in batch.get("codes") or [])):
                 latest = until if latest is None or until > latest else latest
     if not seen:
@@ -694,7 +798,9 @@ def down_note(root: Path, workshop: str, now: float, numbers: Sequence[str]) -> 
     if latest is None:
         return "Persona bypass codes: every batch these cards had is deleted or has expired"
     return (f"Persona bypass codes that lab5-setup could not delete stay valid until {participants.minute(latest)}: "
-            "valid_secs is their cutoff (deploy/lab5/README.md, Persona bypass codes)")
+            "valid_secs is their cutoff (deploy/lab5/README.md, Persona bypass codes)"
+            + (f". Not every code was deleted: on instance {', '.join(unknown)}, Duo's answer to a create was lost and "
+               "the check that followed failed, so the ids of any codes it made are unknown" if unknown else ""))
 
 
 # =========================================================================== check / status
@@ -703,28 +809,32 @@ def plan_rows(env: participants.Env, numbers: Sequence[str], personas: Sequence[
     """`check`: what `up` would do with each card's persona codes. Read-only.
     A card `up` would refuse is a FAIL row, so `check` fails as `up` would."""
     now = env.now()
-    users, checks, contained = persona_users(env.admin, personas, victim_had_codes(env, personas))
+    users, checks, contained, locked = persona_users(env.admin, personas, victim_had_codes(env, personas))
     blocked = _blocked(checks)
-    wanted = [p for p in personas if p[1] not in contained]
+    absent = contained + locked
+    wanted = [p for p in personas if p[1] not in absent]
     cards = env.handout().load()
     rows: List[Row] = []
     todo = 0
     for nn in numbers:
         batch = card_batch(cards.get(participants.username(env.workshop, nn)))
-        state = _state(batch, wanted, settings, now, contained)
+        state = _state(batch, wanted, settings, now, absent)
         label = f"instance {nn}"
         if state == "valid":
             until = participants.minute(batch.valid_until)
             if blocked:
                 rows.append(("FAIL", label, f"kept: valid until {until}, but {', '.join(blocked)} must be fixed: "
                                             "see the persona row(s) above"))
+            elif missing(batch, locked):
+                rows.append(("PARTIAL", label, f"kept: valid until {until}; {_partial_note(nn, missing(batch, locked))}"))
             else:
                 rows.append(("OK", label, f"kept: valid until {until}"))
             continue
         plan = (f"{why(state, batch, settings)}: issue {describe(wanted, settings)}, valid "
                 f"{settings.valid_hours} h from then"
-                + (f"; none for {', '.join(contained)}, which is contained" if contained else ""))
-        if blocked:
+                + (f"; none for {', '.join(contained)}, which is contained" if contained else "")
+                + (f"; {_partial_note(nn, locked)}" if locked else ""))
+        if blocked or not wanted:
             rows.append(("FAIL", label, f"{plan}; up issues none until the persona row(s) above are fixed"))
         else:
             todo += 1
@@ -742,8 +852,9 @@ def status_rows(env: participants.Env, numbers: Sequence[str], personas: Sequenc
                 settings: Settings) -> List[Row]:
     """`status`: each room persona's Duo status and groups, then each card's batch (from the handout)."""
     now = env.now()
-    _, checks, contained = persona_users(env.admin, personas, victim_had_codes(env, personas))
-    wanted = [p for p in personas if p[1] not in contained]
+    _, checks, contained, locked = persona_users(env.admin, personas, victim_had_codes(env, personas))
+    absent = contained + locked
+    wanted = [p for p in personas if p[1] not in absent]
     cards = env.handout().load()
     rows: List[Row] = []
     for nn in numbers:
@@ -754,22 +865,29 @@ def status_rows(env: participants.Env, numbers: Sequence[str], personas: Sequenc
             rows.append(("SKIP", label, f"no handout card for {name}"))
             continue
         batch = card_batch(card)
-        state = _state(batch, wanted, settings, now, contained)
+        state = _state(batch, wanted, settings, now, absent)
         if state == "none":
             rows.append(("FAIL", label, f"no persona bypass codes on its card: {fix}"))
         elif state == "other":
             have = ", ".join(n for _, n in batch.personas)
-            want = ", ".join(n for _, n in wanted) + (f" ({', '.join(contained)} is contained)" if contained else "")
+            want = (", ".join(n for _, n in wanted) + (f" ({', '.join(contained)} is contained)" if contained else "")
+                    + (f" ({', '.join(locked)} is locked out)" if locked else ""))
             rows.append(("FAIL", label, f"its codes are for {have}, but workshop.yaml names {want}: re-run up"))
         elif state == "expired":
             when = participants.minute(batch.valid_until) if batch.valid_until else "an unknown time"
             rows.append(("FAIL", label, f"expired at {when}: {fix}"))
         else:
             left = (batch.valid_until - now) / HOUR
+            notes = [("victim" if r == "victim" else "")
+                     + (", contained: its code no longer works" if n in contained else "")
+                     + (", locked out: its code works again once Duo unlocks it" if n in locked else "")
+                     for r, n in batch.personas]
             detail = (f"valid until {participants.minute(batch.valid_until)} ({left:.1f} h left) for "
-                      + ", ".join((f"{n} (victim, contained: its code no longer works)" if n in contained
-                                   else f"{n} (victim)") if r == "victim" else n for r, n in batch.personas))
-            if state == "settings":
+                      + ", ".join(f"{n} ({note.lstrip(', ')})" if note else n
+                                  for (_, n), note in zip(batch.personas, notes)))
+            if missing(batch, locked):
+                rows.append(("PARTIAL", label, f"{detail}; {_partial_note(nn, missing(batch, locked))}"))
+            elif state == "settings":
                 rows.append(("WARN", label, f"{detail}; issued with other settings than workshop.yaml's "
                                             f"({', '.join(setting_changes(batch, settings))}): re-run up"))
             else:

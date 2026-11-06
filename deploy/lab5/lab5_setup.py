@@ -404,6 +404,7 @@ def issue_bypass(ctx: "Ctx", numbers: Sequence[str], force: bool) -> List[str]:
     result = issue_guarded(ctx.accounts, numbers, ctx.personas, codes, ctx.redactor, force=force)
     for status, name, detail in result.rows:
         ctx.out.line(f"  {status:<8} {name:<24} {detail}")
+    ctx.partial_cards = list(result.partial)
     return result.failed
 
 
@@ -515,6 +516,7 @@ class Ctx:
     accounts: Optional[participants.Env] = None   # the participant-account plumbing (12.2)
     reissue: bool = False
     personas: List[Tuple[str, str]] = field(default_factory=list)   # 4.3: (victim|trusted, username) for the codes
+    partial_cards: List[str] = field(default_factory=list)  # 4.3: cards without a locked-out persona's codes (4.4)
 
 
 def lab5_values(ws: Workshop, box: BoxSpec, creds: Dict[str, str]) -> Dict[str, str]:
@@ -1429,8 +1431,11 @@ def run_handouts(args: argparse.Namespace, deps: Deps) -> int:
         elif handout.csv_path.exists():
             reporter.line(f"handout: {handout.html_path} (and .csv), mode 0600: no card changed, so there is nothing "
                           "to print again; every card keeps the codes it has")
-        reporter.line(f"RESULT: handouts: {len(boxes) - len(failed)} card(s) ok, {len(failed)} failed"
-                      + (f" (instance {', '.join(failed)})" if failed else ""))
+        partial = [nn for nn in result.partial if nn not in failed]
+        reporter.line(f"RESULT: handouts: {len(boxes) - len(failed) - len(partial)} card(s) ok, {len(failed)} failed"
+                      + (f" (instance {', '.join(failed)})" if failed else "")
+                      + (f"; {len(partial)} partial (instance {', '.join(partial)}): a room persona is locked out, "
+                         "retry handouts for them once Duo unlocks it" if partial else ""))
         return 1 if failed else 0
     except Lab5Error as exc:
         reporter.line(f"lab5-setup handouts: {exc}")
@@ -1548,6 +1553,10 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
             codes_note = f"; persona bypass codes {what} on {len(bad_cards)} card(s) (instance {', '.join(bad_cards)})"
         elif bad_codes:
             codes_note = f"; persona bypass codes: {bad_codes} failed"
+        if ctx.partial_cards:
+            codes_note += (f"; persona bypass codes partial on {len(ctx.partial_cards)} card(s) (instance "
+                           f"{', '.join(ctx.partial_cards)}): a room persona is locked out, retry handouts for them "
+                           "once Duo unlocks it")
         reporter.line(f"RESULT: {args.command}: {len(reports) - len(failed)} ok, {len(failed)} failed"
                       + (f" (box {', '.join(failed)})" if failed else "")
                       + (f"; {bad_accounts} participant account(s) failed" if bad_accounts else "")
