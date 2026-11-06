@@ -1962,6 +1962,42 @@ def test_bypass_unreadable_record() -> None:
                   and "the participant record of instance 01 cannot be read" in out, out)
 
 
+def test_victim_clash_codes_and_handouts() -> None:
+    print("== another workshop still holding the victim: handouts refuses it too, and codes a swap left count ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        h = Harness(Path(tmp))
+        rc, out = h.run("up")
+        other = Path(tmp) / "globex"
+        other.mkdir()
+        (other / "workshop.yaml").write_text(YAML.replace("workshop: acme", "workshop: globex")
+                                             .replace("198.51.100.", "203.0.113."))
+
+        def globex(command: str) -> Tuple[int, str]:
+            out_io = io.StringIO()
+            h.world.prompts.clear()
+            return ls.main([command, str(other / "workshop.yaml")], deps=h.deps(out_io)), out_io.getvalue()
+
+        posts = len(bypass_posts(h))
+        rc, out = globex("handouts")
+        check("globex handouts with acme's victim: refused (exit 2) before any Duo call, no code issued",
+              rc == 2 and "room.victim avery.kim is still in use by workshop acme" in out
+              and "room.fallback" in out and len(bypass_posts(h)) == posts, out)
+        (Path(tmp) / "workshop.yaml").write_text(YAML.replace("  victim: avery.kim\n", "  victim: jordan.reyes\n")
+                                                 .replace("  fallback: jordan.reyes\n", "  fallback: casey.wong\n"))
+        rc, out = h.run("up")
+        check("acme swaps to jordan.reyes on every box and card", rc == 0, out)
+        rc, out = globex("check")
+        check("...globex is still refused avery.kim: Duo holds the codes acme's old cards carried, and down can "
+              "delete them (or they expire)",
+              rc == 2 and "Duo still holds bypass codes for avery.kim from its cards" in out
+              and "run `lab5-setup down` with acme's workshop file first, or wait until" in out
+              and "still admit" not in out, out)
+        rc, out = h.run("down")
+        rc, out = globex("handouts")
+        check("once acme has run down (its boxes gone, the recorded codes deleted), globex may take avery.kim",
+              "is still in use by workshop" not in out, out)
+
+
 def test_bypass_valid_until_after_creates() -> None:
     print("== a card's time is taken after its last create: never earlier than a code's own expiry ==")
     with tempfile.TemporaryDirectory() as tmp:
@@ -2089,7 +2125,8 @@ def main() -> int:
                  test_bypass_settings_change_reissues, test_bypass_revocation, test_bypass_persona_groups,
                  test_handouts_revoke_waits_for_the_new_batch, test_duo_transport_errors, test_contained_victim,
                  test_bypass_locked_out_is_temporary, test_bypass_lost_create_answer, test_signin_policy_docs,
-                 test_bypass_down_then_up, test_bypass_unreadable_record, test_bypass_valid_until_after_creates,
+                 test_bypass_down_then_up, test_bypass_unreadable_record,
+                 test_victim_clash_codes_and_handouts, test_bypass_valid_until_after_creates,
                  test_half_made_participant, test_expire_crash_notifies, test_docs_define_their_terms):
         try:
             test()

@@ -1150,7 +1150,7 @@ def test_status_victim_check() -> None:
 
 
 def test_shared_victim_refused() -> None:
-    print("== a victim another live workshop on this Mac names is refused (plan 4.3) ==")
+    print("== a victim another live workshop on this Mac still holds is refused (plan 4.3) ==")
     world = FakeWorld()
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -1167,9 +1167,10 @@ def test_shared_victim_refused() -> None:
             text = out_io.getvalue()
             check(f"globex {command} with the same victim: refused (exit 2) before any box or Cloudflare call, "
                   "naming acme",
-                  rc == 2 and "room.victim avery.kim is also the victim of workshop acme" in text
-                  and "still reachable" in text and "room.fallback" in text
-                  and "run `lab5-setup down` with acme's workshop file first" in text, text)
+                  rc == 2 and "room.victim avery.kim is still in use by workshop acme" in text
+                  and "its boxes still admit avery.kim and attendees can still reach them" in text
+                  and "room.fallback" in text and "run `lab5-setup down` with acme's workshop file first" in text
+                  and "wait until" not in text, text)
         check("...nothing was run on any box", {nn: len(b.commands) for nn, b in world.boxes.items()} == boxes_before)
         (other / "workshop.yaml").write_text((other / "workshop.yaml").read_text()
                                              .replace("victim: avery.kim", "victim: jordan.reyes")
@@ -1177,14 +1178,14 @@ def test_shared_victim_refused() -> None:
         out_io = io.StringIO()
         rc = ls.main(["check", str(other / "workshop.yaml")], deps=world.deps(tmp / "state", out_io))
         check("globex with its own victim is not refused for it",
-              "is also the victim of workshop" not in out_io.getvalue(), out_io.getvalue())
+              "is still in use by workshop" not in out_io.getvalue(), out_io.getvalue())
         rc, out = run_cli(world, tmp, "down")
         (other / "workshop.yaml").write_text((other / "workshop.yaml").read_text()
                                              .replace("victim: jordan.reyes", "victim: avery.kim"))
         out_io = io.StringIO()
         ls.main(["check", str(other / "workshop.yaml")], deps=world.deps(tmp / "state", out_io))
         check("once acme has run down, its victim is free again",
-              "is also the victim of workshop" not in out_io.getvalue(), out_io.getvalue())
+              "is still in use by workshop" not in out_io.getvalue(), out_io.getvalue())
 
 
 def test_victim_clash_after_down() -> None:
@@ -1195,19 +1196,22 @@ def test_victim_clash_after_down() -> None:
         .replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
     ws = SimpleNamespace(name="globex", victim="avery.kim")
 
-    def world(boxes, batches):
+    def world(boxes, batches, saved_victim="avery.kim"):
         tmp = Path(tempfile.mkdtemp())
         other = tmp / "workshops" / "acme"
         (other / "boxes").mkdir(parents=True)
         (other / "participants").mkdir()
-        (other / "workshop.json").write_text(json.dumps({"victim": "avery.kim"}))
+        (other / "workshop.json").write_text(json.dumps({"victim": saved_victim}))
         for nn, rec in boxes.items():
-            (other / "boxes" / f"{nn}.json").write_text(json.dumps(rec))
-        (other / "participants" / "01.json").write_text(json.dumps({"bypass_batches": batches}))
+            (other / "boxes" / f"{nn}.json").write_text(rec if isinstance(rec, str) else json.dumps(rec))
+        (other / "participants" / "01.json").write_text(batches if isinstance(batches, str)
+                                                         else json.dumps({"bypass_batches": batches}))
         return tmp
 
     gone = {"tunnel": {"id": "t1", "deleted": True}, "dns": {"id": "d1", "deleted": True}}
-    destroyed = dict(gone, env={"baseline": "x", "reverted": False}, revert_pending={"since": iso(now - 86400)})
+    serving = lambda *users: {"baseline": {"x": 1}, "reverted": False, "serves": list(users)}
+    live = dict(gone, tunnel={"id": "t1", "deleted": False}, env=serving("avery.kim", "marcus.bell", "l5-acme-01"))
+    destroyed = dict(gone, env=serving("avery.kim"), revert_pending={"since": iso(now - 86400)})
     batch = lambda **kw: dict({"id": "b1", "valid_until": iso(now + 7200), "personas": ["avery.kim", "nina.osei"],
                                "codes": [{"persona": "avery.kim", "user_id": "U1", "ids": []},
                                          {"persona": "nina.osei", "user_id": "U2", "ids": []}],
@@ -1218,18 +1222,30 @@ def test_victim_clash_after_down() -> None:
           ls.victim_clashes(root, ws, now) == [], str(ls.victim_clashes(root, ws, now)))
     check("...a year later too", ls.victim_clashes(root, ws, now + 365 * 86400) == [])
 
-    root = world({"01": dict(gone, tunnel={"id": "t1", "deleted": False})}, [])
+    root = world({"01": live}, [])
     out = ls.victim_clashes(root, ws, now)
-    check("a tunnel down could not delete: refused, naming the instance, and down clears it",
-          len(out) == 1 and "instance(s) 01" in out[0] and "run `lab5-setup down` with acme's" in out[0], str(out))
+    check("a tunnel down could not delete, on a box that admits the victim: refused, naming the instance, and down "
+          "clears it", len(out) == 1 and "instance(s) 01" in out[0] and "still admit avery.kim" in out[0]
+          and "run `lab5-setup down` with acme's workshop file first" in out[0] and "wait until" not in out[0], str(out))
+    root = world({"01": dict(live, env=serving("jordan.reyes", "marcus.bell"))}, [])
+    check("...but not when that box admits another victim (its record, not the workshop file, says so)",
+          ls.victim_clashes(root, ws, now) == [], str(ls.victim_clashes(root, ws, now)))
+    legacy = dict(live, env={"baseline": {"x": 1}, "reverted": False})
+    check("a box record from before `serves`: the victim its workshop file names",
+          len(ls.victim_clashes(world({"01": legacy}, []), ws, now)) == 1
+          and ls.victim_clashes(world({"01": legacy}, [], saved_victim="jordan.reyes"), ws, now) == [])
 
     failed = batch(revoked_at=iso(now - 60), codes=[{"persona": "avery.kim", "user_id": "U1", "ids": ["DU1"]}])
     root = world({"01": gone}, [failed])
     out = ls.victim_clashes(root, ws, now)
     check("a victim code down failed to delete: refused until it is deleted (revoked_at alone is not the test)",
           len(out) == 1 and "Duo still holds bypass codes for avery.kim" in out[0]
-          and "run `lab5-setup down`" in out[0], str(out))
+          and f"run `lab5-setup down` with acme's workshop file first, or wait until {lp_minute(now + 7200)}" in out[0],
+          str(out))
     check("...and not once the batch's time has passed", ls.victim_clashes(root, ws, now + 7300) == [])
+    root = world({"01": gone}, [failed], saved_victim="jordan.reyes")
+    check("...whatever victim the workshop file names now (a swap leaves the old victim's codes in Duo)",
+          len(ls.victim_clashes(root, ws, now)) == 1)
 
     other_persona = batch(codes=[{"persona": "nina.osei", "user_id": "U2", "ids": ["DU2"]}])
     root = world({"01": gone}, [other_persona])
@@ -1245,11 +1261,159 @@ def test_victim_clash_after_down() -> None:
     check("...free once they have expired (a lost create's expiry may run past the batch's)",
           ls.victim_clashes(root, ws, now + 7400) != [] and ls.victim_clashes(root, ws, now + 7600) == [])
 
-    legacy = {"id": "b0", "valid_until": iso(now + 3600), "personas": ["avery.kim"]}
-    root = world({"01": gone}, [legacy])
+    no_ids = {"id": "b0", "valid_until": iso(now + 3600), "personas": ["avery.kim"]}
+    root = world({"01": gone}, [no_ids])
     out = ls.victim_clashes(root, ws, now)
-    check("a batch recorded without code ids still counts until its time (down cannot have deleted it)",
-          len(out) == 1 and "Duo still holds bypass codes" in out[0], str(out))
+    check("a batch recorded without code ids counts until its time, and down (which cannot delete it) is not "
+          "offered", len(out) == 1 and "never learned" in out[0] and f"wait until {lp_minute(now + 3600)}" in out[0]
+          and "run `lab5-setup down`" not in out[0], str(out))
+
+    # Fixes that clear the refusal together, never alternatives that clear only part of it.
+    late_lost = batch(unknown=[{"persona": "avery.kim", "user_id": "U1", "until": iso(now + 900)}])
+    out = ls.victim_clashes(world({"01": live}, [late_lost]), ws, now)
+    check("a box still up and a lost create: down first, THEN the wait (neither alone clears it)",
+          len(out) == 1 and f"run `lab5-setup down` with acme's workshop file first, then wait until "
+                            f"{lp_minute(now + 900)}" in out[0] and ", or wait" not in out[0], str(out))
+    long_ids = batch(valid_until=iso(now + 40000), codes=[{"persona": "avery.kim", "user_id": "U1", "ids": ["DU1"]}],
+                     unknown=[{"persona": "avery.kim", "user_id": "U1", "until": iso(now + 900)}])
+    out = ls.victim_clashes(world({"01": gone}, [long_ids]), ws, now)
+    check("recorded ids valid past a lost create's expiry: down then the short wait, or the long wait alone",
+          len(out) == 1 and f"first, then wait until {lp_minute(now + 900)}, or wait until "
+                            f"{lp_minute(now + 40000)}" in out[0], str(out))
+    short_ids = batch(valid_until=iso(now + 600), codes=[{"persona": "avery.kim", "user_id": "U1", "ids": ["DU1"]}],
+                      unknown=[{"persona": "avery.kim", "user_id": "U1", "until": iso(now + 900)}])
+    out = ls.victim_clashes(world({"01": gone}, [short_ids]), ws, now)
+    check("...and when the lost create outlasts them, the wait alone",
+          len(out) == 1 and out[0].endswith(f"or wait until {lp_minute(now + 900)}")
+          and "run `lab5-setup down`" not in out[0], str(out))
+
+    # What cannot be read is never read as holding nothing.
+    for name, boxes, batches in (
+            ("a box record cut short", {"01": json.dumps(live)[:40]}, []),
+            ("a box record that is a list", {"01": "[1, 2]"}, []),
+            ("a box whose tunnel is a string", {"01": dict(live, tunnel="t1")}, []),
+            ("a box whose dns is a list", {"01": dict(gone, dns=["d1"])}, []),
+            ("a box whose serves is a string", {"01": dict(live, env=dict(live["env"], serves="avery.kim"))}, []),
+            ("a box record from before `serves` with its workshop file cut short", {"01": legacy}, None)):
+        root = world(boxes, batches if batches is not None else [])
+        if batches is None:
+            (root / "workshops" / "acme" / "workshop.json").write_text('{"victim": "ave')
+        try:
+            out, raised = ls.victim_clashes(root, ws, now), ""
+        except Exception as exc:  # noqa: BLE001
+            out, raised = [], type(exc).__name__
+        check(f"{name}: refused, never a traceback, and the record is named for restoring",
+              not raised and len(out) == 1 and "instance(s) 01 cannot be read" in out[0]
+              and "restore the box record(s) of instance(s) 01 under" in out[0], raised or str(out))
+    for name, batches in (("a participant record cut short", json.dumps({"bypass_batches": [failed]})[:50]),
+                          ("unknown that is a number", [batch(unknown=1)]),
+                          ("unknown that is true", [batch(unknown=True)]),
+                          ("untracked that is a number", [batch(untracked=2)]),
+                          ("personas that is a number", [batch(personas=3)]),
+                          ("ids that is a number", [batch(codes=[{"persona": "avery.kim", "ids": 5}])]),
+                          ("bypass_batches that is an object", json.dumps({"bypass_batches": {"b1": failed}}))):
+        root = world({"01": gone}, batches)
+        record = root / "workshops" / "acme" / "participants" / "01.json"
+        os.utime(record, (now - 60, now - 60))           # written a minute ago
+        try:
+            out, raised = ls.victim_clashes(root, ws, now), ""
+        except Exception as exc:  # noqa: BLE001
+            out, raised = [], type(exc).__name__
+        bound = lb_unreadable_until(record)
+        check(f"{name}: refused, never a traceback, until any code it can hold has expired",
+              not raised and len(out) == 1 and "participant record of its instance(s) 01 cannot be read" in out[0]
+              and f"expire by {lp_minute(bound)}" in out[0] and f"or wait until {lp_minute(bound)}" in out[0]
+              and ls.victim_clashes(root, ws, bound + 60) == [], raised or str(out))
+    root = world({"01": gone}, [failed])
+    record = root / "workshops" / "acme" / "participants" / "01.json"
+    os.utime(record, (now - 60, now - 60))
+    record.chmod(0)
+    try:
+        if os.access(record, os.R_OK):
+            print("  SKIP  mode 000 does not stop this user reading (root?)")
+        else:
+            out = ls.victim_clashes(root, ws, now)
+            check("a participant record this user cannot read (mode 000): refused, as down's own report treats it",
+                  len(out) == 1 and "cannot be read" in out[0], str(out))
+    finally:
+        record.chmod(0o600)
+
+
+def lp_minute(ts: float) -> str:
+    import lab5_participants
+    return lab5_participants.minute(ts)
+
+
+def lb_unreadable_until(path: Path) -> float:
+    import lab5_bypass
+    return lab5_bypass.unreadable_until(path)
+
+
+def test_victim_swap_in_progress() -> None:
+    print("== a swap to room.fallback that check previewed, or up finished on some boxes only, still holds the old "
+          "victim ==")
+    import time as _time
+    from types import SimpleNamespace
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        state = tmp / "state"
+        globex = SimpleNamespace(name="globex", victim="avery.kim")
+        initech = SimpleNamespace(name="initech", victim="jordan.reyes")
+        clashes = lambda ws: ls.victim_clashes(state, ws, _time.time())  # noqa: E731
+        rc, out = run_cli(world, tmp, "up")
+        check("acme is up with avery.kim", rc == 0, out)
+        (tmp / "workshop.yaml").write_text(WORKSHOP_YAML.replace("victim: avery.kim", "victim: jordan.reyes")
+                                           .replace("fallback: jordan.reyes", "fallback: casey.wong"))
+        rc, out = run_cli(world, tmp, "check")
+        saved = json.loads((state / "workshops" / "acme" / "workshop.json").read_text())
+        held = clashes(globex)
+        check("check of the swap (it changes no box): acme's workshop file says jordan.reyes, but its boxes still "
+              "admit avery.kim, so globex is refused it", rc == 0 and saved.get("victim") == "jordan.reyes"
+              and len(held) == 1 and "instance(s) 01, 02" in held[0], out + str(held))
+        check("...and initech may take jordan.reyes, which no acme box admits yet", clashes(initech) == [],
+              str(clashes(initech)))
+        out_io = io.StringIO()
+        other = tmp / "globex"
+        other.mkdir()
+        (other / "workshop.yaml").write_text(WORKSHOP_YAML.replace("workshop: acme", "workshop: globex")
+                                             .replace("198.51.100.", "203.0.113."))
+        rc = ls.main(["check", str(other / "workshop.yaml")], deps=world.deps(state, out_io))
+        check("...through the command line too: globex check exits 2 naming acme",
+              rc == 2 and "room.victim avery.kim is still in use by workshop acme" in out_io.getvalue(),
+              out_io.getvalue())
+
+        box2 = world.boxes.pop("02")
+        rc, out = run_cli(world, tmp, "up")
+        rec = lambda nn: json.loads((state / "workshops" / "acme" / "boxes" / f"{nn}.json").read_text())  # noqa
+        check("up of the swap that reaches box 01 only: box 01 admits jordan.reyes, box 02 still avery.kim",
+              rc == 1 and "jordan.reyes" in rec("01")["env"]["serves"] and "avery.kim" not in rec("01")["env"]["serves"]
+              and "avery.kim" in rec("02")["env"]["serves"], out)
+        g, i = clashes(globex), clashes(initech)
+        check("...globex is refused avery.kim for box 02, initech jordan.reyes for box 01",
+              len(g) == 1 and "instance(s) 02" in g[0] and len(i) == 1 and "instance(s) 01 " in i[0], f"{g} {i}")
+
+        real_load = box2._load_running_env
+
+        def refuses_the_swap() -> None:
+            real_load()
+            lines = envfile.split_lines(envfile.decode(box2.files["/home/splunk/DemoBot/.env"][0]))
+            box2.app_up = "jordan.reyes" not in (envfile.get(lines, "IDENTITY_ALLOWED_USERS") or "")
+
+        box2._load_running_env = refuses_the_swap
+        world.boxes["02"] = box2
+        rc, out = run_cli(world, tmp, "up")
+        check("up whose restart fails on box 02: rolled back, so box 02 admits avery.kim again (and only it)",
+              rc == 1 and "rolled back to the .env this run started from" in out
+              and "avery.kim" in rec("02")["env"]["serves"] and "jordan.reyes" not in rec("02")["env"]["serves"],
+              out)
+        check("...globex is still refused avery.kim", len(clashes(globex)) == 1 and "instance(s) 02" in clashes(globex)[0])
+        box2._load_running_env = real_load
+        rc, out = run_cli(world, tmp, "up")
+        check("up of the swap on every box: avery.kim is free for globex, jordan.reyes is acme's",
+              rc == 0 and clashes(globex) == [] and len(clashes(initech)) == 1, out + str(clashes(globex)))
+        rc, out = run_cli(world, tmp, "down")
+        check("...and down frees jordan.reyes too", rc == 0 and clashes(initech) == [], out + str(clashes(initech)))
 
 
 class _FakeSSHException(Exception):
@@ -1336,7 +1500,8 @@ def main() -> int:
                  test_wrong_password_and_cli, test_down_failures_are_failures, test_identity_values_and_rollback,
                  test_diff_on_long_env,
                  test_example_yaml, test_cloudflare_client, test_remote_helpers, test_status_victim_check,
-                 test_shared_victim_refused, test_victim_clash_after_down, test_lost_session_is_a_lab5_error):
+                 test_shared_victim_refused, test_victim_clash_after_down, test_victim_swap_in_progress,
+                 test_lost_session_is_a_lab5_error):
         try:
             test()
         except Exception as exc:  # noqa: BLE001

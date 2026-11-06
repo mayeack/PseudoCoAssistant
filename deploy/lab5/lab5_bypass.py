@@ -254,6 +254,52 @@ def _entries(batch: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [e for e in codes if isinstance(e, dict)] if isinstance(codes, list) else []
 
 
+def batch_problem(batch: Any) -> Optional[str]:
+    """What makes a recorded batch one this tool did not write (a field of the
+    wrong type, say from a hand edit), or None. Nothing reads such a batch as
+    holding no codes: ``down`` reports it, and ``live_codes`` refuses it."""
+    if not isinstance(batch, dict):
+        return "a batch that is not a JSON object"
+    for key in ("personas", "codes", "unknown", "untracked"):
+        if batch.get(key) is not None and not isinstance(batch.get(key), list):
+            return f"a batch whose {key} is not a list"
+    if not all(isinstance(name, str) for name in batch.get("personas") or []):
+        return "a batch whose personas are not all names"
+    for entry in batch.get("codes") or []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("ids") or [], list):
+            return "a batch whose code entries are not entries with a list of ids"
+    if not all(isinstance(item, (dict, str)) for item in list(batch.get("unknown") or [])
+               + list(batch.get("untracked") or [])):
+        return "a batch whose unknown entries are not entries"
+    for key in ("valid_until", "issued_at", "revoked_at"):
+        if batch.get(key) is not None and not isinstance(batch.get(key), str):
+            return f"a batch whose {key} is not a time"
+    return None
+
+
+def record_problem(rec: Any) -> Optional[str]:
+    """What makes a participant record one this tool cannot read in full (see
+    ``batch_problem``), or None."""
+    if not isinstance(rec, dict):
+        return "not a participant record (a JSON object)"
+    batches = rec.get("bypass_batches")
+    if batches is not None and not isinstance(batches, list):
+        return "bypass_batches is not a list"
+    return next((problem for problem in map(batch_problem, batches or []) if problem), None)
+
+
+def unreadable_until(path: Path) -> Optional[float]:
+    """The latest any code of a participant record that cannot be read may
+    still work: a batch is recorded once its codes are made, and no code
+    outlives ``valid_hours`` (at most 72) plus ``LOST_MARGIN_S``, so the
+    record's last write bounds them all. None when even that is unknown."""
+    try:
+        written = Path(path).stat().st_mtime
+    except OSError:
+        return None
+    return math.ceil((written + RANGES["valid_hours"][1] * HOUR + LOST_MARGIN_S) / 60.0) * 60.0
+
+
 def revocation_time(env: participants.Env, nn: str, batch: Batch) -> Optional[float]:
     """When `down` deleted the codes of the recorded batch a card carries (its
     ``bypass_batch`` id; a card written without one, by its issue time and
@@ -522,23 +568,30 @@ def live_codes(batch: Dict[str, Any], persona: str, now: float) -> Tuple[Optiona
     """Whether Duo may still hold working codes for ``persona`` from one
     recorded batch: ``(deletable_until, undeletable_until)``. The first is the
     batch's ``valid_until`` while ids recorded for the persona are still
-    there to delete (never deleted, or a delete that failed), or while the
-    batch kept no ids at all; ``down`` can still delete those. The second is
-    the latest expiry of the persona's creates whose ids this tool never
-    learned; nothing deletes those, they only expire. Each is None when it
-    does not apply. Codes ``down`` deleted, and a batch past its time, count
-    for nothing; ``revoked_at`` alone is not the test, since a card whose
-    batch was only partly deleted is already dead on paper while Duo still
-    holds the rest."""
+    there to delete (never deleted, or a delete that failed): ``down`` can
+    still delete those. The second is when the persona's codes whose ids this
+    tool never learned stop working: the latest expiry of its creates whose
+    answer was lost or whose ids were ambiguous, and the batch's
+    ``valid_until`` for a batch recorded without any ids (before they were
+    kept). Nothing deletes those, they only expire. Each is None when it does
+    not apply. Codes ``down`` deleted, and a batch past its time, count for
+    nothing; ``revoked_at`` alone is not the test, since a card whose batch
+    was only partly deleted is already dead on paper while Duo still holds
+    the rest. ValueError for a batch this tool did not write
+    (``batch_problem``): the caller cannot tell, so it must assume the worst."""
+    problem = batch_problem(batch)
+    if problem:
+        raise ValueError(problem)
     until = participants.parse_time(str(batch.get("valid_until") or ""))
     deletable: Optional[float] = None
+    unknown: List[float] = []
     if until is not None and until > now:
         if persona in (batch.get("personas") or []) and "codes" not in batch:
-            deletable = until                  # a batch that kept no ids: nothing was deleted
+            unknown.append(until)              # a batch that kept no ids: down cannot delete any of them
         elif any(e.get("persona") == persona and e.get("ids") for e in _entries(batch)):
             deletable = until
     # A lost create's own expiry can run past the batch's (LOST_MARGIN_S).
-    unknown = [t for name, t in _unknown_entries(batch) if name == persona and t is not None and t > now]
+    unknown += [t for name, t in _unknown_entries(batch) if name == persona and t is not None and t > now]
     return deletable, (max(unknown) if unknown else None)
 
 

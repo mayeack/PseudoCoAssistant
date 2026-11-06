@@ -828,17 +828,32 @@ def _write_env(rem: Any, box: BoxSpec, facts: Facts, new_text: str) -> None:
     rem.write_file_atomic(env_path, envfile.encode(new_text), facts.env_mode or 0o600)
 
 
+def allowed_on(text: Optional[str]) -> List[str]:
+    """The usernames a .env's IDENTITY_ALLOWED_USERS admits."""
+    value = envfile.get(envfile.split_lines(text or ""), "IDENTITY_ALLOWED_USERS") or ""
+    return sorted({name.strip().lower() for name in value.split(",") if name.strip()})
+
+
 def apply_env(ctx: Ctx, rem: Any, box: BoxSpec, facts: Facts, record: Dict[str, Any],
               backup: Dict[str, str], rep: BoxReport) -> Optional[str]:
     """Merge the Lab 5 keys. Returns the text written, or None if .env
-    already matched."""
+    already matched.
+
+    Before anything is written, the record's ``serves`` (every username the
+    box's app may admit: victim_clashes reads it) gains this run's allowlist:
+    until the app restarts on the new .env, it may admit either. up_box
+    narrows it once the app runs the .env on disk."""
     plan = envfile.plan_up(facts.env_text or "", lab5_values(ctx.ws, box, ctx.creds))
     env_rec = record.get("env") or {}
-    if not env_rec.get("baseline") or env_rec.get("reverted"):
+    live = bool(env_rec.get("baseline")) and not env_rec.get("reverted")
+    serves = env_rec.get("serves") if live else None
+    before = serves if isinstance(serves, list) else allowed_on(facts.env_text)
+    if not live:
         # The baseline is the box BEFORE the first `up`; a re-run keeps it.
         record["env"] = {"baseline": envfile.baseline_of(facts.env_text or ""),
                          "baseline_backup": backup["env"], "recorded_at": utc_now(), "reverted": False}
-        ctx.state.save_box(box.nn, record)
+    record["env"]["serves"] = sorted(set(before) | set(allowed_on(plan.new_text)))
+    ctx.state.save_box(box.nn, record)
     if not plan.changed:
         rep.add("OK", ".env", "the Lab 5 keys already match workshop.yaml")
         return None
@@ -1050,12 +1065,16 @@ def up_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
                     raise
                 roll_back_env(ctx, rem, box, facts, written, backup, rep, str(exc))
                 record["restart_pending"] = False      # it runs the .env on disk again
+                record["env"]["serves"] = allowed_on(facts.env_text)    # the .env this run started from
                 ctx.state.save_box(box.nn, record)
                 return rep
             record["restart_pending"] = False
             ctx.state.save_box(box.nn, record)
         else:
             rep.add("OK", "restart", "not needed: .env unchanged (--restart forces one)")
+        # The app runs the .env on disk now, and admits exactly its allowlist.
+        record["env"]["serves"] = allowed_on(written if written is not None else facts.env_text)
+        ctx.state.save_box(box.nn, record)
         preflight(ctx, box, facts.access_key, rep, wait=True)
     except Lab5Error as exc:
         rep.add("FAIL", "up", str(exc))
@@ -1205,6 +1224,7 @@ def _down_on_box(ctx: Ctx, rem: Any, box: BoxSpec, record: Dict[str, Any], rep: 
     facts = Facts(env_text=envfile.decode(raw) if raw is not None else None, env_mode=rem.file_mode(env_path))
     env_rec = record.get("env") or {}
     env_changed = False
+    env_now: Optional[str] = None          # the .env on the box once this is done
     if facts.env_text is None:
         rep.add("WARN", ".env", f"{env_path} not found")
     else:
@@ -1214,9 +1234,14 @@ def _down_on_box(ctx: Ctx, rem: Any, box: BoxSpec, record: Dict[str, Any], rep: 
             data = rem.read_file(env_rec["baseline_backup"])
             backup_text = envfile.decode(data) if data is not None else None
         plan = envfile.plan_revert(facts.env_text, baseline, backup_text)
+        env_now = plan.new_text if plan.changed else facts.env_text
         for warning in plan.warnings:
             rep.add("WARN", ".env", warning)
         if plan.changed:
+            if isinstance(env_rec.get("serves"), list):
+                # Until the app restarts on the reverted .env it may admit either allowlist.
+                env_rec["serves"] = sorted(set(env_rec["serves"]) | set(allowed_on(env_now)))
+                ctx.state.save_box(box.nn, record)
             _write_env(rem, box, facts, plan.new_text)
             env_changed = True
             if record:
@@ -1252,6 +1277,9 @@ def _down_on_box(ctx: Ctx, rem: Any, box: BoxSpec, record: Dict[str, Any], rep: 
         if record:
             record["restart_pending"] = False
             ctx.state.save_box(box.nn, record)
+    if env_rec and env_now is not None:
+        env_rec["serves"] = allowed_on(env_now)     # the app runs the reverted .env now (victim_clashes)
+        ctx.state.save_box(box.nn, record)
     hec = record.get("hec") or {}
     if hec.get("destination_id") and not hec.get("reverted"):
         dest_id = hec["destination_id"]
@@ -1389,73 +1417,164 @@ def connect_cloudflare(ctx: Ctx, transport: Callable[..., Tuple[int, bytes]]) ->
         raise Lab5Error("could not tell the Cloudflare account from the zone; set cloudflare.account_id")
     saved = ctx.state.load_workshop()
     saved.update(workshop=ws.name, zone=ws.zone, zone_id=ctx.zone_id, account_id=ctx.account_id,
-                 victim=ws.victim)        # victim_clashes() reads it from the other workshops
+                 victim=ws.victim)        # what the file names now; a box's own record says what it serves
     ctx.state.save_workshop(saved)
     ctx.out.line(f"Cloudflare: zone {ws.zone} ({ctx.zone_id}), token {last4(token)}")
 
 
-def _read_state(path: Path) -> Dict[str, Any]:
+def _state_doc(path: Path) -> Optional[Dict[str, Any]]:
+    """Another workshop's state file: {} when there is none, None when it
+    cannot be read or is not a JSON object (the caller assumes the worst)."""
     try:
-        doc = json.loads(path.read_text())
-    except (OSError, ValueError):
+        doc = json.loads(Path(path).read_text())
+    except FileNotFoundError:
         return {}
-    return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _box_admits(rec: Optional[Dict[str, Any]], user: str, legacy_victim: Optional[str]) -> Optional[bool]:
+    """Whether attendees can still reach this box of another workshop and its
+    gate admits ``user``: True or False, or None when its record cannot tell
+    (unreadable, or a field of the wrong type).
+
+    Reachable: a tunnel or DNS record recorded and not deleted (`down` deletes
+    them from this Mac even when the box itself is gone). What it admits is
+    the ``serves`` its record keeps: every username the box's app may have on
+    IDENTITY_ALLOWED_USERS, both allowlists while a changed .env waits for its
+    restart (``up`` and ``down`` keep it). A record from before ``serves`` has
+    the victim its workshop file named while up's .env is on the box."""
+    if rec is None or any(rec.get(key) is not None and not isinstance(rec.get(key), dict)
+                          for key in ("tunnel", "dns", "env")):
+        return None
+    if not any((rec.get(key) or {}).get("id") and not (rec.get(key) or {}).get("deleted") for key in ("tunnel", "dns")):
+        return False
+    env = rec.get("env") or {}
+    serves = env.get("serves")
+    if serves is None:
+        if not env or env.get("reverted"):
+            return False
+        return None if not legacy_victim else user == legacy_victim
+    if not isinstance(serves, list) or not all(isinstance(name, str) for name in serves):
+        return None
+    return user in serves
 
 
 def victim_clashes(root: Path, ws: Workshop, now: float) -> List[str]:
-    """Another live workshop under this Mac's state root with the same room
-    victim. Plan 4.3 refuses a room rather than share a victim: one room's
-    containment (claim 4) would end the other room's victim sessions and
-    void its cards' victim codes, and lab5-setup would report that as the
-    other room's own containment.
+    """Another live workshop under this Mac's state root that still holds
+    this room's victim. Plan 4.3 refuses a room rather than share a victim:
+    one room's containment (claim 4) would end the other room's victim
+    sessions and void its cards' victim codes, and lab5-setup would report
+    that as the other room's own containment.
 
-    A workshop counts while attendees can still reach one of its boxes (a
-    tunnel or DNS record recorded and not deleted: `down` deletes them from
-    this Mac even when the box itself is gone), or while Duo may still hold
-    working victim codes from its cards (``bypass.live_codes``). A revert
-    still pending on a box Show destroyed does not count, and nor do codes
-    `down` deleted: neither can reach a room any more."""
+    It is read from what the other workshop's boxes and cards actually hold,
+    never from the victim its workshop file names now (a swap to
+    room.fallback that `check` previewed, or that `up` finished on some boxes
+    only, leaves the others serving the old victim):
+
+    - a box attendees can still reach whose gate admits the victim
+      (``_box_admits``);
+    - Duo codes for the victim from its cards that may still work
+      (``bypass.live_codes``): ``down`` deletes those whose ids it recorded,
+      the others only expire;
+    - a box or participant record that cannot be read, or holds a field this
+      tool did not write: nothing is known about it, so it counts (a
+      participant record only until any code it can hold has expired).
+
+    A revert still pending on a box Show destroyed does not count, and nor do
+    codes `down` deleted: neither can reach a room any more. The refusal
+    names each of these and the steps that clear all of them together."""
     out: List[str] = []
     folder = Path(root) / "workshops"
     if not folder.is_dir():
         return out
+    victim = ws.victim
     for other in sorted(d for d in folder.iterdir() if d.is_dir() and d.name != ws.name):
-        if _read_state(other / "workshop.json").get("victim") != ws.victim:
-            continue
-        reachable = [path.stem for path in sorted((other / "boxes").glob("*.json"))
-                     if any((rec.get(key) or {}).get("id") and not (rec.get(key) or {}).get("deleted")
-                            for rec in (_read_state(path),) for key in ("tunnel", "dns"))]
+        saved = _state_doc(other / "workshop.json")
+        legacy = str(saved.get("victim") or "") if saved else ""
+        admits: List[str] = []
+        unknown_boxes: List[str] = []
+        for path in sorted((other / "boxes").glob("*.json")):
+            verdict = _box_admits(_state_doc(path), victim, legacy)
+            if verdict is None:
+                unknown_boxes.append(path.stem)
+            elif verdict:
+                admits.append(path.stem)
         deletable: List[float] = []
         undeletable: List[float] = []
+        unread_cards: List[str] = []
+        unread_until: List[Optional[float]] = []
         for path in sorted((other / "participants").glob("*.json")):
-            batches = _read_state(path).get("bypass_batches")
-            for batch in batches if isinstance(batches, list) else []:
-                if isinstance(batch, dict):
-                    can, cannot = bypass.live_codes(batch, ws.victim, now)
+            rec = _state_doc(path)
+            try:
+                if rec is None or bypass.record_problem(rec):
+                    raise ValueError(path.name)
+                for batch in rec.get("bypass_batches") or []:
+                    can, cannot = bypass.live_codes(batch, victim, now)
                     deletable += [can] if can is not None else []
                     undeletable += [cannot] if cannot is not None else []
+            except ValueError:
+                bound = bypass.unreadable_until(path)
+                if bound is None or bound > now:          # any code it can hold has expired otherwise
+                    unread_cards.append(path.stem)
+                    unread_until.append(bound)
         why: List[str] = []
-        if reachable:
-            why.append(f"its boxes are still reachable (the tunnel or DNS record of instance(s) "
-                       f"{', '.join(reachable)} is not deleted)")
+        if admits:
+            why.append(f"its boxes still admit {victim} and attendees can still reach them (the tunnel or DNS "
+                       f"record of instance(s) {', '.join(admits)} is not deleted)")
+        if unknown_boxes:
+            why.append(f"the record of its instance(s) {', '.join(unknown_boxes)} cannot be read (or holds a field "
+                       f"lab5-setup did not write), so nothing tells whether attendees can still reach them as "
+                       f"{victim}")
         if deletable:
-            why.append(f"Duo still holds bypass codes for {ws.victim} from its cards, valid until "
+            why.append(f"Duo still holds bypass codes for {victim} from its cards, valid until "
                        f"{participants.minute(max(deletable))}")
-        if not why and not undeletable:
-            continue
-        fixes: List[str] = []
-        if why:
-            fixes.append(f"run `lab5-setup down` with {other.name}'s workshop file first")
         if undeletable:
-            why.append(f"Duo may still hold bypass codes for {ws.victim} from its cards whose ids this tool "
-                       f"never learned, so nothing can delete them: they expire at "
-                       f"{participants.minute(max(undeletable))}")
-            fixes.append(f"wait until {participants.minute(max(undeletable))}")
-        out.append(f"room.victim {ws.victim} is also the victim of workshop {other.name}, and "
-                   f"{'; and '.join(why)}. Every room needs its own victim (plan 4.3): one room's containment "
-                   f"would end the other's victim sessions and codes. Use another victim (room.fallback, say), "
-                   f"or {', or '.join(fixes)}")
+            why.append(f"Duo may still hold bypass codes for {victim} from its cards whose ids this tool never "
+                       f"learned, so nothing can delete them: they expire at {participants.minute(max(undeletable))}")
+        if unread_cards:
+            known = [t for t in unread_until if t is not None]
+            why.append(f"the participant record of its instance(s) {', '.join(unread_cards)} cannot be read (or holds "
+                       f"a batch lab5-setup did not write), so nothing tells whether Duo still holds bypass codes "
+                       f"for {victim} from those cards"
+                       + (f": any it issued expire by {participants.minute(max(known))}"
+                          if len(known) == len(unread_until) else ""))
+        if not why:
+            continue
+        out.append(f"room.victim {victim} is still in use by workshop {other.name}: {'; and '.join(why)}. Every "
+                   f"room needs its own victim (plan 4.3): one room's containment would end the other's victim "
+                   f"sessions and codes. Use another victim (room.fallback, say), or "
+                   + _clash_advice(other, admits, unknown_boxes, deletable, undeletable, unread_cards, unread_until))
     return out
+
+
+def _clash_advice(other: Path, admits: Sequence[str], unknown_boxes: Sequence[str], deletable: Sequence[float],
+                  undeletable: Sequence[float], unread_cards: Sequence[str],
+                  unread_until: Sequence[Optional[float]]) -> str:
+    """The steps that clear every reason of a clash, together. A box that
+    admits the victim is cleared only by `down`, and a record that cannot be
+    read only once it is restored; codes whose ids were recorded by `down` or
+    by their own expiry; codes whose ids this tool never learned only by
+    their expiry. Waiting alone is offered only when it clears everything."""
+    acts: List[str] = []
+    restore = ([f"the box record(s) of instance(s) {', '.join(unknown_boxes)}"] if unknown_boxes else []) + \
+              ([f"the participant record(s) of instance(s) {', '.join(unread_cards)}"] if unread_cards else [])
+    if restore:
+        acts.append(f"restore {' and '.join(restore)} under {other}")
+    if admits or unknown_boxes or deletable or unread_cards:
+        acts.append(f"run `lab5-setup down` with {other.name}'s workshop file")
+    last_wait = max(undeletable) if undeletable else None
+    every = list(deletable) + list(undeletable) + list(unread_until)
+    wait_alone = (max(every) if every and not admits and not unknown_boxes and None not in every else None)
+    if last_wait is not None and wait_alone is not None and wait_alone <= last_wait:
+        return f"wait until {participants.minute(last_wait)}"
+    advice = " and ".join(acts) + (" first" if acts else "")
+    if last_wait is not None:
+        advice += f"{', then ' if acts else ''}wait until {participants.minute(last_wait)}"
+    if wait_alone is not None and acts:
+        advice += f", or wait until {participants.minute(wait_alone)}"
+    return advice
 
 
 def run_parallel(ctx: Ctx, boxes: Sequence[BoxSpec], fn: Callable[[Ctx, BoxSpec], BoxReport]) -> List[BoxReport]:
