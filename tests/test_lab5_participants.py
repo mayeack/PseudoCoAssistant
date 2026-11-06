@@ -1009,7 +1009,7 @@ def test_bypass_errors_are_per_card() -> None:
 
         def locked(self, name, fields):           # the handout's lock times out for card 02's codes
             if name == "l5-acme-02" and "bypass" in fields:
-                raise Lab5Error(f"{self.dir / '.handout.lock'} is locked by another run; try again when it finishes")
+                raise Lab5Error(f"another run holds the lock, try again when it finishes ({self.dir / '.handout.lock'})")
             return real(self, name, fields)
         lp.Handout.update = locked
         try:
@@ -1020,7 +1020,7 @@ def test_bypass_errors_are_per_card() -> None:
         check("the handout lock timing out for one card: that card fails, the other gets its batch, up finishes "
               "(exit 1, not 2)",
               rc == 1 and _up_finished(out) and list(cards["01"]) == CARD_PERSONAS and cards["02"] == {}
-              and "is locked by another run" in out and "(instance 02)" in out, out)
+              and "another run holds the lock" in out and "(instance 02)" in out, out)
         batch = record(h, "02")["bypass_batches"][-1]
         check("... its batch is recorded as incomplete, with all 4 code ids (so down can delete them)",
               batch["complete"] is False and sum(len(e["ids"]) for e in batch["codes"]) == 4, str(batch))

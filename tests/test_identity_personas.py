@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import fcntl
 import io
 import json
 import os
@@ -46,7 +47,7 @@ sys.path.insert(0, str(ROOT))
 import lab5_duo as duo  # noqa: E402
 import lab5_cii as cii  # noqa: E402
 import lab5_personas as lpers  # noqa: E402
-from lab5_common import Keychain, Lab5Error, Redactor  # noqa: E402
+from lab5_common import Keychain, Lab5Error, Redactor, file_lock  # noqa: E402
 from lab5_fakes import API_HOST, CII, KEYCHAIN_SECRETS, Clock, FakeCII, FakeDuo, FakeKeychain  # noqa: E402
 import cii_end_user_answers as cii_answers  # noqa: E402  (the shared table's coded errors, built as the gate's are)
 import provision_personas as pp  # noqa: E402
@@ -1053,6 +1054,27 @@ def test_daily_job_crash_notifies() -> None:
               "that says why, even under a long path",
               rc == 2 and w.notes[-1][0] == "Lab 5 persona baseline" and "did not run" in w.notes[-1][1]
               and "not valid YAML" in w.notes[-1][1], out.getvalue() + str(w.notes[-1:]))
+        rc = pa.main(["baseline", "--cast", str(bad.parent / "missing.yaml")], deps=deps)
+        check("baseline with a personas.yaml it cannot read: exit 2, and a notification that says why (the OS's "
+              "reason), even under a long path",
+              rc == 2 and w.notes[-1][0] == "Lab 5 persona baseline"
+              and "cannot read the persona cast (No such file or directory)" in w.notes[-1][1], str(w.notes[-1:]))
+        # A lock another run holds: the reason comes before its path too, for
+        # the notifications that quote it (a persona's last sign-in error, or
+        # "did not run").
+        held = bad.parent / "held.lock"
+        fd = os.open(str(held), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                with file_lock(held, timeout_s=0.3):
+                    said = "the lock was taken"
+            except Lab5Error as exc:
+                said = str(exc)
+        finally:
+            os.close(fd)
+        check("a lock another run holds: the error says so in its first 120 characters, even under a long path",
+              "another run holds the lock" in said[:120], said)
         # Valid YAML with a value of the wrong type: cast_from_dict raised ValueError / AttributeError, outside
         # every handler, so the 09:20 job died with a traceback and no notification.
         good = w.cast_path.read_text()

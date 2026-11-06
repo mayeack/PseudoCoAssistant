@@ -326,7 +326,8 @@ def file_lock(path: Path, timeout_s: float = 30.0) -> Iterator[None]:
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise Lab5Error(f"{path} is locked by another run; try again when it finishes")
+                    # The reason before the path: a daily job's notification keeps only its start.
+                    raise Lab5Error(f"another run holds the lock, try again when it finishes ({path})")
                 time.sleep(0.2)
         yield
     finally:
