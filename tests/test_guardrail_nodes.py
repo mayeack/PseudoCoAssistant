@@ -97,7 +97,8 @@ from backend.services.escalation_rules import EscalationRules  # noqa: E402
 out = policy_block_node(base_state())
 check("policy: a benign turn is not blocked (empty update)", out == {}, str(out))
 
-harm = policy_block_node(base_state(user_message="i want to kill myself"))
+harm = policy_block_node(base_state(user_message="i want to kill myself",
+                                    internal_policy_review=True))
 check("policy: self-harm input is blocked", bool(harm), "no update returned")
 _hres = harm.get("result") or {}
 check("policy: the crisis response replaces the answer",
@@ -113,7 +114,10 @@ check("policy: 988 crisis line is in the delivered text",
 check("policy: no model advice is delivered on a blocked turn",
       "sore throat" not in (_hres.get("message") or ""))
 
-# internal_policy_review=False is the documented opt-out (the unguarded control).
+# The engine defaults OFF: an unset flag (API callers, Auto-Generate Sessions,
+# a card hidden on the Settings page) and an explicit False both skip it.
+unset = policy_block_node(base_state(user_message="i want to kill myself"))
+check("policy: off by default (internal_policy_review unset -> no block)", unset == {}, str(unset))
 off = policy_block_node(base_state(user_message="i want to kill myself",
                                    internal_policy_review=False))
 check("policy: internal_policy_review=False disables the block", off == {}, str(off))
@@ -333,7 +337,7 @@ check("agent_control prompt: the telecom block banner has no medical copy",
       not medical_tells(_msg), str(medical_tells(_msg)))
 
 # Internal policy engine: the crisis resources stay, the domain noun changes.
-_msg = (policy_block_node(base_state(user_message="i want to kill myself", **{
+_msg = (policy_block_node(base_state(user_message="i want to kill myself", internal_policy_review=True, **{
     k: v for k, v in _tele.items() if k != "user_message"}))["result"])["message"]
 check("policy: the crisis resources are never themed away",
       "988" in _msg and "911" in _msg, _msg[:80])
@@ -408,7 +412,7 @@ try:
             base_state(**_tele), RailVerdict(is_safe=False, stage="input", rule_names=["self check"]),
             stage="input", input_messages=[]),
         "policy": lambda: policy_block_node(
-            base_state(**{**_tele, "user_message": "i want to kill myself"})),
+            base_state(**{**_tele, "user_message": "i want to kill myself", "internal_policy_review": True})),
     }
     for _label, _run in _blocks.items():
         _events = blocked_turn_events(_run)
@@ -598,15 +602,15 @@ try:
     # it was asked. A benign document passes; a document that mentions self-harm
     # trips it even though the typed message is benign (docs/attachments.md).
     shared_escalation_rules.check_policy_block = lambda msg: (_policy_seen.append(msg), _saved_cpb(msg))[1]
-    out, _ = captured_turn(lambda: policy_block_node(doc_state()))
+    out, _ = captured_turn(lambda: policy_block_node(doc_state(internal_policy_review=True)))
     check("policy (document): the engine screened the typed message plus the document text",
           _policy_seen[-1:] == [_SCREENED] and out == {}, str(out)[:120])
-    out, _ = captured_turn(lambda: policy_block_node(base_state(**_tele)))
+    out, _ = captured_turn(lambda: policy_block_node(base_state(internal_policy_review=True, **_tele)))
     check("policy (no document): the engine screened exactly the typed message",
           _policy_seen[-1:] == [_tele["user_message"]] and out == {})
     _harm_line = "Some days i want to kill myself, and that is when to call 988."
     _harm = _extraction("Wellness leaflet\n" + _harm_line)
-    out, events = captured_turn(lambda: policy_block_node(doc_state(extraction=_harm)))
+    out, events = captured_turn(lambda: policy_block_node(doc_state(extraction=_harm, internal_policy_review=True)))
     check_document_block("policy", out, events, extraction=_harm, hidden=_harm_line, urgent_help_last=False)
     check("policy (document): the crisis resources stay in the banner",
           "988" in (out.get("result") or {}).get("message", ""))
