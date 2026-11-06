@@ -1,0 +1,22 @@
+#!/bin/bash
+# lab5-setup <check|up|status|down> workshop.yaml   (deploy/lab5/README.md)
+#
+# Runs deploy/lab5/lab5_setup.py with an interpreter that has its two
+# dependencies (paramiko, PyYAML). LAB5_PYTHON picks one explicitly; otherwise
+# the tool's own venv at ~/.pseudoco-lab5/venv, then python3 on PATH.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+py="${LAB5_PYTHON:-}"
+if [ -z "$py" ]; then
+  if [ -x "$HOME/.pseudoco-lab5/venv/bin/python" ]; then
+    py="$HOME/.pseudoco-lab5/venv/bin/python"
+  else
+    py="$(command -v python3)"
+  fi
+fi
+if ! "$py" -c "import paramiko, yaml" >/dev/null 2>&1; then
+  echo "lab5-setup: $py lacks paramiko/PyYAML. One-time setup:" >&2
+  echo "  python3 -m venv ~/.pseudoco-lab5/venv && ~/.pseudoco-lab5/venv/bin/pip install -r $here/requirements.txt" >&2
+  exit 2
+fi
+exec "$py" "$here/lab5_setup.py" "$@"

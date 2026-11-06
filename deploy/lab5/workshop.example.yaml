@@ -1,0 +1,66 @@
+# lab5-setup workshop file (deploy/lab5/README.md). Copy it per workshop:
+#   cp deploy/lab5/workshop.example.yaml ~/.pseudoco-lab5/acme-1105.yaml
+# It holds NO secrets: only names, addresses and Keychain item names.
+
+# Becomes each box's tunnel and hostname: l5-<workshop>-<nn>.pseudocoassistant.com.
+# Lowercase letters, digits and '-'. Use a new name per delivery (a date helps).
+workshop: acme-1105
+
+# `up` refuses a box whose /health reports less (no code upgrade, I5); the
+# Show template is re-baked on this release instead (plan 12.6).
+required_version: "4.22.0"
+zone: pseudocoassistant.com
+
+# The room's Splunk stack. `up` looks for the box's existing HEC destination
+# with this URL and merges only its `host`; it never adds or repoints one.
+stack:
+  hec_url: https://http-inputs-acme.splunkcloud.com:443/services/collector/event
+  # Optional Keychain item holding the room's HEC token. Used only to compare
+  # its last 4 characters with the destination's; it is never sent anywhere.
+  hec_token_item: pseudoco-lab5-hec-acme-1105
+
+room:
+  victim: avery.kim          # on every box's IDENTITY_ALLOWED_USERS
+  fallback: jordan.reyes     # untouched; to swap, set victim: jordan.reyes and re-run up
+  trusted: [marcus.bell, elena.sousa, grace.lin]
+
+# Optional 12.1 settings. Leave a key out to keep the app default.
+# identity:
+#   session_ttl_minutes: 720
+#   status_ttl_seconds: 10
+#   fail_open: true
+
+# Keychain item (service) names. These are the defaults; list only the ones you
+# changed. Add an item with: security add-generic-password -s ITEM -a "$USER" -w
+# keychain:
+#   cloudflare: pseudoco-lab5-cloudflare
+#   DUO_CLIENT_ID: pseudoco-lab5-duo-websdk-client-id
+#   DUO_CLIENT_SECRET: pseudoco-lab5-duo-websdk-client-secret
+#   DUO_API_HOST: pseudoco-lab5-duo-websdk-api-host
+#   DUO_ADMIN_IKEY: pseudoco-lab5-duo-status-ikey
+#   DUO_ADMIN_SKEY: pseudoco-lab5-duo-status-skey
+#   CII_CLIENT_ID: pseudoco-lab5-cii-client-id
+#   CII_CLIENT_SECRET: pseudoco-lab5-cii-client-secret
+#   CII_TOKEN_URL: pseudoco-lab5-cii-token-url
+#   CII_API_URL: pseudoco-lab5-cii-api-url
+
+# cloudflare:
+#   account_id: ""          # found from the zone when empty
+#   zone_id: ""
+#   tunnel_protocol: auto   # http2 if the venue blocks UDP 7844 (quic)
+
+concurrency: 4               # boxes worked on at once
+
+# What every Show box has unless a row says otherwise.
+defaults:
+  port: 2222
+  user: splunk
+  checkout: /home/splunk/DemoBot
+  app_unit: demobot-app
+  app_port: 8001
+
+boxes:
+  - instance: 1
+    host: 203.0.113.10
+  - instance: 2
+    host: 203.0.113.11

@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>lab5-setup: Show boxes in, Lab 5 out</title>
+<style>
+:root{--bg:#ffffff;--fg:#1c1e21;--muted:#5c6370;--border:#d7dbe0;--accent:#0b6bcb;--code-bg:#f5f7f9;--th:#eef2f6;--warn:#8a5a00}
+@media (prefers-color-scheme: dark){:root{--bg:#14171a;--fg:#e6e8ea;--muted:#9aa3ad;--border:#2c3238;--accent:#63a9f0;--code-bg:#1c2126;--th:#1f252b;--warn:#e0b050}}
+*{box-sizing:border-box}
+body{margin:0;padding:2.5rem 1.5rem 5rem;background:var(--bg);color:var(--fg);
+ font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+ -webkit-font-smoothing:antialiased}
+main{max-width:60rem;margin:0 auto}
+h1{font-size:2rem;line-height:1.25;margin:0 0 .5rem;letter-spacing:-.02em}
+h2{font-size:1.4rem;margin:3rem 0 .75rem;padding-bottom:.4rem;border-bottom:1px solid var(--border);letter-spacing:-.01em}
+h3{font-size:1.1rem;margin:2rem 0 .5rem}
+h4{font-size:1rem;margin:1.5rem 0 .4rem;color:var(--muted)}
+p,li{margin:.6rem 0}
+a{color:var(--accent)}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.875em;
+ background:var(--code-bg);padding:.15em .4em;border-radius:4px;border:1px solid var(--border)}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:1rem;
+ overflow-x:auto;line-height:1.5}
+pre code{background:none;border:none;padding:0;font-size:.85rem}
+table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.9rem;display:block;overflow-x:auto}
+th,td{border:1px solid var(--border);padding:.5rem .7rem;text-align:left;vertical-align:top}
+th{background:var(--th);font-weight:600}
+tbody tr:nth-child(even){background:color-mix(in srgb,var(--th) 45%,transparent)}
+blockquote{margin:1.2rem 0;padding:.6rem 1rem;border-left:3px solid var(--warn);
+ background:color-mix(in srgb,var(--warn) 8%,transparent);color:var(--fg)}
+blockquote p{margin:.3rem 0}
+hr{border:none;border-top:1px solid var(--border);margin:2.5rem 0}
+strong{font-weight:650}
+ul,ol{padding-left:1.4rem}
+@media print{body{padding:0}pre,table{page-break-inside:avoid}}
+</style></head>
+<body><main>
+<h1>lab5-setup: Show boxes in, Lab 5 out</h1>
+<p><code>lab5-setup</code> turns the Splunk Show boxes of one workshop into Lab 5 (&quot;Verify: Cisco Identity Intelligence&quot;) instances, and puts them back afterwards. It runs on the facilitator's Mac. The design is section 12.3 of <code>docs/identity-intelligence-lab-plan.md</code>; section 12.1 lists the keys it writes.</p>
+<p>There is no broker and no AWS. Secrets come from the Mac's Keychain. What <code>up</code> created is recorded under <code>~/.pseudoco-lab5/</code>. Everything else lives on the boxes, in Duo and in Cloudflare.</p>
+<h2>Commands</h2>
+<pre><code>deploy/lab5/lab5-setup check  workshop.yaml   # read-only: what up would change
+deploy/lab5/lab5-setup up     workshop.yaml   # make every box a Lab 5 instance
+deploy/lab5/lab5-setup status workshop.yaml   # per-box preflight + Cloudflare state
+deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS, revert the keys
+</code></pre>
+<p><code>--only 1,3</code> limits a run to some instance numbers. <code>--restart</code> makes <code>up</code> or <code>down</code> restart the app even when <code>.env</code> did not change.</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>check</code></td>
+<td>Connects to each box and reads its version, <code>.env</code> and HEC destinations. Prints the exact <code>.env</code> diff, the HEC host change, the tunnel and DNS plan, and a verdict per box. A box that <code>up</code> would accept says <strong>ready, nothing to upgrade</strong>. It changes nothing on the boxes or in Cloudflare.</td>
+</tr>
+<tr>
+<td><code>up</code></td>
+<td>Runs each box in parallel, in this order: version check, backup, Lab 5 <code>.env</code> keys, tunnel and DNS, HEC host, restart, preflight. Any refusal happens before the first change.</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>Checks each box's tunnel health, DNS record, connector unit and <code>.env</code> drift, then runs the preflight. It also lists <code>l5-&lt;workshop&gt;-*</code> tunnels and DNS records that no box record owns.</td>
+</tr>
+<tr>
+<td><code>down</code></td>
+<td>Removes the connector, reverts the Lab 5 keys and the HEC host on every reachable box, then deletes the DNS records and tunnels that <code>up</code> recorded. Running it twice is safe: the second run changes nothing.</td>
+</tr>
+<tr>
+<td><code>expire</code></td>
+<td>Not built yet. It comes with the participant accounts (12.2).</td>
+</tr>
+</tbody>
+</table>
+<p>Exit codes: <code>0</code> means every box is fine. <code>1</code> means at least one box failed or was refused; its report says why. <code>2</code> means a usage, configuration or Keychain error.</p>
+<h2>One-time setup on the Mac</h2>
+<ol>
+<li>
+<p>Install the tool's two dependencies (paramiko and PyYAML) into their own venv. The wrapper finds that venv by itself. Keep them out of the app's venv: paramiko pulls in <code>cryptography</code>, and <code>tests/test_attachments.py</code> relies on the app's venv lacking it.</p>
+<pre><code>python3 -m venv ~/.pseudoco-lab5/venv
+~/.pseudoco-lab5/venv/bin/pip install -r deploy/lab5/requirements.txt
+</code></pre>
+</li>
+<li>
+<p>Put the credentials in the login Keychain. Nothing here should be typed after <code>-w</code>: <code>security</code> then prompts for the value, so it stays out of your shell history.</p>
+<pre><code>security add-generic-password -s pseudoco-lab5-duo-websdk-client-secret -a &quot;$USER&quot; -w
+</code></pre>
+</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>Keychain item</th>
+<th><code>.env</code> key</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pseudoco-lab5-cloudflare</code></td>
+<td>(none)</td>
+<td>Cloudflare API token <code>pseudoco-lab5-instances</code>: Tunnel edit + <code>pseudocoassistant.com</code> DNS edit</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-websdk-client-id</code></td>
+<td><code>DUO_CLIENT_ID</code></td>
+<td>Web SDK app <strong>PseudoCo Lab: Sign-in</strong></td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-websdk-client-secret</code></td>
+<td><code>DUO_CLIENT_SECRET</code></td>
+<td>same app</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-websdk-api-host</code></td>
+<td><code>DUO_API_HOST</code></td>
+<td>same app</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-status-ikey</code></td>
+<td><code>DUO_ADMIN_IKEY</code></td>
+<td>Admin API app <strong>PseudoCo Lab: Status (read-only)</strong></td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-duo-status-skey</code></td>
+<td><code>DUO_ADMIN_SKEY</code></td>
+<td>same app</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-cii-client-id</code></td>
+<td><code>CII_CLIENT_ID</code></td>
+<td>the CII API client's &quot;Copy all&quot;</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-cii-client-secret</code></td>
+<td><code>CII_CLIENT_SECRET</code></td>
+<td>same</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-cii-token-url</code></td>
+<td><code>CII_TOKEN_URL</code></td>
+<td>same</td>
+</tr>
+<tr>
+<td><code>pseudoco-lab5-cii-api-url</code></td>
+<td><code>CII_API_URL</code></td>
+<td>same</td>
+</tr>
+<tr>
+<td>your choice, per room</td>
+<td>(none)</td>
+<td>the room stack's HEC token. Optional: only its last 4 characters are compared with the box's destination.</td>
+</tr>
+</tbody>
+</table>
+<p>The names are defaults. A workshop file can rename any of them under <code>keychain:</code>.</p>
+<h2>The workshop file</h2>
+<p>Copy <code>deploy/lab5/workshop.example.yaml</code>, one per delivery. It holds no secrets: only names, addresses and Keychain item names.</p>
+<ul>
+<li><code>workshop</code> names the delivery. Box <em>nn</em> becomes tunnel <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code> and host <code>l5-&lt;workshop&gt;-&lt;nn&gt;.pseudocoassistant.com</code>. Use a new name each time, because the tool refuses to take over a tunnel or record it did not create.</li>
+<li><code>stack.hec_url</code> is the room's Splunk stack. <code>up</code> looks for the box's existing destination with that URL.</li>
+<li><code>room.victim</code> goes on every box's <code>IDENTITY_ALLOWED_USERS</code>, together with the trusted personas. To swap to <code>room.fallback</code>, change <code>victim</code> and re-run <code>up</code>.</li>
+<li><code>boxes</code> has one row per Show box: <code>instance</code> and <code>host</code>. Port <code>2222</code>, user <code>splunk</code>, checkout <code>/home/splunk/DemoBot</code>, unit <code>demobot-app</code> and app port <code>8001</code> come from <code>defaults:</code>.</li>
+</ul>
+<h2>What <code>up</code> does to a box</h2>
+<ol>
+<li>
+<p><strong>Version check.</strong> The box's <code>/health</code> must report at least <code>required_version</code> (default 4.22.0). There is no code upgrade (I5). A box below that is refused with &quot;the Show template needs that release (12.6)&quot;. It also checks <code>sudo -n</code>, <code>cloudflared</code> and the app unit, and that exactly one HEC destination sends to the room stack.</p>
+</li>
+<li>
+<p><strong>Backup.</strong> <code>.env</code> (byte for byte) and <code>medadvice.db</code> (SQLite online backup, safe while the app writes) go to <code>~/.pseudoco-lab5/backups/&lt;workshop&gt;-&lt;UTC stamp&gt;-&lt;random&gt;/</code> on the box, mode 0600 in a 0700 directory. Each run gets a new directory.</p>
+</li>
+<li>
+<p><strong>Lab 5 keys.</strong> Only the keys of the 12.1 table change, <code>PUBLIC_BASE_URL</code> and <code>HEC_HOST</code> included. The first live line of a key is replaced in place, and a missing key is appended. Every other line keeps its bytes, comments, quoting and line endings. The file is written atomically, with its mode kept. If the file changed since it was read, nothing is written.</p>
+</li>
+<li>
+<p><strong>Tunnel and DNS.</strong> These are created through the Cloudflare API:</p>
+<ul>
+<li>a remotely managed tunnel <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code>, with ingress <code>&lt;host&gt; -&gt; http://localhost:8001</code>;</li>
+<li>a proxied CNAME <code>&lt;host&gt; -&gt; &lt;tunnel-id&gt;.cfargotunnel.com</code>.</li>
+</ul>
+<p><code>cloudflared</code> runs as <code>pseudoco-assistant-lab5-tunnel.service</code>. Its token sits in <code>/etc/pseudoco-assistant/lab5-tunnel.env</code> (root, 0600) and reaches cloudflared as <code>TUNNEL_TOKEN</code>, never on a command line.</p>
+</li>
+<li>
+<p><strong>HEC host.</strong> The tool reads the destination through the box's Settings API, authenticated with the box's own <code>ACCESS_KEY</code>. It sends a <code>PUT</code> that carries only <code>host</code>, then reads the destination back and checks that every other field is unchanged. The other labs' destinations are never touched.</p>
+</li>
+<li>
+<p><strong>Restart.</strong> <code>sudo systemctl restart demobot-app</code>, only when <code>.env</code> changed.</p>
+</li>
+<li>
+<p><strong>Preflight</strong>, through the public name:</p>
+<ul>
+<li>the name resolves;</li>
+<li><code>https://&lt;host&gt;/health</code> reports at least the required release;</li>
+<li><code>/api/server-info</code> shows <code>gated.duo_signin</code> enabled. If it is not, the gate's own reason is printed.</li>
+</ul>
+</li>
+</ol>
+<p>The app's API is reached through an SSH-forwarded connection to the box's <code>127.0.0.1:8001</code>, so the access key never crosses the Show box's plain-http port.</p>
+<p>Participant accounts and the handout sheet are the next stage (12.2). <code>up</code> already has the hook for them, and <code>IDENTITY_ALLOWED_USERS</code> will gain each box's participant account then.</p>
+<h2>What <code>down</code> puts back</h2>
+<ul>
+<li>The connector unit and its token file are stopped and removed. The tool only removes a unit that carries its own marker comment.</li>
+<li>Each Lab 5 key is put back the way the first <code>up</code> found it. A replaced line goes back in place, and an appended key is removed. Lines outside the Lab 5 keys stay as they are now, even if another lab changed them during the workshop.
+<ul>
+<li>The state directory never stores a credential. A credential that existed before <code>up</code> is restored from the box's first backup.</li>
+<li>A box with no record of <code>up</code> gets every Lab 5 key that holds a value removed, which is the app default and the template state.</li>
+</ul>
+</li>
+<li>The destination's host goes back to its prior value. If someone changed it after <code>up</code>, it is left alone, with a warning.</li>
+<li><code>.env</code> backups that hold Lab 5 credentials (made by a re-run of <code>up</code>) are deleted. The first backup is kept.</li>
+<li>The app restarts if <code>.env</code> changed.</li>
+<li>The DNS record and tunnel that <code>up</code> recorded are deleted, even when the box itself is unreachable (Show may already have destroyed it). Anything named <code>l5-&lt;workshop&gt;-*</code> that the tool did not create is only reported.</li>
+</ul>
+<p>Participant accounts stay until <code>expire</code> disables them (next stage). Rotate the Duo and CII credentials after the workshop (I1).</p>
+<h2>Secrets</h2>
+<ul>
+<li>SSH passwords are asked once per box per run with <code>getpass</code>. Pressing Enter reuses the previous box's password. They are never stored.</li>
+<li>Keychain values reach a box only as file content: <code>.env</code> over SFTP, and the tunnel token on the stdin of a <code>sudo</code> file write. They never appear in a command line, a URL, the output or the run log.</li>
+<li>Output shows credentials by their last 4 characters only. All output, mirrored to <code>~/.pseudoco-lab5/workshops/&lt;workshop&gt;/runs/*.log</code>, passes through a redactor that holds every secret the run read.</li>
+<li><code>~/.pseudoco-lab5/workshops/&lt;workshop&gt;/</code> holds the per-box records (<code>boxes/&lt;nn&gt;.json</code>: tunnel and DNS ids, the non-secret baseline, backup paths) and <code>known_hosts</code>. Directories are 0700 and files 0600.</li>
+<li>Host keys are trusted on first use, per workshop. Show reuses IP addresses, so <code>~/.ssh/known_hosts</code> is not consulted. A box that later presents a different key is refused.</li>
+</ul>
+<h2>Show template (12.6)</h2>
+<p>A box from the template must pass <code>lab5-setup check</code> with <strong>ready, nothing to upgrade</strong>. That means:</p>
+<ul>
+<li>the release tag is at least <code>required_version</code>;</li>
+<li><code>cloudflared</code> is installed, with no tunnel and no token;</li>
+<li>every <code>DUO_*</code>, <code>CII_*</code>, <code>IDENTITY_*</code> and <code>PUBLIC_BASE_URL</code> key is empty;</li>
+<li>the HEC destination for the room stack is in <code>medadvice.db</code>.</li>
+</ul>
+<p>An <code>APP_VERSION</code> line left in the template's <code>.env</code> overrides what <code>/health</code> reports. Keep it equal to the tag, or remove it. <code>check</code> names it when it explains a version refusal.</p>
+<h2>Tests</h2>
+<p><code>tests/test_lab5_setup.py</code> runs every command against fakes only: in-memory Show boxes, an in-memory Cloudflare API behind the real client, and a fake <code>security</code>. It pins the following:</p>
+<ul>
+<li><code>up</code> on a box with Labs 0–4 settings keeps every other <code>.env</code> line and every other destination field;</li>
+<li><code>check</code> changes nothing;</li>
+<li><code>down</code> restores the original bytes, and a second <code>down</code> is a no-op;</li>
+<li>no secret reaches argv, a URL, the output, the run log or the state directory.</li>
+</ul>
+<p>It is registered in <code>tests/run_all.sh</code> and runs with the app's venv: it never imports paramiko, and it fails if anything does.</p>
+</main></body></html>
