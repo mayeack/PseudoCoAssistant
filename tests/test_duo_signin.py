@@ -18,6 +18,7 @@ anything else (a fake client, or the real SDK with its HTTP call replaced).
 
     .venv/bin/python tests/test_duo_signin.py      # exit 0 = pass
 """
+import ast
 import inspect
 import json
 import logging
@@ -33,6 +34,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from typing import List
 from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1232,19 +1234,119 @@ class _RootGrab(logging.Handler):
 logging.getLogger().addHandler(_RootGrab(level=logging.DEBUG))
 
 
+# A child process that starts the app (python -m backend.main, uvicorn, ./run.sh).
+_CHILD_STARTS_APP = re.compile(r"\bbackend[./]main\b|\buvicorn\b|(?:^|/)run\.sh\b")
+_SPAWNERS = {("subprocess", n) for n in ("run", "Popen", "call", "check_call", "check_output")} | \
+    {("os", "system"), ("os", "popen")}
+
+
+def _calls(node, owner: str, name: str) -> bool:
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == name
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == owner)
+
+
+def _imports_app(node) -> bool:
+    if isinstance(node, ast.Import):
+        return any(a.name == "backend.main" or a.name.startswith("backend.main.") for a in node.names)
+    if isinstance(node, ast.ImportFrom):
+        module = node.module or ""
+        return (module == "backend.main" or module.startswith("backend.main.")
+                or (module == "backend" and any(a.name == "main" for a in node.names)))
+    return (isinstance(node, ast.Call) and getattr(node.func, "attr", getattr(node.func, "id", "")) == "import_module"
+            and bool(node.args) and isinstance(node.args[0], ast.Constant) and node.args[0].value == "backend.main")
+
+
+def app_isolation_problems(source: str) -> List[str]:
+    """Why a suite's code (read as code, never as text: a string or a comment
+    that mentions isolate() does not count) can start the app without
+    identity_isolation: in this process (a TestClient, or backend.main
+    imported in any form) without a module-level isolate(...) call ahead of
+    any module-level import of the app, or in a child process (python -m
+    backend.main, uvicorn, ./run.sh) without identity_isolation.child_env(),
+    since the child loads .env again."""
+    tree = ast.parse(source)
+    nodes = list(ast.walk(tree))
+    in_process = any(_imports_app(n) or (isinstance(n, ast.Call) and getattr(n.func, "attr",
+                                                                              getattr(n.func, "id", "")) == "TestClient")
+                     for n in nodes)
+    child = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                and (n.func.value.id, n.func.attr) in _SPAWNERS
+                and any(isinstance(c, ast.Constant) and isinstance(c.value, str) and _CHILD_STARTS_APP.search(c.value)
+                        for a in list(n.args) + [k.value for k in n.keywords] for c in ast.walk(a))
+                for n in nodes)
+    problems: List[str] = []
+    if in_process:
+        isolated = app_at = None
+        for stmt in tree.body:
+            if isolated is None and isinstance(stmt, ast.Expr) and _calls(stmt.value, "identity_isolation", "isolate"):
+                isolated = stmt.lineno
+            if app_at is None and not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                    and any(_imports_app(n) for n in ast.walk(stmt)):
+                app_at = stmt.lineno
+        if isolated is None:
+            problems.append("starts the app with no module-level identity_isolation.isolate(settings)")
+        elif app_at is not None and app_at < isolated:
+            problems.append(f"imports the app (line {app_at}) before identity_isolation.isolate (line {isolated})")
+    if child and not any(_calls(n, "identity_isolation", "child_env") for n in nodes):
+        problems.append("starts the app in a child process without env=identity_isolation.child_env()")
+    return problems
+
+
 def test_every_app_suite_is_isolated() -> None:
     print("every suite that starts the app keeps it off any real Duo and CII")
-    starts_app = re.compile(r"TestClient\(|from backend\.main import|import backend\.main|from backend import main\b")
-    missing = []
-    for path in sorted((ROOT / "tests").glob("test_*.py")):
-        text = path.read_text(encoding="utf-8")
-        if starts_app.search(text) and "identity_isolation.isolate(settings)" not in text:
-            missing.append(path.name)
     # Startup runs identity_signin.start_health_check(): with the dev copy's
     # .env (DUO_ENABLED and the Web SDK keys) a suite that skipped isolate()
     # would send a signed health check to the live tenant on every run, and
     # only run_all.sh's exported blanks would stop it.
-    check("each suite that starts the app calls identity_isolation.isolate(settings)", not missing, str(missing))
+    run_all = (ROOT / "tests" / "run_all.sh").read_text()
+    suites = set((ROOT / "tests").rglob("test_*.py")) | {ROOT / s for s in re.findall(r"^\s+(tests/\S+\.py)$",
+                                                                                    run_all, re.M)}
+    check("the guard reads every suite run_all.sh runs, tests/observability's included",
+          {ROOT / s for s in re.findall(r"^\s+(tests/\S+\.py)$", run_all, re.M)} <= suites
+          and ROOT / "tests" / "observability" / "test_genai_span_content.py" in suites)
+    missing = {path.relative_to(ROOT).as_posix(): problems for path in sorted(suites) if path.exists()
+               for problems in [app_isolation_problems(path.read_text(encoding="utf-8"))] if problems}
+    check("each suite that starts the app calls identity_isolation.isolate(settings) first (child_env() for a child "
+          "process)", not missing, str(missing))
+    good = "import identity_isolation\nidentity_isolation.isolate(settings)\nfrom backend.main import app\n"
+    for name, source, flagged in (
+            ("the call itself, before the app", good, False),
+            ("the call only inside a string", 'x = "identity_isolation.isolate(settings)"\nfrom backend.main import app\n',
+             True),
+            ("the call only in a comment", "# identity_isolation.isolate(settings)\nfrom backend.main import app\n", True),
+            ("the call only inside a function", "def f():\n    identity_isolation.isolate(settings)\n"
+                                                 "from backend.main import app\n", True),
+            ("the app imported before the call", "from backend.main import app\nidentity_isolation.isolate(settings)\n",
+             True),
+            ("from backend import settings_store, main", "from backend import settings_store, main\n", True),
+            ("importlib.import_module('backend.main')", "import importlib\napp = importlib.import_module('backend.main')\n",
+             True),
+            ("TestClient(app) alone", "c = TestClient(app)\n", True),
+            ("python -m backend.main in a child", "subprocess.run([sys.executable, '-m', 'backend.main'])\n", True),
+            ("uvicorn in a child", "subprocess.Popen(['uvicorn', 'backend.main:app'])\n", True),
+            ("./run.sh in a child", "subprocess.run(['./run.sh'])\n", True),
+            ("a child with child_env()", "subprocess.run(['./run.sh'], env=identity_isolation.child_env())\n", False),
+            ("reading run.sh is not starting it", "text = (ROOT / 'run.sh').read_text()\n", False)):
+        got = app_isolation_problems(source)
+        check(f"the guard reads code, not text: {name} -> {'flagged' if flagged else 'passes'}",
+              bool(got) == flagged, str(got))
+    for name in ("test_identity_sessions.py", "test_duo_signin.py"):
+        src = (ROOT / "tests" / name).read_text(encoding="utf-8")
+        cut = src.replace("\nidentity_isolation.isolate(settings)\n", "\n", 1)
+        check(f"{name} without its own isolate() call is flagged (its probe string and this guard do not count)",
+              cut != src and app_isolation_problems(cut), name)
+    env_src = (ROOT / "deploy" / "lab5" / "lab5_envfile.py").read_text()
+    lab5_keys = next(ast.literal_eval(n.value) for n in ast.walk(ast.parse(env_src))
+                     if isinstance(n, ast.AnnAssign) and getattr(n.target, "id", "") == "LAB5_KEYS")
+    covered = set(identity_isolation.IDENTITY_SETTINGS) | set(identity_isolation.LAB5_DEFAULT_SETTINGS) | {"duo_enabled"}
+    check("isolate() covers every Lab 5 key lab5-setup writes (lab5_envfile.LAB5_KEYS)",
+          {k.lower() for k in lab5_keys} == covered, str(sorted({k.lower() for k in lab5_keys} ^ covered)))
+    env = identity_isolation.child_env({"DUO_ENABLED": "true", "DUO_ADMIN_SKEY": "x", "IDENTITY_FAIL_OPEN": "false",
+                                        "PATH": "/bin"})
+    check("child_env() overrides every Lab 5 key (credentials empty, the rest at the app's defaults) and keeps the rest",
+          env["DUO_ENABLED"] == "false" and env["DUO_ADMIN_SKEY"] == "" and env["IDENTITY_FAIL_OPEN"] == "true"
+          and env["IDENTITY_SESSION_TTL_MINUTES"] == "720" and env["HEC_HOST"] == "" and env["PATH"] == "/bin"
+          and {k.upper() for k in covered} <= set(env), str(env))
 
 
 def test_no_leaks() -> None:
