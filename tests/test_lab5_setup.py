@@ -1267,6 +1267,17 @@ def test_victim_clash_after_down() -> None:
     root = world({"01": gone}, [failed], saved_victim="jordan.reyes")
     check("...whatever victim the workshop file names now (a swap leaves the old victim's codes in Duo)",
           len(ls.victim_clashes(root, ws, now)) == 1)
+    swapped = dict(live, env=serving("jordan.reyes", "marcus.bell", "l5-acme-01"))
+    root = world({"01": swapped, "02": gone}, [failed], saved_victim="jordan.reyes")
+    out = ls.victim_clashes(root, ws, now)
+    check("a room still running on its fallback, whose cards keep the old victim's codes: the refusal offers "
+          "`handouts --revoke` with its file (no box touched), never `down`, which would end that room",
+          len(out) == 1 and "run `lab5-setup handouts --revoke` with acme's workshop file" in out[0]
+          and "instance(s) 01" in out[0] and "run `lab5-setup down`" not in out[0]
+          and f"or wait until {lp_minute(now + 7200)}" in out[0], str(out))
+    root = world({"01": gone}, [failed], saved_victim="jordan.reyes")
+    check("...once that room has run down, a re-run of down retries the delete",
+          "run `lab5-setup down` with acme's workshop file first" in ls.victim_clashes(root, ws, now)[0])
 
     other_persona = batch(codes=[{"persona": "nina.osei", "user_id": "U2", "ids": ["DU2"]}])
     root = world({"01": gone}, [other_persona])

@@ -1476,6 +1476,15 @@ def _box_admits(rec: Optional[Dict[str, Any]], user: str, legacy_victim: Optiona
     return user in serves
 
 
+def _box_reachable(rec: Optional[Dict[str, Any]]) -> Optional[bool]:
+    """Whether attendees can still reach this box of another workshop at all,
+    whoever its gate admits: a tunnel or DNS record recorded and not deleted.
+    None when its record cannot tell (unreadable, or a field of the wrong type)."""
+    if rec is None or any(rec.get(key) is not None and not isinstance(rec.get(key), dict) for key in ("tunnel", "dns")):
+        return None
+    return any((rec.get(key) or {}).get("id") and not (rec.get(key) or {}).get("deleted") for key in ("tunnel", "dns"))
+
+
 def victim_clashes(root: Path, ws: Workshop, now: float) -> List[str]:
     """Another live workshop under this Mac's state root that still holds
     this room's victim. Plan 4.3 refuses a room rather than share a victim:
@@ -1510,12 +1519,16 @@ def victim_clashes(root: Path, ws: Workshop, now: float) -> List[str]:
         legacy = str(saved.get("victim") or "") if saved else ""
         admits: List[str] = []
         unknown_boxes: List[str] = []
+        running: List[str] = []
         for path in sorted((other / "boxes").glob("*.json")):
-            verdict = _box_admits(_state_doc(path), victim, legacy)
+            rec = _state_doc(path)
+            verdict = _box_admits(rec, victim, legacy)
             if verdict is None:
                 unknown_boxes.append(path.stem)
             elif verdict:
                 admits.append(path.stem)
+            if _box_reachable(rec):
+                running.append(path.stem)
         deletable: List[float] = []
         undeletable: List[float] = []
         unread_cards: List[str] = []
@@ -1560,24 +1573,36 @@ def victim_clashes(root: Path, ws: Workshop, now: float) -> List[str]:
         out.append(f"room.victim {victim} is still in use by workshop {other.name}: {'; and '.join(why)}. Every "
                    f"room needs its own victim (plan 4.3): one room's containment would end the other's victim "
                    f"sessions and codes. Use another victim (room.fallback, say), or "
-                   + _clash_advice(other, admits, unknown_boxes, deletable, undeletable, unread_cards, unread_until))
+                   + _clash_advice(other, admits, unknown_boxes, deletable, undeletable, unread_cards, unread_until,
+                                   running))
     return out
 
 
 def _clash_advice(other: Path, admits: Sequence[str], unknown_boxes: Sequence[str], deletable: Sequence[float],
                   undeletable: Sequence[float], unread_cards: Sequence[str],
-                  unread_until: Sequence[Optional[float]]) -> str:
+                  unread_until: Sequence[Optional[float]], running: Sequence[str] = ()) -> str:
     """The steps that clear every reason of a clash, together. A box that
     admits the victim is cleared only by `down`, and a record that cannot be
     read only once it is restored; codes whose ids were recorded by `down` or
     by their own expiry; codes whose ids this tool never learned only by
-    their expiry. Waiting alone is offered only when it clears everything."""
+    their expiry. Waiting alone is offered only when it clears everything.
+
+    When only codes hold the victim and the other room is still running on
+    another victim (a swap to its fallback leaves the old victim's codes on
+    its cards), `down` would end that room: `handouts --revoke` deletes its
+    cards' earlier codes and touches no box, so that is the step offered."""
     acts: List[str] = []
     restore = ([f"the box record(s) of instance(s) {', '.join(unknown_boxes)}"] if unknown_boxes else []) + \
               ([f"the participant record(s) of instance(s) {', '.join(unread_cards)}"] if unread_cards else [])
     if restore:
         acts.append(f"restore {' and '.join(restore)} under {other}")
-    if admits or unknown_boxes or deletable or unread_cards:
+    if admits or unknown_boxes:
+        acts.append(f"run `lab5-setup down` with {other.name}'s workshop file")
+    elif (deletable or unread_cards) and running:
+        acts.append(f"run `lab5-setup handouts --revoke` with {other.name}'s workshop file, which is still running "
+                    f"(instance(s) {', '.join(running)}): it deletes the earlier codes on its cards, these included, "
+                    f"and puts fresh ones on them to print again, and it touches no box; `down` would end that room")
+    elif deletable or unread_cards:
         acts.append(f"run `lab5-setup down` with {other.name}'s workshop file")
     last_wait = max(undeletable) if undeletable else None
     every = list(deletable) + list(undeletable) + list(unread_until)
