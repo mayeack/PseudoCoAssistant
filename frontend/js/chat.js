@@ -7,7 +7,7 @@ let boundaryEnabled = false;
 let aiDefenseEnabled = false;
 let agentControlEnabled = false;
 let nemoGuardrailsEnabled = false;
-let internalPolicyEnabled = true;
+let internalPolicyEnabled = false;
 let multiAgentEnabled = false;
 let autoPromptEnabled = false;
 let autoPromptStatusInterval = null;
@@ -484,8 +484,8 @@ document.addEventListener('DOMContentLoaded', function() {
         agentControlEnabled = savedAgentControlEnabled === 'true';
         // NeMo Guardrails defaults OFF unless explicitly turned on.
         nemoGuardrailsEnabled = savedNemoGuardrailsEnabled === 'true';
-        // Internal policy engine defaults ON unless explicitly turned off.
-        internalPolicyEnabled = savedInternalPolicyEnabled !== 'false';
+        // Internal policy engine defaults OFF unless explicitly turned on.
+        internalPolicyEnabled = savedInternalPolicyEnabled === 'true';
         // Multi-agent mode defaults OFF unless explicitly turned on.
         multiAgentEnabled = savedMultiAgentEnabled === 'true';
         // Mint a fresh session (clears the old transcript) rather than reusing

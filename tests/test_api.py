@@ -1008,8 +1008,11 @@ def main() -> int:
               re.search(r'id="sprayDuration"[^>]*value="60"', _drawer) is not None)
         check("Drawer: pills carry only the uniform On/Off text in the markup",
               re.search(r'id="\w+Status"[^>]*>\s*(OFF|ON|ALWAYS ON)\s*<', _drawer) is None)
-        check("Drawer: the default-on pill (Internal Policy) is the green On pill",
-              re.search(r'id="internalPolicyStatus"[^>]*bg-green-100 text-green-700[^>]*>\s*On\s*<', _drawer) is not None)
+        check("Drawer: Internal Policy starts Off (grey Off pill, switch unticked)",
+              re.search(r'id="internalPolicyStatus"[^>]*bg-gray-100 text-gray-600[^>]*>\s*Off\s*<', _drawer) is not None
+              and re.search(r'id="internalPolicyToggle"[^>]*\bchecked\b', _drawer) is None)
+        check("Drawer: no card's switch is ticked in the markup (every control starts Off)",
+              re.search(r'type="checkbox"[^>]*\bchecked\b', _drawer) is None)
         # One toggle accent for every card: an On switch looks the same whichever control it is.
         _accents = set(re.findall(r"peer-checked:bg-[a-z]+-\d+|peer-focus:ring-[a-z]+-\d+", _drawer))
         check("Drawer: every toggle uses the same On accent (green-600 / ring-green-300)",
@@ -1032,7 +1035,7 @@ def main() -> int:
         check("Composer: attachment chip row present", 'id="attachmentChip"' in a_html)
         check("Composer: the attachment controls are outside the Demo Controls drawer",
               all(f'id="{i}"' not in _drawer for i in ("attachButton", "attachmentInput", "attachmentChip")))
-        check("Chat: chat.js cache-buster bumped to v=34", "/static/js/chat.js?v=34" in a_html)
+        check("Chat: chat.js cache-buster bumped to v=35", "/static/js/chat.js?v=35" in a_html)
         # Auto-Generate Sessions turns itself off after 60 minutes; the countdown
         # lives inside the existing #autoPromptStats counter, beside the pill.
         check("Auto-Generate Sessions: card says it turns off after 60 minutes",
