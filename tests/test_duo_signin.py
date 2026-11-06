@@ -30,6 +30,7 @@ import sys
 import tempfile
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
@@ -154,9 +155,10 @@ class FakeDuo:
     health_mode = "ok"            # "ok", "hang", or an exception instance to raise
     answer = staticmethod(good_answer)
 
-    def __init__(self, *, client_id, client_secret, host, redirect_uri):
+    def __init__(self, *, client_id, client_secret, host, redirect_uri, duo_certs=None):
         self.client_id, self.client_secret, self.host, self.redirect_uri = (
             client_id, client_secret, host, redirect_uri)
+        self.duo_certs = duo_certs
         FakeDuo.instances.append(self)
 
     def health_check(self):
@@ -272,6 +274,8 @@ def test_startup_health_check(c: TestClient) -> None:
     inst = FakeDuo.instances[-1]
     check("the client is built from .env settings: id, secret, API host",
           (inst.client_id, inst.client_secret, inst.host) == (CLIENT_ID, CLIENT_SECRET, API_HOST))
+    check("...and the CA bundle setting (duo_certs: REQUESTS_CA_BUNDLE's file, else None = Duo's pinning)",
+          inst.duo_certs == signin.duo_ca_bundle(), str(inst.duo_certs))
     check("redirect_uri = PUBLIC_BASE_URL + /auth/duo/callback, and nothing else",
           inst.redirect_uri == "https://testserver/auth/duo/callback", inst.redirect_uri)
     for _ in range(3):
@@ -990,8 +994,8 @@ def test_real_sdk() -> None:
     signin.reset()
     calls, box = [], {"secret": CLIENT_SECRET, "claims": {}}
 
-    def fake_post(url, data=None, params=None, headers=None, verify=None, proxies=None):
-        calls.append({"url": url, "data": data, "params": params, "verify": verify})
+    def fake_post(url, data=None, params=None, headers=None, verify=None, proxies=None, timeout=None):
+        calls.append({"url": url, "data": data, "params": params, "verify": verify, "timeout": timeout})
         if url == f"https://{API_HOST}/oauth/v1/health_check":
             jwt.decode(data["client_assertion"], CLIENT_SECRET, algorithms=["HS512"], audience=url)
             return _Resp(200, {"stat": "OK", "response": {"timestamp": int(time.time())}})
@@ -1020,8 +1024,12 @@ def test_real_sdk() -> None:
         host_capabilities.reset_duo_health()
         check("the health check through the real SDK passes and opens the gate",
               signin.run_health_check() is True and signin.gate()["enabled"] is True, str(signin.gate()))
-        check("...with Duo's CA bundle pinned (the SDK's own ca_certs.pem)",
-              bool(calls) and calls[-1]["verify"] == duo_sdk.DEFAULT_CA_CERT_PATH, str(calls[-1:]))
+        trust = signin.duo_ca_bundle() or duo_sdk.DEFAULT_CA_CERT_PATH
+        check("...TLS checked against REQUESTS_CA_BUNDLE when it names a file, else Duo's pinned bundle",
+              bool(calls) and calls[-1]["verify"] == trust, str(calls[-1:])[:300])
+        check("...with a timeout on the SDK's HTTP call (the SDK sets none and takes none)",
+              bool(calls) and calls[-1]["timeout"] == signin.DUO_HTTP_TIMEOUT
+              and isinstance(duo_sdk.requests, signin._TimedRequests), str(calls[-1:])[:300])
         c = client()
         r, q, req = begin_flow(c)
         check("the prompt URL is Duo's authorize endpoint for this client",
@@ -1031,10 +1039,11 @@ def test_real_sdk() -> None:
               and cookie_header(r, STATE_COOKIE).startswith(f"{STATE_COOKIE}={req['state']};"), str(req))
         r = callback(c, req["state"], code="REALSDK-CODE-1")
         tok = [x for x in calls if x["url"].endswith("/oauth/v1/token")][-1]
-        check("the exchange posts Duo's code with the same redirect_uri, CA pinned",
+        check("the exchange posts Duo's code with the same redirect_uri, the same TLS trust, a timeout",
               tok["params"]["code"] == "REALSDK-CODE-1"
               and tok["params"]["redirect_uri"] == "https://testserver/auth/duo/callback"
-              and tok["verify"] == duo_sdk.DEFAULT_CA_CERT_PATH, str(tok["params"])[:200])
+              and tok["verify"] == trust and tok["timeout"] == signin.DUO_HTTP_TIMEOUT,
+              str(tok["params"])[:200])
         check("Duo's signed token (allow, our nonce, our user) signs the browser in",
               location(r) == "/app?signin=ok" and c.get("/api/identity/me", headers=H).json().get("username") == "nina.osei"
               and rows("nina.osei")[0].duo_txid == "5b2c3d4e-0000-4000-8000-000000000002", location(r))
@@ -1077,7 +1086,7 @@ def test_frontend() -> None:
     check("#identityBanner sits beside #emergencyBanner, hidden by default",
           re.search(r'<div id="identityBanner" class="hidden ', page) is not None
           and 0 < page.index('id="emergencyBanner"') - page.index('id="identityBanner"') < 4000)
-    check("chat.js cache-buster bumped to v=35", "/static/js/chat.js?v=35" in page)
+    check("chat.js cache-buster bumped to v=36", "/static/js/chat.js?v=36" in page)
     check("chat.js: exactly ONE fetch wrapper, around window.fetch",
           js.count("window.fetch =") == 1 and "const _pageFetch = window.fetch.bind(window);" in js
           and js.count("_pageFetch(") == 1)
@@ -1130,6 +1139,500 @@ def test_no_leaks() -> None:
           CLIENT_SECRET not in blob and CLIENT_SECRET not in files and CLIENT_SECRET not in lines)
 
 
+# --------------------------------------------------------------------------- stage-review fixes
+class _LocalDuo(BaseHTTPRequestHandler):
+    """A fake Duo on 127.0.0.1 (plain http; the SDK's endpoint templates are
+    pointed at it). Answers the health check and the token exchange the way
+    Duo does, sets a load-balancer cookie, and echoes /echo for httpx."""
+
+    nonce = ""
+    seen_tokens = []
+
+    def _send(self, status, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Set-Cookie", f"duo_lb={LB_COOKIE}; Path=/; HttpOnly")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        parts = urlsplit(self.path)
+        self.rfile.read(int(self.headers.get("content-length") or 0))
+        host = self.headers.get("host")
+        if parts.path == "/oauth/v1/health_check":
+            return self._send(200, {"stat": "OK", "response": {"timestamp": int(time.time())}})
+        if parts.path == "/oauth/v1/token":
+            q = parse_qs(parts.query)
+            endpoint = f"http://{host}/oauth/v1/token"
+            jwt.decode(q["client_assertion"][0], CLIENT_SECRET, algorithms=["HS512"], audience=endpoint)
+            _LocalDuo.seen_tokens.append(q["code"][0])
+            now = int(time.time())
+            claims = {"iss": endpoint, "aud": CLIENT_ID, "iat": now, "exp": now + 300,
+                      "preferred_username": "nina.osei", "nonce": _LocalDuo.nonce,
+                      "auth_result": {"result": "allow", "status": "allow"},
+                      "auth_context": {"txid": "6c3d4e5f-0000-4000-8000-000000000003"}}
+            return self._send(200, {"id_token": jwt.encode(claims, CLIENT_SECRET, algorithm="HS512"),
+                                    "access_token": "ACCESS-TOKEN-FROM-DUO-1234", "expires_in": 300})
+        return self._send(404, {"stat": "FAIL", "code": 40400})
+
+    def do_GET(self):
+        return self._send(200, {"ok": True, "access_token": "ECHO-ACCESS-TOKEN-5678"})
+
+    def log_message(self, *_a):
+        pass
+
+
+LB_COOKIE = "LBCOOKIE-SECRET-VALUE-9012"
+
+
+class _Capture(logging.Handler):
+    """Every formatted line, as the app's own log handler would write it."""
+
+    def __init__(self):
+        super().__init__(level=logging.DEBUG)
+        self.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append((record.name, self.format(record)))
+
+
+def test_debug_log_redaction() -> None:
+    print("LOG_LEVEL=DEBUG: no Duo code, assertion, cookie, token or secret in any log line")
+    from backend.logging import redaction
+
+    check("the redacting log record factory is installed at app import (setup_logging)", redaction.installed())
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _LocalDuo)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    cap = _Capture()
+    root = logging.getLogger()
+    saved_level = root.level
+    saved_templates = (duo_sdk.OAUTH_V1_TOKEN_ENDPOINT, duo_sdk.OAUTH_V1_HEALTH_CHECK_ENDPOINT)
+    saved_env = {k: os.environ.get(k) for k in ("NO_PROXY", "no_proxy")}
+    code = "LOCALDUO-CODE-4c1f9a"
+    _CODES_SENT.add(code)
+    root.addHandler(cap)
+    root.setLevel(logging.DEBUG)
+    duo_sdk.OAUTH_V1_TOKEN_ENDPOINT = "http://{}/oauth/v1/token"
+    duo_sdk.OAUTH_V1_HEALTH_CHECK_ENDPOINT = "http://{}/oauth/v1/health_check"
+    os.environ["NO_PROXY"] = os.environ["no_proxy"] = "127.0.0.1,localhost"
+    _configure(duo_api_host=f"127.0.0.1:{port}")
+    signin.set_client_factory(None)
+    signin.reset()
+    try:
+        host_capabilities.reset_duo_health()
+        check("the real SDK's health check, through real requests/urllib3, passes",
+              signin.run_health_check() is True, str(signin.gate()))
+        c = client()
+        r = start(c, "nina.osei")
+        q = parse_qs(urlsplit(location(r)).query)
+        _LocalDuo.nonce = q["nonce"][0]
+        state = jwt.decode(q["request"][0], CLIENT_SECRET, algorithms=["HS512"],
+                           audience=f"https://127.0.0.1:{port}")["state"]
+        r = callback(c, state, code=code)
+        check("a sign-in through the real SDK and urllib3 succeeds with redaction on",
+              location(r) == "/app?signin=ok" and _LocalDuo.seen_tokens[-1:] == [code], location(r))
+
+        import httpx
+
+        with httpx.Client(timeout=5) as hc:
+            hc.get(f"http://127.0.0.1:{port}/echo?access_token=QUERY-TOKEN-3456&username=nina.osei",
+                   headers={"Authorization": "Bearer BEARER-TOKEN-7890abcdef"})
+    finally:
+        root.removeHandler(cap)
+        root.setLevel(saved_level)
+        duo_sdk.OAUTH_V1_TOKEN_ENDPOINT, duo_sdk.OAUTH_V1_HEALTH_CHECK_ENDPOINT = saved_templates
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        server.shutdown()
+        _configure()
+        signin.set_client_factory(FakeDuo)
+        signin.reset()
+        host_capabilities.reset_duo_health()
+        _open_gate()
+
+    text = "\n".join(line for _, line in cap.lines)
+    token_lines = [line for name, line in cap.lines
+                   if name.startswith("urllib3") and "/oauth/v1/token?" in line]
+    check("urllib3 did log the token request line at DEBUG (the path the finding was about)",
+          len(token_lines) == 1, str(len(token_lines)))
+    check("...with code and client_assertion kept as keys, their values [REDACTED]",
+          bool(token_lines) and "code=[REDACTED]" in token_lines[0]
+          and "client_assertion=[REDACTED]" in token_lines[0], (token_lines or [""])[0][:300])
+    leaks = {name: value for name, value in (
+        ("the Duo code", code), ("a JWT (client_assertion / id_token)", "eyJ"),
+        ("the Web SDK secret", CLIENT_SECRET), ("Duo's cookie", LB_COOKIE),
+        ("the query token", "QUERY-TOKEN-3456"), ("the bearer token", "BEARER-TOKEN-7890abcdef"),
+        ("the echoed token", "ECHO-ACCESS-TOKEN-5678")) if value in text}
+    check("none of them in any captured line", not leaks, str(sorted(leaks)))
+    check("httpcore's DEBUG response headers were logged, the Set-Cookie value [REDACTED]",
+          any(n.startswith("httpcore") and "(b'Set-Cookie', b'[REDACTED]')" in l for n, l in cap.lines))
+    check("httpx's request line keeps the URL, its query values [REDACTED]",
+          any(n == "httpx" and "/echo?access_token=[REDACTED]&username=[REDACTED]" in l for n, l in cap.lines))
+
+
+def test_redaction_rules() -> None:
+    print("redaction: child loggers, tracebacks, other loggers' exact secrets, structure kept")
+    from backend.logging import redaction
+
+    cap = _Capture()
+    root = logging.getLogger()
+    root.addHandler(cap)
+    saved_level = root.level
+    root.setLevel(logging.DEBUG)
+    try:
+        child = logging.getLogger("urllib3.brand_new_child_" + str(os.getpid()))
+        child.debug('%s "%s %s"', "https://h:443", "POST", "/oauth/v1/token?code=CHILD-CODE-1&state=s")
+        try:
+            raise ValueError("Max retries exceeded with url: /oauth/v1/token?code=TRACE-CODE-2&client_assertion=x")
+        except ValueError:
+            logging.getLogger("requests.adapters").exception("connection failed")
+        redaction.register("RUNTIME-REGISTERED-SECRET-3")
+        access = logging.getLogger("uvicorn.access")
+        saved_access = (access.level, access.propagate)
+        access.setLevel(logging.INFO)
+        access.propagate = False         # as uvicorn configures it: its own handler only
+        access.addHandler(cap)
+        try:
+            access.info('%s - "%s %s HTTP/%s" %d', "198.51.100.7:5000", "GET",
+                        f"/app?x={CLIENT_SECRET}&y=RUNTIME-REGISTERED-SECRET-3", "1.1", 200)
+        finally:
+            access.removeHandler(cap)
+            access.setLevel(saved_access[0])
+            access.propagate = saved_access[1]
+        logging.getLogger("some.other.module").info("plain %s, status_code=%d, ?k=v", "words", 200)
+    finally:
+        root.removeHandler(cap)
+        root.setLevel(saved_level)
+    text = "\n".join(line for _, line in cap.lines)
+    check("a child logger created after install is redacted too (filters on 'urllib3' alone would miss it)",
+          "CHILD-CODE-1" not in text and "code=[REDACTED]" in text)
+    check("a traceback logged with exc_info is redacted", "TRACE-CODE-2" not in text
+          and any("Max retries exceeded" in l and "code=[REDACTED]" in l for _, l in cap.lines))
+    acc = [l for n, l in cap.lines if n == "uvicorn.access"]
+    check("another logger: the exact secrets go, its argument tuple and format stay (uvicorn's access log)",
+          len(acc) == 1 and CLIENT_SECRET not in acc[0] and "RUNTIME-REGISTERED-SECRET-3" not in acc[0]
+          and 'GET /app?x=[REDACTED]&y=[REDACTED] HTTP/1.1" 200' in acc[0], str(acc)[:300])
+    check("...and ordinary lines elsewhere are left alone",
+          any(l.endswith("plain words, status_code=200, ?k=v") for _, l in cap.lines))
+    for raw, want in (
+        ("POST /x?grant_type=authorization_code&code=A1&client_assertion=eyJa.eyJb.c HTTP/1.1",
+         "POST /x?grant_type=[REDACTED]&code=[REDACTED]&client_assertion=[REDACTED] HTTP/1.1"),
+        ("[(b'Set-Cookie', b'sid=1; Path=/'), (b'Content-Type', b'text/plain')]",
+         "[(b'Set-Cookie', b'[REDACTED]'), (b'Content-Type', b'text/plain')]"),
+        ("{'Authorization': 'Bearer abcdefgh', 'Accept': '*/*'}", "{'Authorization': '[REDACTED]', 'Accept': '*/*'}"),
+        ('{"access_token": "t0k3n-abc", "expires_in": 3600, "code": 40002}',
+         '{"access_token": "[REDACTED]", "expires_in": 3600, "code": 40002}'),
+        ("Cookie: a=b; c=d", "Cookie: [REDACTED]"),
+        ("client_secret=abc123xyz status_code=401 response_type=code", "client_secret=[REDACTED] status_code=401 response_type=code"),
+    ):
+        got = redaction.redact(raw)
+        check(f"redact: {raw[:48]!r}", got == want and redaction.redact(got) == got, got)
+
+
+def test_rate_limit_order_and_eviction() -> None:
+    print("rate limit: the allowlist first; the per-username table evicts one name at a time (LRU)")
+    signin.reset()
+    saved = (signin.RATE_LIMIT_STARTS, signin._RATE_KEYS_MAX)
+    signin.RATE_LIMIT_STARTS = 2
+    try:
+        c = client()
+        for _ in range(2):
+            start(c, "victim.user")
+        check("victim.user has spent its budget", location(start(c, "victim.user")) == "/login/duo?error=rate_limited")
+        r = start(c, "not.on.the.list")
+        check("a name not on the allowlist -> not_allowed, and it takes no rate slot",
+              location(r) == "/login/duo?error=not_allowed" and "not.on.the.list" not in signin._starts,
+              str(list(signin._starts)))
+        for i in range(signin._RATE_KEYS_MAX + 50):        # the flood that used to wipe the table
+            try:
+                signin.begin(f"made.up.{i}")
+            except signin.SigninError:
+                pass
+        check("a flood of made-up names never reaches the table, so victim.user's spent budget stands",
+              list(signin._starts) == ["victim.user"]
+              and location(start(c, "victim.user")) == "/login/duo?error=rate_limited", str(list(signin._starts))[:200])
+
+        signin.reset()
+        signin._RATE_KEYS_MAX = 2
+        start(c, "nina.osei"); start(c, "avery.kim"); start(c, "nina.osei")   # nina used last
+        start(c, "victim.user")                                              # table full: one goes
+        check("a full table evicts the least recently used name only, never all of them",
+              list(signin._starts) == ["nina.osei", "victim.user"]
+              and len(signin._starts["nina.osei"]) == 2, str({k: len(v) for k, v in signin._starts.items()}))
+    finally:
+        signin.RATE_LIMIT_STARTS, signin._RATE_KEYS_MAX = saved
+        signin.reset()
+
+
+def test_hung_call_releases_slot() -> None:
+    print("a Duo call that never returns gives its slot back at its deadline")
+    release = threading.Event()
+    errors = []
+    saved_hook = threading.excepthook
+    threading.excepthook = lambda args: errors.append(args.exc_value)
+
+    def hang(*_a):
+        release.wait(10)
+        return "late"
+
+    try:
+        outcomes = []
+        for _ in range(signin._DUO_CALL_SLOTS + 2):
+            try:
+                signin._bounded(hang, timeout=0.15)
+            except signin._DuoTimeout:
+                outcomes.append("timeout")
+        check(f"{signin._DUO_CALL_SLOTS + 2} hung calls each answer at the deadline",
+              outcomes == ["timeout"] * (signin._DUO_CALL_SLOTS + 2), str(outcomes))
+        t0 = time.monotonic()
+        value = signin._bounded(lambda: "answered", timeout=1.0)
+        check("...and a call after them still gets a slot at once (none is held by a hung call)",
+              value == "answered" and time.monotonic() - t0 < 0.5, f"{time.monotonic() - t0:.2f}s")
+        check("every slot is free while the hung calls are still running",
+              signin._duo_slots._value == signin._DUO_CALL_SLOTS, str(signin._duo_slots._value))
+        busy = threading.Lock()
+        try:
+            signin._bounded(hang, timeout=0.15, exclusive=busy)
+        except signin._DuoTimeout:
+            pass
+        t0 = time.monotonic()
+        try:
+            signin._bounded(lambda: "x", timeout=1.0, exclusive=busy)
+            second = "ran"
+        except signin._DuoBusy:
+            second = "busy"
+        check("an exclusive call still running: the next one is refused at once, not stacked",
+              second == "busy" and time.monotonic() - t0 < 0.1, second)
+        release.set()
+        deadline = time.monotonic() + 3
+        while busy.locked() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        check("...and runs again once the hung call has ended", signin._bounded(lambda: "x", timeout=1.0,
+                                                                                exclusive=busy) == "x")
+        time.sleep(0.1)
+        check("a hung call ending later releases nothing twice (no over-release, no thread error)",
+              not errors and signin._duo_slots._value == signin._DUO_CALL_SLOTS,
+              f"{errors!r} {signin._duo_slots._value}")
+    finally:
+        release.set()
+        threading.excepthook = saved_hook
+
+    saved = signin.HEALTH_TIMEOUT_S
+    signin.HEALTH_TIMEOUT_S = 0.2
+    FakeDuo.health_mode = "hang"
+    try:
+        n = len(FakeDuo.health_calls)
+        first = signin.run_health_check()
+        second = signin.run_health_check()
+        check("a health check behind one still waiting for Duo starts no second call",
+              first is False and second is False and len(FakeDuo.health_calls) == n + 1
+              and signin.gate()["reason"] == "Duo health check failed: the previous health check is "
+                                            "still waiting for Duo", signin.gate()["reason"])
+    finally:
+        signin.HEALTH_TIMEOUT_S = saved
+        FakeDuo.health_mode = "ok"
+        time.sleep(1.5)                       # the hung fake sleeps 1.5 s
+        check("...and once it has ended, the next check runs and passes", signin.run_health_check() is True)
+        _open_gate()
+
+
+def test_health_timer() -> None:
+    print("the duo_signin gate re-checks Duo's health on a timer, off the event loop")
+    check("the app's shutdown stopped the checker it started", signin._health_thread is None)
+    saved = (signin.HEALTH_INTERVAL_S, signin.HEALTH_RETRY_S)
+    signin.HEALTH_INTERVAL_S, signin.HEALTH_RETRY_S = 0.2, 0.1
+    host_capabilities.reset_duo_health()
+    FakeDuo.health_calls.clear()
+
+    def wait_for(pred, timeout=3.0):
+        deadline = time.monotonic() + timeout
+        while not pred() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return pred()
+
+    try:
+        t = signin.start_health_check()
+        check("it runs on a daemon thread named duo-health-check",
+              t is not None and t.daemon and t.name == "duo-health-check" and t is not threading.main_thread())
+        check("...and checks again and again (not once at startup)", wait_for(lambda: len(FakeDuo.health_calls) >= 3),
+              str(len(FakeDuo.health_calls)))
+        check("each check is a bounded duo-call thread", all(x.name == "duo-call" for x in FakeDuo.health_calls))
+        check("start again: the running checker is returned, not a second one", signin.start_health_check() is t)
+        FakeDuo.health_mode = DuoException({"stat": "FAIL", "code": 40301, "message": "access_denied"})
+        check("Duo starts failing: the next check closes the gate",
+              wait_for(lambda: not signin.gate()["enabled"]) and "40301" in signin.gate()["reason"], str(signin.gate()))
+        FakeDuo.health_mode = "ok"
+        check("Duo recovers: a retry reopens it", wait_for(lambda: signin.gate()["enabled"]), str(signin.gate()))
+        signin.stop_health_check()
+        check("stop: the checker ends", not t.is_alive())
+        n = len(FakeDuo.health_calls)
+        time.sleep(0.5)
+        check("...and checks no more", len(FakeDuo.health_calls) == n)
+    finally:
+        signin.stop_health_check()
+        signin.HEALTH_INTERVAL_S, signin.HEALTH_RETRY_S = saved
+        FakeDuo.health_mode = "ok"
+        host_capabilities.reset_duo_health()
+        _open_gate()
+
+
+def test_ca_bundle() -> None:
+    print("Duo's TLS: the repo's CA bundle when one is configured, else duo_universal's pinning")
+    names = ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+    saved = {k: os.environ.get(k) for k in names}
+    bundle = os.path.join(_TMP, "corp-ca-bundle.pem")
+    Path(bundle).write_text("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n")
+
+    def env(**values):
+        for k in names:
+            os.environ.pop(k, None)
+        os.environ.update({k: v for k, v in values.items() if v is not None})
+
+    try:
+        env(REQUESTS_CA_BUNDLE=bundle)
+        check("REQUESTS_CA_BUNDLE names a file -> Duo is verified against it", signin.duo_ca_bundle() == bundle)
+        real = signin._default_client_factory(client_id=CLIENT_ID, client_secret=CLIENT_SECRET, host=API_HOST,
+                                              redirect_uri="https://testserver/auth/duo/callback",
+                                              duo_certs=signin.duo_ca_bundle())
+        check("...the real SDK client verifies with that bundle (TLS on, pinning off)",
+              real._duo_certs == bundle and not real._disable_ca_pinning)
+        signin.set_client_factory(FakeDuo)
+        signin._client()
+        check("...and the app's client is built with it (duo_certs)", FakeDuo.instances[-1].duo_certs == bundle)
+        env(CURL_CA_BUNDLE=bundle)
+        check("CURL_CA_BUNDLE counts too (requests' own order)", signin.duo_ca_bundle() == bundle)
+        env()
+        check("no bundle configured -> None", signin.duo_ca_bundle() is None)
+        signin._client()
+        check("...the app's client is rebuilt for it, with duo_certs=None", FakeDuo.instances[-1].duo_certs is None)
+        real = signin._default_client_factory(client_id=CLIENT_ID, client_secret=CLIENT_SECRET, host=API_HOST,
+                                              redirect_uri="https://testserver/auth/duo/callback", duo_certs=None)
+        check("...and the real SDK keeps Duo's pinned bundle", real._duo_certs == duo_sdk.DEFAULT_CA_CERT_PATH)
+        env(REQUESTS_CA_BUNDLE=os.path.join(_TMP, "missing.pem"))
+        check("a bundle path that is not a file -> pinning kept", signin.duo_ca_bundle() is None)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        signin.set_client_factory(FakeDuo)
+
+
+def test_server_info_identity_session() -> None:
+    print("GET /api/server-info: identity_session says whether THIS browser holds a verified session")
+    _wipe_sessions()
+    c = client()
+    r = c.get("/api/server-info", headers=H)
+    check("anonymous: identity_session false, and the answer is never cached",
+          r.json().get("identity_session") is False and "no-store" in r.headers.get("cache-control", ""))
+    sign_in(c, "nina.osei", code="CODE-SRVINFO-1")
+    check("signed in: identity_session true", c.get("/api/server-info", headers=H).json().get("identity_session") is True)
+    _configure(duo_enabled=False)
+    try:
+        check("DUO_ENABLED off: false even with the cookie (the middleware does not read it)",
+              c.get("/api/server-info", headers=H).json().get("identity_session") is False)
+    finally:
+        _configure()
+
+
+# Loads the real chat.js with a stub DOM and fetch, runs refreshIndicators()
+# per scenario, and prints how many GET /api/identity/me each one sent.
+_POLL_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const scenarios = JSON.parse(process.argv[3]);
+function run(sc) {
+  const requests = [];
+  const ctx = {
+    console: { log() {}, warn() {}, error() {}, debug() {} },
+    fetch: async (input) => {
+      const url = String(input);
+      requests.push(url);
+      const body = url.startsWith('/api/server-info') ? sc.server_info
+                 : url.startsWith('/api/identity/me') ? (sc.me || { signed_in: false }) : {};
+      return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body),
+               headers: { get: (k) => (k.toLowerCase() === 'content-type' ? 'application/json' : null) },
+               clone() { return this; } };
+    },
+    document: { addEventListener() {}, getElementById: () => null, querySelectorAll: () => [],
+                querySelector: () => null, hidden: false,
+                documentElement: { classList: { toggle() {}, add() {}, remove() {} } } },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    history: { replaceState() {} },
+    location: { search: '', pathname: '/app', hash: '', href: '' },
+    setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {},
+    URLSearchParams,
+  };
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(src, ctx, { filename: 'chat.js' });
+  return { ctx, requests };
+}
+(async () => {
+  const out = {};
+  for (const [name, sc] of Object.entries(scenarios)) {
+    const { ctx, requests } = run(sc);
+    for (let i = 0; i < (sc.polls || 3); i++) {
+      vm.runInContext('refreshIndicators()', ctx);
+      for (let j = 0; j < 20; j++) await new Promise((r) => setImmediate(r));
+    }
+    out[name] = { me: requests.filter((u) => u.startsWith('/api/identity/me')).length,
+                  info: requests.filter((u) => u.startsWith('/api/server-info')).length };
+  }
+  console.log(JSON.stringify(out));
+})().catch((e) => { console.error(e && e.stack || e); process.exit(2); });
+"""
+
+
+def test_identity_poll_inert() -> None:
+    print("chat.js: GET /api/identity/me only while gated.duo_signin is open or a session exists")
+    js = (ROOT / "frontend" / "js" / "chat.js").read_text()
+    refresh = re.search(r"function refreshIndicators\(\) \{(.*?)\n\}", js, re.S).group(1)
+    check("refreshIndicators asks identityPollWanted() before refreshIdentity()",
+          "if (identityPollWanted()) refreshIdentity();" in refresh)
+    check("server-info's identity_session is kept with the gates",
+          "identity_session: data.identity_session === true" in js)
+    node = shutil.which("node")
+    if not node:
+        print("  SKIP  node is not installed: the behavioural poll check did not run")
+        return
+    harness = Path(_TMP, "poll_harness.js")
+    harness.write_text(_POLL_HARNESS)
+    off = {"enabled": False, "reason": "Duo sign-in is off (DUO_ENABLED is not true)."}
+    down = {"enabled": False, "reason": "Duo health check failed: ConnectionError"}
+    scenarios = {
+        "duo_off": {"server_info": {"gated": {"duo_signin": off}, "identity_session": False}},
+        "no_field": {"server_info": {"gated": {}}},
+        "gate_open": {"server_info": {"gated": {"duo_signin": {"enabled": True, "reason": ""}},
+                                      "identity_session": False}},
+        "down_with_session": {"server_info": {"gated": {"duo_signin": down}, "identity_session": True},
+                              "me": {"signed_in": True, "username": "nina.osei"}},
+        "down_no_session": {"server_info": {"gated": {"duo_signin": down}, "identity_session": False}},
+    }
+    out = subprocess.run([node, str(harness), str(ROOT / "frontend" / "js" / "chat.js"), json.dumps(scenarios)],
+                         capture_output=True, text=True, timeout=60)
+    try:
+        counts = json.loads(out.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        check("the chat.js poll harness ran", False, (out.stdout + out.stderr)[-400:])
+        return
+    check("Duo off (Labs 0-4): three polls, server-info only, no /api/identity/me",
+          counts["duo_off"] == {"me": 0, "info": 3} and counts["no_field"]["me"] == 0, str(counts))
+    check("the gate open: polled", counts["gate_open"]["me"] == 3, str(counts["gate_open"]))
+    check("Duo down but this browser signed in: polled", counts["down_with_session"]["me"] == 3,
+          str(counts["down_with_session"]))
+    check("Duo down, no session: not polled", counts["down_no_session"]["me"] == 0, str(counts["down_no_session"]))
+
+
 def main() -> int:
     check("temp DB in use (never the app's medadvice.db)", _TMP in str(dbmod.engine.url), str(dbmod.engine.url))
     dbmod.init_db()
@@ -1154,8 +1657,17 @@ def main() -> int:
         test_redaction()
         test_real_sdk()
         test_frontend()
+        test_debug_log_redaction()
+        test_redaction_rules()
+        test_rate_limit_order_and_eviction()
+        test_hung_call_releases_slot()
+        test_health_timer()
+        test_ca_bundle()
+        test_server_info_identity_session()
+        test_identity_poll_inert()
         test_no_leaks()
     finally:
+        signin.stop_health_check()
         signin.set_client_factory(None)
         signin.reset()
         host_capabilities.reset_duo_health()

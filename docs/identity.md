@@ -10,8 +10,9 @@ the app side of two of them:
 
 Everything here is **inert unless `DUO_ENABLED`**. With it off, Labs 0-4
 behave exactly as before. The only additive differences are an `identity_risk`
-stage frame on every turn, which the UI hides on anonymous turns, and the
-identity fields on the events of a signed-in turn.
+stage frame on every turn, which the UI hides on anonymous turns,
+`identity_session: false` in `GET /api/server-info`, and the identity fields
+on the events of a signed-in turn. The chat page sends no identity request.
 
 There is no identity broker. Each instance holds its own Duo and Cisco
 Identity Intelligence (CII) credentials in `.env` for the workshop's lifetime,
@@ -138,6 +139,11 @@ middleware:
 - writes `identity_session_revoked` (reason `duo_disabled`, actor `duo`)
 - answers that request `403 identity_session_revoked`, or `303 /login/duo?revoked=1` for a page
 
+A revocation is atomic: `identity_store.revoke` is one
+`UPDATE ... WHERE revoked_at IS NULL`, and only the call that changed the row
+writes the event. Two requests whose pulls race make one tombstone and one
+`identity_session_revoked`, never two.
+
 Other cases:
 - **`locked out`** only blocks turns, through the gate.
 - **Duo unreachable:** nothing happens.
@@ -190,6 +196,49 @@ When a block or a revocation happens, the banner explains it and shows an
 - **Cross-site requests are refused.** `next=/app`, and nothing else, turns
   the answer into a redirect for the sign-in page's form.
 
+## Sign-in safeguards
+
+- **The allowlist, then the rate limit.** `POST /auth/duo/start` checks
+  `IDENTITY_ALLOWED_USERS` before it takes a rate slot (30 starts per
+  username per 5 minutes, never per IP). A name that is not on the list never
+  enters the rate table, and a full table evicts the least recently used name,
+  one at a time and never all at once. A flood of made-up names therefore
+  can't reset a real user's spent budget.
+- **Duo's health, on a timer.** The `duo_signin` gate is open only while
+  Duo's latest health check passed. The check runs on a daemon thread at
+  startup, then every 5 minutes (every minute while it fails). It never runs
+  on the event loop, and never starts while the previous check is still
+  waiting for Duo.
+- **TLS to Duo.** When `REQUESTS_CA_BUNDLE` (or else `CURL_CA_BUNDLE`) names
+  a file, Duo is verified against that bundle, as every other outbound client
+  is. `backend.config` points both at the checkout's `ca-bundle.pem` when it
+  exists, which is what a TLS-inspecting proxy needs. Verification stays on,
+  but duo_universal's certificate pinning is then off. With no bundle
+  configured, duo_universal's own pinned bundle is kept. The health check's
+  log line says which one was used.
+- **Bounded Duo calls.** duo_universal 2.3.1 sets no timeout on its HTTP
+  calls and has no setting for one. Its requests therefore get a 5 s connect
+  and 10 s read timeout, and every call has a deadline (10 s for the code
+  exchange, 15 s for a health check). At the deadline the call's slot (four
+  at once) is given back even if Duo never answers, and the call is abandoned
+  on its daemon thread.
+- **Nothing secret in a log, at any level.** At `LOG_LEVEL=DEBUG` urllib3
+  logs every request line with its query string, and the token exchange sends
+  Duo's code and the `client_assertion` JWT (signed with `DUO_CLIENT_SECRET`)
+  that way. `backend/logging/redaction.py` redacts every record of urllib3,
+  requests, httpx, httpcore, duo_universal and the identity modules as the
+  record is created, child loggers included. It removes query values, cookie
+  and authorization headers, token and secret pairs, JWTs and the identity
+  secrets' exact values. Those exact values are `DUO_CLIENT_SECRET`,
+  `DUO_ADMIN_SKEY` and `CII_CLIENT_SECRET`, plus Duo's code, the CII token and
+  each identity cookie, registered as they appear. Every other logger loses
+  those exact values too. The callback's own query is redacted in uvicorn's
+  access log, and `run.sh` keeps the callback out of spans.
+- **Inert in the browser too.** The chat page asks `GET /api/identity/me`
+  only while `gated.duo_signin` is open, while `GET /api/server-info` reports
+  that this browser holds a session (`identity_session`), or while the page
+  already shows one. With `DUO_ENABLED` off it sends no request for it.
+
 ## Duo application → configuration
 
 | Duo / CII application | Permissions | `.env` keys | Used by |
@@ -236,5 +285,15 @@ with the room access key can rewrite those.
   - `identity_spray_actor`
   - `identity_unblocked`
   - `identity_blocked_duo_down`: Duo can't answer, CII still blocks
-- `tests/test_identity_sessions.py` and `tests/test_duo_signin.py` cover
-  sessions and sign-in.
+- `tests/test_identity_sessions.py` covers sessions, including two
+  revocations racing (one tombstone, one event).
+- `tests/test_duo_signin.py` covers sign-in, and the safeguards above:
+  - a real sign-in through duo_universal, requests and urllib3 at DEBUG
+    against a local fake Duo, with no code, JWT, cookie or secret in any log
+    line (httpx and httpcore too)
+  - the allowlist before the rate limit, and least-recently-used eviction
+  - a hung call giving its slot back, and the health check not stacking
+  - the health timer closing and reopening the gate
+  - the CA bundle rule
+  - `identity_session` in `/api/server-info`
+  - the real `chat.js` run in node: no `/api/identity/me` with Duo off

@@ -12,8 +12,8 @@ Gate on the capability an option actually needs, not on a vendor name:
   Python, so "installed" is the whole check.
 - Duo sign-in (Lab 5) needs DUO_ENABLED, the Web SDK keys, an https
   PUBLIC_BASE_URL on a DNS name, and a passing Duo health check. The rule reads
-  settings and the cached result of the startup health check; it never calls
-  Duo itself.
+  settings and the cached result of the latest health check (identity_signin
+  re-runs it every 5 minutes, off the event loop); it never calls Duo itself.
 
 Every probe is best-effort, short, cached, and never raises: a missing binary
 reads as "absent", not as an error. The Settings poll reads the cache;
@@ -139,9 +139,10 @@ def pdf_attachments_gate() -> Dict[str, Any]:
                  "PDF support is not installed (pip install -r requirements.txt)")
 
 
-# The Duo health check's cached result. The sign-in stage runs the check once at
-# startup (off the request path) and records it here with record_duo_health();
-# until it has, the duo_signin gate stays closed ("not checked yet").
+# The Duo health check's cached result. The sign-in stage runs the check at
+# startup and then on a timer (off the request path) and records each result
+# here with record_duo_health(); until the first one, the duo_signin gate stays
+# closed ("not checked yet"), and it is open only while the latest one passed.
 _duo_health: Dict[str, Any] = {"checked": False, "ok": False, "detail": ""}
 _DUO_HEALTH_DETAIL_MAX = 160
 # The Web SDK keys the Universal Prompt needs, by the .env name the reason shows.
@@ -150,7 +151,7 @@ _DUO_WEB_SDK_KEYS = (("DUO_CLIENT_ID", "duo_client_id"), ("DUO_CLIENT_SECRET", "
 
 
 def record_duo_health(ok: bool, detail: str = "") -> None:
-    """Record the startup Duo health check's result for the ``duo_signin`` gate.
+    """Record a Duo health check's result for the ``duo_signin`` gate.
 
     ``detail`` is a short, already-sanitized failure description (an error
     class or HTTP status, never a URL, key or response body); it is shown as

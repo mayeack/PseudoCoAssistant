@@ -7,9 +7,13 @@ talks to Duo itself. backend/routers/identity_auth.py is the only caller.
 
 The flow, and the rules that keep it honest:
 
-- ``begin(username)`` normalizes the username, rate-limits it **per username**
-  (never per IP: a room signs in from behind one NAT), checks it against
-  ``IDENTITY_ALLOWED_USERS``, and returns Duo's prompt URL plus a fresh state.
+- ``begin(username)`` normalizes the username, checks it against
+  ``IDENTITY_ALLOWED_USERS``, then rate-limits it **per username** (never per
+  IP: a room signs in from behind one NAT), and returns Duo's prompt URL plus
+  a fresh state. The allowlist comes first, so a name that is not on it never
+  takes a rate slot, and the per-username table (bounded, least recently used
+  evicted first) only ever holds allowlisted names: no flood of made-up names
+  can push a real user's spent budget out of it.
   The state and an OIDC nonce are kept here for 5 minutes, single use, with
   the username they were issued for. The route binds the state to a cookie.
 - ``complete(...)`` requires the callback's state to equal the cookie's
@@ -23,15 +27,32 @@ The flow, and the rules that keep it honest:
 - Every failure is a ``SigninError`` carrying one fixed code from
   ``ERROR_CODES``; the sign-in page has one message per code and never shows
   anything Duo or the request said.
-- Duo is called off the event loop and with a deadline: the SDK sets no
-  timeout on its HTTP calls, so each one runs on a daemon thread that the
+- Duo is called off the event loop and with a deadline. duo_universal 2.3.1
+  sets no timeout on its HTTP calls and takes none (``Client()`` has no such
+  parameter; it calls ``requests.post`` with only ``verify=`` and
+  ``proxies=``), so two things bound a call. Its HTTP requests get
+  ``DUO_HTTP_TIMEOUT`` (connect, read) through ``_TimedRequests``, the
+  ``requests`` its module sees. And each call runs on a daemon thread that the
   caller waits on for at most ``DUO_CALL_TIMEOUT_S`` (at most
-  ``_DUO_CALL_SLOTS`` at once). A hung Duo answers ``duo_unavailable``; it never
-  holds a request, or the process at shutdown, hostage.
-- ``run_health_check`` calls Duo's health check once at startup
-  (``start_health_check``, a daemon thread) and records the result for the
-  ``duo_signin`` host gate (``host_capabilities.record_duo_health``). The
-  gate, and so every sign-in route, stays closed until it has passed.
+  ``_DUO_CALL_SLOTS`` at once): at that deadline the caller gives the slot
+  back, whether or not the call ever returns, and the call is abandoned on its
+  thread. A hung Duo answers ``duo_unavailable``; it never holds a request, a
+  slot, or the process at shutdown, hostage.
+- TLS to Duo: with a CA bundle configured the way every other outbound client
+  reads it (``REQUESTS_CA_BUNDLE``, else ``CURL_CA_BUNDLE``, naming a file;
+  ``backend.config`` points it at the checkout's ``ca-bundle.pem``), Duo is
+  verified against that bundle, which is what a TLS-inspecting proxy needs.
+  With none, duo_universal's own pinned bundle is kept (``duo_ca_bundle``).
+- ``start_health_check`` runs Duo's health check on a daemon thread, at
+  startup and then every ``HEALTH_INTERVAL_S`` (every ``HEALTH_RETRY_S`` while
+  it fails), and records each result for the ``duo_signin`` host gate
+  (``host_capabilities.record_duo_health``): the gate, and so every sign-in
+  route, is open only while the latest check passed. A check never starts
+  while the previous one is still waiting for Duo.
+- Nothing secret reaches a log: the code being exchanged is registered with
+  ``backend.logging.redaction``, which also redacts every record of the HTTP
+  clients and the Duo SDK (urllib3 logs the token request's query string,
+  with the code and the ``client_assertion`` JWT, at DEBUG).
 
 Inert unless configured: nothing here runs, and ``duo_universal`` is not even
 imported, unless ``DUO_ENABLED`` is on with the Web SDK keys and an https
@@ -41,6 +62,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import secrets
 import threading
@@ -50,6 +72,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Deque, Dict, Optional, Tuple
 
 from backend.config import settings
+from backend.logging import redaction
 from backend.services import identity_store
 
 logger = logging.getLogger(__name__)
@@ -101,9 +124,14 @@ STATE_TTL_S = 300.0
 #: shared persona; a script hammering one name is stopped.
 RATE_LIMIT_STARTS = 30
 RATE_LIMIT_WINDOW_S = 300.0
-#: Deadline for one Duo call (the code exchange) and for the startup health check.
+#: Deadline for one Duo call (the code exchange) and for one health check.
 DUO_CALL_TIMEOUT_S = 10.0
 HEALTH_TIMEOUT_S = 15.0
+#: (connect, read) timeout on every HTTP request the Duo SDK makes.
+DUO_HTTP_TIMEOUT: Tuple[float, float] = (5.0, 10.0)
+#: Re-check Duo's health this often while it passes, and this often while it fails.
+HEALTH_INTERVAL_S = 300.0
+HEALTH_RETRY_S = 60.0
 _DUO_CALL_SLOTS = 4
 _PENDING_MAX = 1024
 _RATE_KEYS_MAX = 4096
@@ -130,15 +158,68 @@ class PendingSignin:
 
 
 _pending: "OrderedDict[str, PendingSignin]" = OrderedDict()
-_starts: Dict[str, Deque[float]] = {}
-_rate_refusal_logged: Dict[str, float] = {}
+# Per-username rate state, least recently used first (evicted one at a time).
+_starts: "OrderedDict[str, Deque[float]]" = OrderedDict()
+_rate_refusal_logged: "OrderedDict[str, float]" = OrderedDict()
 
 
 # --------------------------------------------------------------------------- the Duo client
-def _default_client_factory(*, client_id: str, client_secret: str, host: str, redirect_uri: str) -> Any:
+def duo_ca_bundle() -> Optional[str]:
+    """The CA bundle Duo's TLS is verified against, or None to keep
+    duo_universal's own pinned bundle.
+
+    The same setting every other outbound client reads (requests' own order):
+    ``REQUESTS_CA_BUNDLE``, else ``CURL_CA_BUNDLE``; ``backend.config`` points
+    both at the checkout's ``ca-bundle.pem`` when it exists. Only a path to an
+    existing file counts: with none, Duo stays pinned."""
+    for name in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        path = (os.environ.get(name) or "").strip()
+        if path:
+            return path if os.path.isfile(path) else None
+    return None
+
+
+def duo_tls_trust() -> str:
+    """What Duo's certificate is checked against, for logs and the docs."""
+    return "the configured CA bundle" if duo_ca_bundle() else "duo_universal's pinned CA bundle"
+
+
+class _TimedRequests:
+    """``requests`` as duo_universal's module sees it: everything passes
+    through, and ``post`` gets ``timeout=DUO_HTTP_TIMEOUT`` unless the call
+    sets one. The SDK sets none and takes none, so this is the only way to put
+    a timeout on its sockets; the bounded wait in ``_bounded`` stays as well."""
+
+    def __init__(self, module: Any) -> None:
+        self._module = module
+
+    def post(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("timeout", DUO_HTTP_TIMEOUT)
+        return self._module.post(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._module, name)
+
+
+_sdk_patch_lock = threading.Lock()
+
+
+def _install_sdk_timeout() -> None:
+    """Give duo_universal's HTTP calls a timeout (idempotent)."""
+    from duo_universal import client as sdk
+
+    with _sdk_patch_lock:
+        if not isinstance(sdk.requests, _TimedRequests):
+            sdk.requests = _TimedRequests(sdk.requests)
+
+
+def _default_client_factory(*, client_id: str, client_secret: str, host: str, redirect_uri: str,
+                            duo_certs: Optional[str] = None) -> Any:
     from duo_universal import Client  # lazy: never imported unless Duo sign-in is configured
 
-    return Client(client_id, client_secret, host, redirect_uri)
+    _install_sdk_timeout()
+    # duo_certs=None keeps the SDK's pinned bundle; a path verifies against it.
+    return Client(client_id, client_secret, host, redirect_uri, duo_certs=duo_certs)
 
 
 _client_factory: Callable[..., Any] = _default_client_factory
@@ -147,7 +228,9 @@ _client_cache: Optional[Tuple[tuple, Any]] = None
 
 def set_client_factory(factory: Optional[Callable[..., Any]] = None) -> None:
     """Replace how the Duo client is built (tests pass a fake). ``None``
-    restores ``duo_universal.Client``. Drops the cached client."""
+    restores ``duo_universal.Client``. Drops the cached client. The factory is
+    called with ``client_id``, ``client_secret``, ``host``, ``redirect_uri``
+    and ``duo_certs`` (``duo_ca_bundle()``)."""
     global _client_factory, _client_cache
     with _lock:
         _client_factory = factory or _default_client_factory
@@ -159,12 +242,13 @@ def _client() -> Any:
     The redirect URI is ``settings.duo_redirect_uri`` and nothing else."""
     global _client_cache
     key = (settings.duo_client_id, settings.duo_client_secret, settings.duo_api_host,
-           settings.duo_redirect_uri)
+           settings.duo_redirect_uri, duo_ca_bundle())
     with _lock:
         if _client_cache is not None and _client_cache[0] == key:
             return _client_cache[1]
         factory = _client_factory
-    client = factory(client_id=key[0], client_secret=key[1], host=key[2], redirect_uri=key[3])
+    client = factory(client_id=key[0], client_secret=key[1], host=key[2], redirect_uri=key[3],
+                     duo_certs=key[4])
     with _lock:
         _client_cache = (key, client)
     return client
@@ -190,16 +274,50 @@ class _DuoTimeout(Exception):
     """A Duo call did not answer within its deadline."""
 
 
-def _bounded(fn: Callable[..., Any], *args: Any, timeout: float) -> Any:
+class _DuoBusy(_DuoTimeout):
+    """The previous call of this kind is still waiting for Duo; none started."""
+
+
+def _release_once(release: Callable[[], None]) -> Callable[[], bool]:
+    """``release`` wrapped so that only its first call does anything."""
+    lock = threading.Lock()
+    done = [False]
+
+    def once() -> bool:
+        with lock:
+            if done[0]:
+                return False
+            done[0] = True
+        release()
+        return True
+
+    return once
+
+
+def _bounded(fn: Callable[..., Any], *args: Any, timeout: float,
+             exclusive: Optional[threading.Lock] = None) -> Any:
     """Run one Duo call on a daemon thread and wait at most ``timeout`` for it.
 
-    The SDK sets no timeout on its HTTP calls, so the call itself cannot be
-    cancelled: a hung one keeps its slot until its socket gives up, and is
-    simply not waited for. Daemon threads never block process exit. One
-    deadline covers both the wait for a free slot and the call itself."""
+    One deadline covers both the wait for a free slot and the call itself. A
+    Python thread cannot be cancelled, so a call that overruns is abandoned on
+    its (daemon) thread, and its slot is given back right there at the
+    deadline: whichever comes first, the call ending or the deadline, releases
+    the slot, exactly once. So a call that never returns holds no slot past
+    its deadline, and daemon threads never block process exit. The SDK's
+    sockets have ``DUO_HTTP_TIMEOUT`` too, so an abandoned call does end.
+
+    ``exclusive``: a lock held for as long as the call runs (past an
+    abandonment too). When it is already held, nothing starts and
+    ``_DuoBusy`` is raised: the periodic health check never stacks a second
+    call behind one that is still waiting for Duo."""
     deadline = time.monotonic() + timeout
+    if exclusive is not None and not exclusive.acquire(blocking=False):
+        raise _DuoBusy()
     if not _duo_slots.acquire(timeout=timeout):
+        if exclusive is not None:
+            exclusive.release()
         raise _DuoTimeout()
+    give_back = _release_once(_duo_slots.release)
     box: Dict[str, Any] = {}
     done = threading.Event()
 
@@ -209,15 +327,20 @@ def _bounded(fn: Callable[..., Any], *args: Any, timeout: float) -> Any:
         except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
             box["error"] = exc
         finally:
-            _duo_slots.release()
+            give_back()
+            if exclusive is not None:
+                exclusive.release()
             done.set()
 
     try:
         threading.Thread(target=_run, name="duo-call", daemon=True).start()
     except BaseException:
-        _duo_slots.release()
+        give_back()
+        if exclusive is not None:
+            exclusive.release()
         raise
     if not done.wait(max(0.0, deadline - time.monotonic())):
+        give_back()          # the slot comes back now; the call is abandoned on its thread
         raise _DuoTimeout()
     if "error" in box:
         raise box["error"]
@@ -256,13 +379,25 @@ def describe_failure(exc: BaseException) -> str:
 
 
 # --------------------------------------------------------------------------- health check
+# Held while a health-check call is running (past its deadline too), so the
+# timer never starts a second call while one is still waiting for Duo.
+_health_call = threading.Lock()
+# The running checker and its own stop event (a new pair per start, so a
+# checker that is still finishing a call after a stop never runs on).
+_health_stop: Optional[threading.Event] = None
+_health_thread: Optional[threading.Thread] = None
+
+
 def run_health_check() -> bool:
     """Call Duo's health check (bounded) and record the result for the
     ``duo_signin`` gate. Never raises. Returns whether it passed."""
     from backend import host_capabilities
 
     try:
-        _bounded(_client().health_check, timeout=HEALTH_TIMEOUT_S)
+        _bounded(_client().health_check, timeout=HEALTH_TIMEOUT_S, exclusive=_health_call)
+    except _DuoBusy:
+        host_capabilities.record_duo_health(False, "the previous health check is still waiting for Duo")
+        return False
     except _DuoTimeout:
         host_capabilities.record_duo_health(False, f"no answer within {HEALTH_TIMEOUT_S:.0f} s")
         return False
@@ -275,20 +410,51 @@ def run_health_check() -> bool:
         logger.warning("Duo health check failed: %s", detail)
         host_capabilities.record_duo_health(False, detail)
         return False
-    logger.info("Duo health check passed; Duo sign-in is available")
+    if not host_capabilities.duo_signin_gate().get("enabled"):
+        logger.info("Duo health check passed (TLS checked against %s); Duo sign-in is available",
+                    duo_tls_trust())
     host_capabilities.record_duo_health(True)
     return True
 
 
+def _health_loop(stop: threading.Event) -> None:
+    """Check now, then every ``HEALTH_INTERVAL_S`` while it passes and every
+    ``HEALTH_RETRY_S`` while it fails, until stopped or no longer configured."""
+    while not stop.is_set() and configured():
+        passed = run_health_check()
+        if stop.wait(HEALTH_INTERVAL_S if passed else HEALTH_RETRY_S):
+            return
+
+
 def start_health_check() -> Optional[threading.Thread]:
-    """Run the health check once, on a daemon thread (startup; never the event
-    loop). Does nothing, and builds no client, unless Duo sign-in is
-    configured: the gate's earlier reasons already explain why it is closed."""
+    """Start the periodic health check on a daemon thread (startup; never the
+    event loop). Idempotent: a running checker is returned as is. Does
+    nothing, and builds no client, unless Duo sign-in is configured: the
+    gate's earlier reasons already explain why it is closed."""
+    global _health_thread, _health_stop
     if not configured():
         return None
-    thread = threading.Thread(target=run_health_check, name="duo-health-check", daemon=True)
-    thread.start()
-    return thread
+    with _lock:
+        if _health_thread is not None and _health_thread.is_alive():
+            return _health_thread
+        stop = threading.Event()
+        thread = threading.Thread(target=_health_loop, args=(stop,), name="duo-health-check", daemon=True)
+        _health_stop, _health_thread = stop, thread
+        thread.start()
+        return thread
+
+
+def stop_health_check(timeout: float = 2.0) -> None:
+    """Stop the periodic health check (shutdown, tests). A check in flight is
+    left to its deadline; the loop just does not go round again."""
+    global _health_thread, _health_stop
+    with _lock:
+        thread, stop = _health_thread, _health_stop
+        _health_thread = _health_stop = None
+    if stop is not None:
+        stop.set()
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout)
 
 
 # --------------------------------------------------------------------------- state + rate limit
@@ -314,15 +480,20 @@ def _take(state: str) -> Optional[PendingSignin]:
 
 def _take_rate_slot(username: str) -> Tuple[bool, bool]:
     """``(allowed, audit)``: whether this start fits the username's budget, and
-    whether a refusal should be audited (only the first in each window)."""
+    whether a refusal should be audited (only the first in each window).
+
+    Called only for allowlisted names. Both tables are bounded by
+    ``_RATE_KEYS_MAX`` and evict the least recently used name, one at a time:
+    never all at once, so filling the table cannot reset anyone's budget."""
     now = time.monotonic()
     with _lock:
         starts = _starts.get(username)
         if starts is None:
-            if len(_starts) >= _RATE_KEYS_MAX:
-                _starts.clear()
-                _rate_refusal_logged.clear()
+            while len(_starts) >= _RATE_KEYS_MAX:
+                _starts.popitem(last=False)
             starts = _starts[username] = deque()
+        else:
+            _starts.move_to_end(username)
         while starts and now - starts[0] > RATE_LIMIT_WINDOW_S:
             starts.popleft()
         if len(starts) < RATE_LIMIT_STARTS:
@@ -332,6 +503,9 @@ def _take_rate_slot(username: str) -> Tuple[bool, bool]:
         first = logged is None or now - logged > RATE_LIMIT_WINDOW_S
         if first:
             _rate_refusal_logged[username] = now
+            _rate_refusal_logged.move_to_end(username)
+            while len(_rate_refusal_logged) > _RATE_KEYS_MAX:
+                _rate_refusal_logged.popitem(last=False)
         return False, first
 
 
@@ -352,11 +526,12 @@ def begin(username: Any, *, client_address: Optional[str] = None) -> Tuple[str, 
         raise SigninError(UNAVAILABLE, audit=False)
     if not _USERNAME_RE.fullmatch(name):
         raise SigninError(INVALID_USERNAME, name)
+    # The allowlist first: a name that is not on it never takes a rate slot.
+    if name not in settings.identity_allowed_users_set:
+        raise SigninError(NOT_ALLOWED, name)
     allowed, audit = _take_rate_slot(name)
     if not allowed:
         raise SigninError(RATE_LIMITED, name, audit=audit)
-    if name not in settings.identity_allowed_users_set:
-        raise SigninError(NOT_ALLOWED, name)
     # A persona Duo reports disabled is refused here (Duo would refuse it at
     # the prompt too). Only with the read-only Admin API keys; cached, and an
     # unanswered lookup refuses nothing.
@@ -444,6 +619,8 @@ def complete(
         raise SigninError(DUO_DENIED, name)
     if not duo_code or not _CODE_RE.fullmatch(duo_code):
         raise SigninError(MISSING_CODE, name)
+    # The code is a credential until it is exchanged: no log line may carry it.
+    redaction.register(duo_code)
     try:
         token = _bounded(_client().exchange_authorization_code_for_2fa_result, duo_code, name,
                          pending.nonce, timeout=DUO_CALL_TIMEOUT_S)

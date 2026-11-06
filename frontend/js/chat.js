@@ -627,7 +627,7 @@ function showMainApp() {
 // disabled option with the reason as its tooltip, plus the neutral pill by the
 // Model select. Polled with the provider indicators so a NIM that comes up
 // (or a Colima start) is reflected without a reload.
-let _hostGate = { gated: {}, capabilities: {} };
+let _hostGate = { gated: {}, capabilities: {}, identity_session: false };
 
 function gateFor(key) { return (_hostGate.gated || {})[key] || null; }
 
@@ -644,7 +644,8 @@ async function refreshServerInfo() {
         const data = await res.json();
         if (el) el.textContent = data.hostname || 'unknown';
         if (ver) ver.textContent = data.version ? `v${data.version}` : '—';
-        _hostGate = { gated: data.gated || {}, capabilities: data.capabilities || {} };
+        _hostGate = { gated: data.gated || {}, capabilities: data.capabilities || {},
+                      identity_session: data.identity_session === true };
         _attachmentConfig = data.attachments || null;
         applyAttachmentGate();
     } catch (e) {
@@ -901,7 +902,9 @@ function refreshIndicators() {
     // Capabilities first: the provider/model gating in refreshActiveProvider reads them.
     refreshServerInfo().then(() => {
         refreshActiveProvider();
-        refreshIdentity();   // after server-info: the Sign-in link follows gated.duo_signin
+        // After server-info: the Sign-in link follows gated.duo_signin, and with
+        // Lab 5 off nothing asks for /api/identity/me at all.
+        if (identityPollWanted()) refreshIdentity();
     });
     refreshActiveBlueprint();
     refreshStaticEmission();
@@ -917,13 +920,27 @@ function startProviderPolling() {
 
 // ---- Lab 5 identity: badge, banner, sign-in redirect ----
 // Identity comes only from the server's verified session (GET /api/identity/me,
-// polled with the indicators above); nothing here is ever sent as identity.
+// polled with the indicators above while identityPollWanted() says Lab 5 is in
+// use); nothing here is ever sent as identity.
 // The badge shows the persona in neutral colours; the trust pill shows only
 // state, and only when the server reports one. Hidden unless signed in.
 // The banner follows the same answer: a revoked session (SESSION ENDED), an
 // identity the Identity Risk Gate refuses (IDENTITY AT RISK) or one the user
 // has unblocked (UNBLOCKED), each with the Unblock me toggle.
 let _identity = null;
+
+// Lab 5 is inert unless the server says otherwise. GET /api/identity/me is
+// polled only while the duo_signin gate is open, the server reports an
+// identity session on this browser (server-info identity_session), or the page
+// already shows one (the badge, or a banner such as SESSION ENDED). With
+// DUO_ENABLED off none of these holds, so Labs 0-4 send no request for it.
+function identityPollWanted() {
+    const g = gateFor('duo_signin');
+    if (g && g.enabled) return true;
+    if (_hostGate.identity_session || _identity) return true;
+    const banner = document.getElementById('identityBanner');
+    return !!(banner && !banner.classList.contains('hidden'));
+}
 
 async function refreshIdentity() {
     try {

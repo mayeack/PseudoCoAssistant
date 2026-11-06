@@ -9,7 +9,7 @@ import asyncio
 import socket
 from typing import Dict, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, StrictBool, field_validator
 
 from backend import settings_store
@@ -380,8 +380,9 @@ async def hec_stats_for(dest_id: str):
 # ---------------------------------------------------------------------------
 # Server identity
 # ---------------------------------------------------------------------------
-def _server_info() -> dict:
+def _server_info(request: Optional[Request] = None) -> dict:
     from backend import host_capabilities
+    from backend.middleware.identity import current_identity
     from backend.services import attachments
 
     caps = host_capabilities.current()
@@ -406,23 +407,32 @@ def _server_info() -> dict:
         # Chat attachment limits and copy for the composer (docs/attachments.md).
         # Whether attachments work here at all is gated.pdf_attachments above.
         "attachments": attachments.client_config(),
+        # Lab 5: whether THIS browser holds a verified identity session (the
+        # identity middleware's request.state.identity; always False with
+        # DUO_ENABLED off, when the middleware does not read the cookie). The
+        # chat page polls GET /api/identity/me only while this is true or
+        # gated.duo_signin is open, so Labs 0-4 send no request for it.
+        "identity_session": current_identity(request) is not None if request is not None else False,
     }
 
 
 @router.get("/server-info")
-async def get_server_info():
+async def get_server_info(request: Request, response: Response):
     """Identity + capabilities of the host serving this process, for the UI.
 
     Lives behind the access-key gate rather than on the public /health so a
     tunnelled deployment doesn't hand out its hostname unauthenticated.
+    ``identity_session`` is per browser, so the answer is never cached.
     """
-    return _server_info()
+    response.headers["Cache-Control"] = "no-store"
+    return _server_info(request)
 
 
 @router.post("/server-info/refresh")
-async def refresh_server_info():
+async def refresh_server_info(request: Request, response: Response):
     """Re-probe host capabilities now (after starting a NIM, Colima, …)."""
     from backend import host_capabilities
 
     await asyncio.to_thread(host_capabilities.detect, True)
-    return _server_info()
+    response.headers["Cache-Control"] = "no-store"
+    return _server_info(request)

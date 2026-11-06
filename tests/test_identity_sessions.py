@@ -318,6 +318,42 @@ def test_store() -> None:
         check("revoked event: details carry the reason code only",
               ev.get("details") == {"reason": "duo_disabled"}, str(ev.get("details")))
 
+    # revoke is atomic: two racing revocations (two requests' Duo pulls at
+    # once) make one tombstone and ONE event. Both threads are held just before
+    # their UPDATE reaches SQLite, so neither has committed when the other runs.
+    from sqlalchemy import event as sa_event
+
+    _, rsnap = store.create("race.user")
+    barrier = threading.Barrier(2, timeout=3)
+
+    def _hold(conn, cursor, statement, params, context, executemany):
+        if statement.lstrip().upper().startswith("UPDATE IDENTITY_SESSIONS") and "revoked_at" in statement:
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                pass
+
+    before = len(_events("audit", action=identity_audit.SESSION_REVOKED))
+    results = []
+    sa_event.listen(dbmod.engine, "before_cursor_execute", _hold)
+    try:
+        racers = [threading.Thread(target=lambda: results.append(
+            store.revoke(rsnap.session_ref, reason="duo_disabled", actor="duo"))) for _ in range(2)]
+        for t in racers:
+            t.start()
+        for t in racers:
+            t.join(10)
+    finally:
+        sa_event.remove(dbmod.engine, "before_cursor_execute", _hold)
+    raced = _events("audit", action=identity_audit.SESSION_REVOKED)[before:]
+    check("revoke race: exactly one of two concurrent revocations wins (True, False)",
+          sorted(results) == [False, True], str(results))
+    check("revoke race: exactly one identity_session_revoked event",
+          len(raced) == 1 and raced[0].get("user") == "race.user", str(raced)[:300])
+    check("revoke race: the session is a tombstone with the winner's reason",
+          store.status(rsnap.session_ref).status == store.REVOKED
+          and store.status(rsnap.session_ref).revoked_reason == "duo_disabled")
+
     # end (sign-out) and purge
     t2, s2 = store.create("avery.kim")
     check("end: deletes the session behind the cookie", store.end(t2) and store.lookup(t2).status == store.UNKNOWN)

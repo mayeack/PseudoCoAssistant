@@ -218,8 +218,8 @@ def test_pdf_attachments_rule() -> None:
 
 
 def test_duo_signin_rule() -> None:
-    """Lab 5 Duo sign-in: settings plus the cached startup health check, no
-    network call. Reasons in order: disabled; Web SDK keys missing; PUBLIC_BASE_URL
+    """Lab 5 Duo sign-in: settings plus the cached result of the latest
+    health check (startup, then on a timer), no network call. Reasons in order: disabled; Web SDK keys missing; PUBLIC_BASE_URL
     not https on a DNS name; the health check not run yet / failed."""
     from backend.config import Settings
 

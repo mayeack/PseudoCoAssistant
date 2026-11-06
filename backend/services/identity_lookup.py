@@ -59,6 +59,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 import httpx
 
 from backend.config import settings
+from backend.logging import redaction
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +417,8 @@ def _cii_access_token(*, refresh: bool = False) -> Tuple[Optional[str], Optional
         token = data.get("access_token") if isinstance(data, dict) else None
         if not isinstance(token, str) or not token:
             return None, "token_bad_response"
+        # A credential: no log line may carry it (backend/logging/redaction.py).
+        redaction.register(token)
         try:
             lifetime = float(data.get("expires_in") or TOKEN_DEFAULT_LIFETIME_S)
         except (TypeError, ValueError):

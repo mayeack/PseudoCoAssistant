@@ -241,6 +241,10 @@ def create(
         raise ValueError("username must be 1-128 characters")
     now = now or _utcnow()
     token = new_token()
+    # The cookie value is a credential: no log line may ever carry it.
+    from backend.logging import redaction
+
+    redaction.register(token)
     token_hash = hash_token(token)
     row = IdentitySession(
         id=uuid.uuid4().hex,
@@ -328,20 +332,32 @@ def revoke(session_ref: str, *, reason: str, actor: str = "system",
     ``identity_session_revoked`` audit event. Returns False when the session
     does not exist or was already revoked (no second event).
 
+    Atomic: one conditional ``UPDATE ... WHERE revoked_at IS NULL``, and the
+    event is written only when it changed a row. Two revocations racing (two
+    requests' Duo pulls at once) both run the UPDATE, but the database applies
+    them one after the other, so only the first matches the row: one tombstone
+    and one event, never two.
+
     A revocation ends the session, so it ends its Unblock me override too:
     Unblock me can then bring the session back (``unblock``), which records
     that it cleared this revocation."""
     now = now or _utcnow()
+    snapshot: Optional[IdentitySnapshot] = None
     with get_db_context() as db:
-        row = db.query(IdentitySession).filter(IdentitySession.id == session_ref).first()
-        if row is None or row.revoked_at is not None:
-            return False
-        row.revoked_at = now
-        row.revoked_reason = reason
-        row.unblocked_at = None
-        row.unblock_cleared = None
-        snapshot = _row_facts(row).snapshot
+        changed = db.query(IdentitySession).filter(
+            IdentitySession.id == session_ref,
+            IdentitySession.revoked_at.is_(None)).update(
+            {IdentitySession.revoked_at: now, IdentitySession.revoked_reason: reason,
+             IdentitySession.unblocked_at: None, IdentitySession.unblock_cleared: None},
+            synchronize_session=False)
+        if changed:
+            row = db.query(IdentitySession).filter(IdentitySession.id == session_ref).first()
+            snapshot = _row_facts(row).snapshot if row is not None else None
+    if not changed:
+        return False
     clear_cache()
+    if snapshot is None:      # cannot happen inside the transaction; belt and braces
+        return True
     from backend.logging import identity_audit
 
     identity_audit.log_session_revoked(

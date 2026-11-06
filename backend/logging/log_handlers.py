@@ -177,6 +177,14 @@ def setup_logging():
     """Setup application logging"""
     log_level = getattr(logging, settings.log_level.upper())
 
+    # Before anything can log: every record from the HTTP clients, the Duo SDK
+    # and the identity modules is redacted as it is created, at every level
+    # (Duo's code, the client_assertion JWT, cookies, tokens, the identity
+    # secrets; backend/logging/redaction.py).
+    from backend.logging import redaction
+
+    redaction.install()
+
     # Configure root logger
     logging.basicConfig(
         level=log_level,

@@ -843,6 +843,33 @@ def test_cover_hygiene() -> None:
                   injection.pii_exfil_requested(composed) is bool(sample.family), f"{sample.id}")
 
 
+def test_design_doc_matches_the_chain() -> None:
+    """docs/attachments.md draws the shared chain; the drawing must be the
+    code's chain, node for node (identity_risk at PRE_NODES[1] included), the
+    .html rendering must carry the same drawing, and CLAUDE.md must agree."""
+    import html as html_mod
+    import re
+
+    md = (ROOT / "docs" / "attachments.md").read_text()
+    rendered = html_mod.unescape((ROOT / "docs" / "attachments.html").read_text())
+    expected = ["START"] + guardrails.PRE_NODES + ["<blueprint core>"] + guardrails.POST_NODES
+
+    def drawn(text):
+        block = re.search(r"START -> attachment_intake.*?governance", text, re.S)
+        return [n.strip() for n in block.group(0).replace("\n", " ").split("->")] if block else []
+
+    check("docs/attachments.md: the chain drawing is PRE_NODES + core + POST_NODES, in order",
+          drawn(md) == expected, f"{drawn(md)}")
+    check("docs/attachments.html: the same drawing", drawn(rendered) == expected, f"{drawn(rendered)}")
+    check("the drawing's premise holds: identity_risk is PRE_NODES[1], right after attachment_intake",
+          guardrails.PRE_NODES[:3] == ["attachment_intake", "identity_risk", "policy"], str(guardrails.PRE_NODES[:3]))
+    check("docs/attachments.md says identity_risk is PRE_NODES[1] and reads no document text",
+          "`identity_risk`" in md and "`PRE_NODES[1]`" in md and "reads neither the message nor the document" in md)
+    section = (ROOT / "CLAUDE.md").read_text().split("## Chat attachments", 1)[-1].split("\n## ", 1)[0]
+    check("CLAUDE.md 'Chat attachments': attachment_intake ahead of identity_risk (PRE_NODES[1]) and policy",
+          "ahead of `identity_risk` (`PRE_NODES[1]`" in section and "and `policy`" in section)
+
+
 def main() -> int:
     if PdfReader is None:
         check("pypdf is installed (pip install -r requirements.txt)", False)
@@ -852,7 +879,7 @@ def main() -> int:
                test_worker_hang_is_killed, test_sanitize_name, test_extraction_and_composition,
                test_attachment_intake_node, test_helpers, test_governance_log_fields,
                test_document_drives_pii_exfiltration, test_sample_catalog, test_sample_pdfs,
-               test_samples_through_the_worker, test_cover_hygiene):
+               test_samples_through_the_worker, test_cover_hygiene, test_design_doc_matches_the_chain):
         print(f"\n== {fn.__name__} ==")
         try:
             fn()

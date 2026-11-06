@@ -35,8 +35,10 @@ identity cookie (``REDIRECT_EXEMPT``), so a user can always sign in again.
 - ``GET /api/identity/me`` - who this browser is signed in as, the Unblock me
   override, and the latest Duo / Identity Intelligence status and gate verdict.
   A plain ``def`` route, so it runs in the threadpool; the chat page polls it
-  every 10 s. A revoked session reaches it as a tombstone (``revoked: true``);
-  an expired one answers the middleware's 401.
+  every 10 s, but only while the ``duo_signin`` gate is open or
+  ``/api/server-info`` reports an identity session (``identity_session``), so
+  with ``DUO_ENABLED`` off it is never asked. A revoked session reaches it as a
+  tombstone (``revoked: true``); an expired one answers the middleware's 401.
 - ``POST /api/identity/unblock`` / ``POST /api/identity/reblock`` - Unblock me
   on and off (plan 12.1). They reach a revoked session too; never Duo or CII.
 

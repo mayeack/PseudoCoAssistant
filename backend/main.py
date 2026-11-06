@@ -185,10 +185,11 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Failed to initialize settings/HEC: {e}")
 
-    # Lab 5 Duo sign-in: Duo's health check, once, on a daemon thread (never
-    # the event loop). Its result opens or closes the duo_signin host gate.
-    # A no-op unless DUO_ENABLED with the Web SDK keys and an https
-    # PUBLIC_BASE_URL (backend/services/identity_signin.py).
+    # Lab 5 Duo sign-in: Duo's health check on a daemon thread (never the event
+    # loop), now and then every 5 minutes (every minute while it fails). Each
+    # result opens or closes the duo_signin host gate. A no-op unless
+    # DUO_ENABLED with the Web SDK keys and an https PUBLIC_BASE_URL
+    # (backend/services/identity_signin.py).
     try:
         from backend.services import identity_signin
         identity_signin.start_health_check()
@@ -206,6 +207,11 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    try:
+        from backend.services import identity_signin
+        await asyncio.to_thread(identity_signin.stop_health_check)
+    except Exception:
+        logger.debug("Duo health check shutdown error", exc_info=True)
     try:
         from backend.hec.runtime import hec_runtime
         await hec_runtime.stop()

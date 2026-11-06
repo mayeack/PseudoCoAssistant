@@ -139,8 +139,11 @@ keep it honest:
   `host_capabilities.pdf_attachments_gate`) and nothing else: the API answers
   503 from it and the Attach button greys out from it.
 - `attachment_intake` is `PRE_NODES[0]` in the **shared chain**
-  (`blueprints/guardrails.py`), ahead of `policy`. It is never in
-  `_MAY_TERMINATE`, and a failed read is `status: "error"`, never a raise.
+  (`blueprints/guardrails.py`), ahead of `identity_risk` (`PRE_NODES[1]`,
+  Lab 5) and `policy`. It is never in `_MAY_TERMINATE`, and a failed read is
+  `status: "error"`, never a raise. `identity_risk` reads neither the message
+  nor the document; its block event carries the typed message and the
+  `attachment` metadata only, and its banner never gets the document sentence.
 - **The screens and the model see the same composed text.** Every prompt-stage
   guardrail screens `screened_prompt(state)`, and the shared synthesizer gets
   `with_attachment(...)`. Both come from `attachments.compose_user_turn` and
@@ -212,6 +215,24 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   DNS name, and the scheme is the trusted proxy's.
 - Store and Duo calls run off the event loop; the middleware is pure ASGI (it
   sits on the SSE path).
+- **No identity secret in any log, at any level.** `backend/logging/redaction.py`
+  (installed by `setup_logging`, as a log record factory so child loggers such
+  as `urllib3.connectionpool` are covered) redacts every record of urllib3,
+  requests, httpx, httpcore, duo_universal and the identity modules, and the
+  exact identity secrets from every other logger. A new credential the app
+  handles is `redaction.register()`ed where it first appears.
+- **Inert means no requests.** `chat.js` polls `GET /api/identity/me` only
+  while `gated.duo_signin` is open or `/api/server-info` `identity_session`
+  says this browser holds a session (or the page already shows one). With
+  `DUO_ENABLED` off, Labs 0-4 send no identity request.
+- **Bounded Duo.** `begin()` checks the allowlist before it takes a rate
+  slot; the rate table evicts least-recently-used names, never all at once.
+  Every Duo call has a deadline that gives its slot back even if Duo never
+  answers, and the SDK's sockets get `DUO_HTTP_TIMEOUT` (duo_universal takes
+  no timeout). The `duo_signin` gate re-checks Duo's health every 5 minutes
+  (every minute while it fails) on a daemon thread. Duo's TLS uses the CA
+  bundle in `REQUESTS_CA_BUNDLE` (else `CURL_CA_BUNDLE`) like every other
+  outbound client, and duo_universal's pinning only when none is configured.
 
 ## Identity Risk Gate
 
@@ -233,7 +254,9 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   (`identity_check="ok"`), not an outage.
 - **No side effects in the chain.** The gate never revokes and never writes
   to Duo or CII. Revocation is the middleware's pull: Duo `disabled` revokes
-  the session (a tombstone); `locked out` only blocks turns.
+  the session (a tombstone); `locked out` only blocks turns. `revoke()` is one
+  `UPDATE ... WHERE revoked_at IS NULL` and writes its event only when it
+  changed a row, so racing pulls make one tombstone and one event.
 - **Unblock me** (`POST /api/identity/unblock` / `/reblock`) is per identity
   session, never a Demo Controls card or request field, and never touches Duo
   or CII. The gate records the real verdict plus `identity_override=true` on
