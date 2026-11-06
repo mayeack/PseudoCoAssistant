@@ -397,8 +397,12 @@ def _server_info() -> dict:
         "capabilities": caps.get("capabilities", {}),
         # pdf_attachments is a package lookup, not a probe: seed it so the
         # paperclip is not greyed out while the first detect() is still running.
+        # duo_signin reads settings and the cached Duo health result (no
+        # probe either), so it is evaluated fresh on every read: a snapshot
+        # taken before the health check finished never shows a stale reason.
         "gated": {"pdf_attachments": host_capabilities.pdf_attachments_gate(),
-                  **caps.get("gated", {})},
+                  **caps.get("gated", {}),
+                  "duo_signin": host_capabilities.duo_signin_gate()},
         # Chat attachment limits and copy for the composer (docs/attachments.md).
         # Whether attachments work here at all is gated.pdf_attachments above.
         "attachments": attachments.client_config(),

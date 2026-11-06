@@ -494,7 +494,8 @@ class GovernanceLogger:
                     action=log_data.get("action"),
                     actor=log_data.get("actor"),
                     details=log_data.get("details"),
-                    ip_address=log_data.get("ip_address")
+                    ip_address=log_data.get("ip_address"),
+                    enduser_id=log_data.get("enduser_id"),
                 )
                 db.add(audit)
         except Exception as e:

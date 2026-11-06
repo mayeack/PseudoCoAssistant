@@ -10,6 +10,10 @@ Gate on the capability an option actually needs, not on a vendor name:
   explicitly unsupported by NemoClaw) and Node >= 22.19.
 - PDF chat attachments need the pypdf package (docs/attachments.md); it is pure
   Python, so "installed" is the whole check.
+- Duo sign-in (Lab 5) needs DUO_ENABLED, the Web SDK keys, an https
+  PUBLIC_BASE_URL on a DNS name, and a passing Duo health check. The rule reads
+  settings and the cached result of the startup health check; it never calls
+  Duo itself.
 
 Every probe is best-effort, short, cached, and never raises: a missing binary
 reads as "absent", not as an error. The Settings poll reads the cache;
@@ -135,6 +139,68 @@ def pdf_attachments_gate() -> Dict[str, Any]:
                  "PDF support is not installed (pip install -r requirements.txt)")
 
 
+# The Duo health check's cached result. The sign-in stage runs the check once at
+# startup (off the request path) and records it here with record_duo_health();
+# until it has, the duo_signin gate stays closed ("not checked yet").
+_duo_health: Dict[str, Any] = {"checked": False, "ok": False, "detail": ""}
+_DUO_HEALTH_DETAIL_MAX = 160
+# The Web SDK keys the Universal Prompt needs, by the .env name the reason shows.
+_DUO_WEB_SDK_KEYS = (("DUO_CLIENT_ID", "duo_client_id"), ("DUO_CLIENT_SECRET", "duo_client_secret"),
+                     ("DUO_API_HOST", "duo_api_host"))
+
+
+def record_duo_health(ok: bool, detail: str = "") -> None:
+    """Record the startup Duo health check's result for the ``duo_signin`` gate.
+
+    ``detail`` is a short, already-sanitized failure description (an error
+    class or HTTP status, never a URL, key or response body); it is shown as
+    the gate's reason. The cached snapshot is patched at once, so the Settings
+    chip and ``GET /api/server-info`` agree without waiting for a re-probe."""
+    text = " ".join(str(detail or "").split())[:_DUO_HEALTH_DETAIL_MAX]
+    with _lock:
+        _duo_health.update(checked=True, ok=bool(ok), detail="" if ok else text)
+    gate = duo_signin_gate()
+    with _lock:
+        if isinstance(_cache.get("gated"), dict):
+            _cache["gated"] = {**_cache["gated"], "duo_signin": gate}
+
+
+def reset_duo_health() -> None:
+    """Back to "not checked yet" (a settings reload, and tests)."""
+    with _lock:
+        _duo_health.update(checked=False, ok=False, detail="")
+
+
+def duo_signin_gate(settings=None) -> Dict[str, Any]:
+    """The ``duo_signin`` rule. Reads settings and the cached health result; no
+    network call. Reasons, first match wins:
+
+    1. disabled (``DUO_ENABLED`` off);
+    2. Web SDK keys missing (named, never shown);
+    3. ``PUBLIC_BASE_URL`` not https on an RFC 1034 host (the redirect URI's only source);
+    4. the Duo health check has not passed: not run yet, or failed.
+
+    Attribute reads use ``getattr`` defaults, so a settings stub without the
+    identity keys (tests/test_host_capabilities.py) reads as disabled."""
+    if settings is None:
+        from backend.config import settings
+    if not getattr(settings, "duo_enabled", False):
+        return _gate(False, "Duo sign-in is off (DUO_ENABLED is not true).")
+    missing = [env for env, attr in _DUO_WEB_SDK_KEYS if not str(getattr(settings, attr, "") or "").strip()]
+    if missing:
+        return _gate(False, "Duo Web SDK keys missing: " + ", ".join(missing) + ".")
+    if not getattr(settings, "public_base_url_is_https", False):
+        return _gate(False, "PUBLIC_BASE_URL must be https:// on a DNS name (not an IP address) with no "
+                            "path; the Duo redirect URI is built from it.")
+    with _lock:
+        health = dict(_duo_health)
+    if not health["checked"]:
+        return _gate(False, "The Duo health check has not run yet.")
+    if not health["ok"]:
+        return _gate(False, "Duo health check failed" + (f": {health['detail']}" if health["detail"] else "."))
+    return _gate(True)
+
+
 def gated_rules(caps: Dict[str, Any], settings) -> Dict[str, Dict[str, Any]]:
     """The single place the 'can this option work here' rules live. The UI and
     the API validation both read these; neither re-derives them."""
@@ -187,7 +253,9 @@ def gated_rules(caps: Dict[str, Any], settings) -> Dict[str, Dict[str, Any]]:
             "nemoclaw_runtime": nemoclaw, "nvidia_models": models,
             # Chat attachments (docs/attachments.md): the Attach button's gate
             # and the chat API's 503.
-            "pdf_attachments": pdf_attachments_gate()}
+            "pdf_attachments": pdf_attachments_gate(),
+            # Lab 5 Duo sign-in: the sign-in page's button and its routes.
+            "duo_signin": duo_signin_gate(settings)}
 
 
 # --------------------------------------------------------------------------- api

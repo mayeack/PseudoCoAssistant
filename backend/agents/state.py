@@ -16,7 +16,7 @@ Notes on conventions:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
 
 class PseudoCoAssistantState(TypedDict, total=False):
@@ -47,6 +47,18 @@ class PseudoCoAssistantState(TypedDict, total=False):
     client_id: Optional[str]          # the browser's stable id: owner of its bookings (partition key)
     client_tz: Optional[str]          # IANA zone the slot labels are rendered in
     scheduling_action: Optional[Dict[str, Any]]  # structured chip action; wins over typed intent
+
+    # ---- Verified identity (Lab 5) ----
+    # ``identity_session``: the turn's VERIFIED identity session
+    # (``IdentitySnapshot.to_state()``: username, source, session_ref,
+    # signed_in_at, expires_at), or None on an anonymous turn. It only ever
+    # comes from ``request.state.identity`` (the identity middleware), never
+    # from a request body or from ``enduser_id`` -- it is a run_turn /
+    # build_initial_state parameter, deliberately NOT a ChatRequest field.
+    # (``identity`` alone already means the service identity overrides below.)
+    # ``identity_risk``: the Identity Risk Gate's verdict for the turn.
+    identity_session: Optional[Dict[str, Any]]
+    identity_risk: Dict[str, Any]
 
     # ---- Correlation / timing (set by the router node) ----
     request_id: str
@@ -229,13 +241,18 @@ def build_initial_state(
     client_tz: Optional[str] = None,
     scheduling_action: Optional[Dict[str, Any]] = None,
     attachment: Optional[Dict[str, Any]] = None,
+    identity_session: Optional[Dict[str, Any]] = None,
 ) -> PseudoCoAssistantState:
     """Build the initial graph state from an inbound chat request.
 
     Mirrors the argument list of the legacy
     ``RecommendationEngine.process_message`` so the router integration is a
-    drop-in replacement.
+    drop-in replacement. A verified ``identity_session`` names the turn's end
+    user: ``enduser_id`` becomes its username whatever the caller passed.
     """
+    identity_session = verified_identity(identity_session)
+    if identity_session:
+        enduser_id = identity_session["username"]
     return PseudoCoAssistantState(
         session_id=session_id,
         user_message=user_message,
@@ -243,6 +260,7 @@ def build_initial_state(
         theme=theme or "medadvice",
         client_address=client_address,
         enduser_id=enduser_id,
+        identity_session=identity_session,
         force_pii_injection=force_pii_injection,
         force_toxic_injection=force_toxic_injection,
         force_hallucination_injection=force_hallucination_injection,
@@ -262,7 +280,38 @@ def build_initial_state(
     )
 
 
-def governance_identity_overrides(state: Dict[str, Any]) -> Dict[str, str]:
+def verified_identity(identity_session: Any) -> Optional[Dict[str, Any]]:
+    """A copy of a turn's identity session when it names a user, else None.
+
+    Accepts the dict form (``IdentitySnapshot.to_state()``) or anything with a
+    ``to_state()`` (the snapshot itself). The username is stripped and
+    lowercased the way the identity store stores it."""
+    if identity_session is not None and not isinstance(identity_session, Mapping):
+        to_state = getattr(identity_session, "to_state", None)
+        identity_session = to_state() if callable(to_state) else None
+    if not isinstance(identity_session, Mapping):
+        return None
+    username = str(identity_session.get("username") or "").strip().lower()
+    if not username:
+        return None
+    return {**dict(identity_session), "username": username,
+            "source": str(identity_session.get("source") or "duo")}
+
+
+def identity_governance_fields(identity_session: Any) -> Dict[str, Any]:
+    """``identity_verified`` / ``identity_source`` for one turn's governance events.
+
+    Present only when the turn carries a verified identity session; an anonymous
+    turn contributes no key at all, so Labs 0-4 events are unchanged. Fresh
+    names, never ``enduser_id``: every emit site already passes that one, so a
+    second ``enduser_id`` would be a duplicate keyword."""
+    verified = verified_identity(identity_session)
+    if not verified:
+        return {}
+    return {"identity_verified": True, "identity_source": verified["source"]}
+
+
+def governance_identity_overrides(state: Dict[str, Any]) -> Dict[str, Any]:
     """Per-turn governance identity kwargs, omitting anything unset.
 
     ``create_governance_log`` resolves these with ``kwargs.get(key, default)``,
@@ -270,7 +319,7 @@ def governance_identity_overrides(state: Dict[str, Any]) -> Dict[str, str]:
     back to it — which would blank ``app_name`` on ordinary chat turns. Callers
     splat this dict so unset overrides contribute no key at all.
     """
-    overrides: Dict[str, str] = {}
+    overrides: Dict[str, Any] = {}
     # workflow_name / blueprint: which architecture served the turn. Carried by
     # EVERY governance event of the turn — blocked ones included — so a block is
     # attributable to the blueprint it happened under (parity contract).
@@ -278,4 +327,8 @@ def governance_identity_overrides(state: Dict[str, Any]) -> Dict[str, str]:
         value = state.get(key)
         if value:
             overrides[key] = value
+    # The verified end user (Lab 5): identity_verified / identity_source ride on
+    # every event of a signed-in turn, blocked ones included, through this same
+    # splat. Nothing on an anonymous turn.
+    overrides.update(identity_governance_fields(state.get("identity_session")))
     return overrides

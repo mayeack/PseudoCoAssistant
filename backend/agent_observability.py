@@ -128,6 +128,8 @@ _GOVERNANCE_KEYS = (
     "session_id", "request_id", "conversation_id",
     "provider_name", "request_model", "response_model",
     "service_name", "deployment_id", "enduser_id",
+    # Lab 5: present only on a verified (Duo-signed-in) turn.
+    "identity_verified", "identity_source",
     "safety_violated", "safety_categories", "guardrail_triggered",
     "policy_blocked", "pii_detected", "pii_types",
     "toxic_detected", "toxic_types",

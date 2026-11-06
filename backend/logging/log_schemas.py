@@ -185,6 +185,14 @@ def create_governance_log(
 
         # Actor / application context
         "enduser_id": kwargs.get("enduser_id"),
+        # Additive (Lab 5): set only on a turn of a VERIFIED identity session
+        # (Duo sign-in) — identity_verified=True, identity_source="duo" — and
+        # then enduser_id is that username. Absent (None-stripped) otherwise:
+        # the synthetic chat persona and an in-process caller's actor (the
+        # spray) are unverified. Fresh names: enduser_id itself is passed by
+        # every emit site, so reusing it would be a duplicate keyword.
+        "identity_verified": kwargs.get("identity_verified"),
+        "identity_source": kwargs.get("identity_source"),
         "service_name": kwargs.get("service_name", "pseudoco-assistant"),
         "client_address": kwargs.get("client_address"),
 

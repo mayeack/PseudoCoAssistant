@@ -47,6 +47,7 @@ SUITES=(
   tests/test_internal_docs.py
   tests/test_attachments.py
   tests/test_chat_completions.py
+  tests/test_identity_sessions.py
   tests/test_themes.py
   tests/test_token_cache_split.py
   tests/test_recommendation_formatting.py

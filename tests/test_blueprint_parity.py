@@ -15,7 +15,8 @@ core differs. This suite is the detector:
     and response blocks, NeMo input/output blocks, Agent Control deny and steer,
     forced PII/toxic/hallucination/authority injection, generation error, Multi-Agent
     Mode accepted, a PDF attachment hiding a prompt injection screened by AI
-    Defense and unscreened) is run through run_turn and run_turn_stream for EVERY
+    Defense and unscreened, a signed-in turn allowed and blocked) is run through
+    run_turn and run_turn_stream for EVERY
     blueprint, and the normalized outcome — result type/severity/escalated/
     policy_blocked, the terminal governance event's guardrail fields, the core
     state contract, and the guardrail stage frames — must be identical across
@@ -407,6 +408,20 @@ def _scenario(kind: str):
                 kwargs["ai_defense_review"] = True
             else:
                 kwargs["multi_agent_mode"] = True
+        elif kind in _IDENTITY_SCENARIOS:
+            # Lab 5: a turn of a VERIFIED identity session (what the chat router
+            # passes from request.state.identity). The session names the end
+            # user whatever enduser_id says, and identity_verified /
+            # identity_source ride on every event -- the blocked one included,
+            # through the shared block handler.
+            kwargs.update(identity_session=dict(_IDENTITY_SESSION), enduser_id="t.nguyen")
+            if kind == "identity_signed_in_blocked":
+                saved["adc"] = def_mod.ai_defense_client
+                bad = InspectionResult(is_safe=False, severity="HIGH", rule_names=["Prompt Injection"],
+                                       event_id="evt-id")
+                def_mod.ai_defense_client = _Stub(is_configured=True, inspect_prompt=lambda *a, **k: bad,
+                                                  inspect_response=lambda *a, **k: InspectionResult(is_safe=True))
+                kwargs["ai_defense_review"] = True
         elif kind == "generation_error":
             fail_agents = ("*",)
         elif kind == "multi_agent":
@@ -458,6 +473,13 @@ def _scenario(kind: str):
 _GOV_KEYS = ("guardrail_ids", "policy_blocked", "safety_violated", "pii_detected", "toxic_detected",
              "hallucination_detected", "authority_violation_detected", "guardrail_triggered")
 
+# Lab 5 identity: the verified session the router would pass, and the evidence
+# every event of such a turn carries.
+_IDENTITY_SCENARIOS = ("identity_signed_in", "identity_signed_in_blocked")
+_IDENTITY_SESSION = {"session_ref": "parity-ref", "username": "nina.osei", "source": "duo",
+                     "signed_in_at": "2026-11-05T10:00:00", "expires_at": "2026-11-05T22:00:00"}
+_IDENTITY_KEYS = ("enduser_id", "identity_verified", "identity_source")
+
 # The output-token cache split (backend/agents/token_usage.py): both cores sum it
 # across their agents, and every event — blocked turns included — must report a
 # pair that adds back up to usage_output_tokens.
@@ -501,6 +523,10 @@ def _run(bp_key: str, theme: str, kind: str) -> Dict[str, Any]:
         # booking is logged once per run.
         "tool_calls": list(dict.fromkeys(e.get("tool_name") for e in events if e.get("_kind") == "tool_call")),
         "governance": {k: last.get(k) for k in _GOV_KEYS},
+        # Lab 5: the end user and the identity evidence on the terminal event,
+        # and whether EVERY event of the turn carries the evidence.
+        "identity": {k: last.get(k) for k in _IDENTITY_KEYS},
+        "identity_on_every_event": bool(events) and all(e.get("identity_verified") is True for e in events),
         "tokens": {k: last.get(k) for k in _TOKEN_KEYS},
         "gov_present": bool(events),
         "guardrail_stages": [s for s in stages if s in GUARDRAIL_NODES],
@@ -542,7 +568,7 @@ SCENARIOS = ("benign", "policy_block", "ai_defense_prompt_block", "ai_defense_re
              "nemo_input_block", "nemo_output_block", "agent_control_deny", "agent_control_prompt_deny",
              "agent_control_steer", "forced_injection", "pii_exfil_prompt", "pii_exfil_bulk", "internal_docs_ask",
              "generation_error", "multi_agent", "mcp_thrash",
-             "scheduling_offer", "scheduling_book", "scheduling_list") + _DOC_SCENARIOS
+             "scheduling_offer", "scheduling_book", "scheduling_list") + _DOC_SCENARIOS + _IDENTITY_SCENARIOS
 
 
 def _document_checks(outcomes: Dict[str, Dict[str, Dict[str, Any]]], keys: List[str]) -> None:
@@ -663,6 +689,10 @@ def test_dynamic_parity() -> None:
                       out["tokens"] == ref["tokens"], f"{out['tokens']} != {ref['tokens']}")
                 check(f"[{key} vs {ref_key}] {sk}: same governance guardrail fields",
                       out["governance"] == ref["governance"], f"{out['governance']} != {ref['governance']}")
+                check(f"[{key} vs {ref_key}] {sk}: same end user and identity evidence",
+                      (out["identity"], out["identity_on_every_event"])
+                      == (ref["identity"], ref["identity_on_every_event"]),
+                      f"{out['identity']} != {ref['identity']}")
                 check(f"[{key} vs {ref_key}] {sk}: same Agent Control steer outcome and delivered PII",
                       (out["steer"], out["answer_has_ssn"], out["answer_has_steer_leftovers"])
                       == (ref["steer"], ref["answer_has_ssn"], ref["answer_has_steer_leftovers"]),
@@ -780,6 +810,23 @@ def test_dynamic_parity() -> None:
                   "internal-docs.search_documents" not in benign["tool_calls"] and not benign["internal_docs"]
                   and benign["docs_grounded"] is False, str(benign["tool_calls"]))
         check("generation error degrades to the safe reply", r["medadvice/generation_error"]["result"]["type"] == "safety_warning")
+        # Lab 5: a signed-in turn names the verified user and carries the
+        # evidence on every event, blocked or not; an anonymous turn carries none.
+        verified = {"enduser_id": "nina.osei", "identity_verified": True, "identity_source": "duo"}
+        for theme in ("medadvice", "telecomchatbot"):
+            signed = r[f"{theme}/identity_signed_in"]
+            check(f"{theme}: a signed-in turn's events name the verified user (not the passed enduser_id)",
+                  signed["identity"] == verified and signed["identity_on_every_event"] is True
+                  and signed["result"]["policy_blocked"] is False, str(signed["identity"]))
+            blocked = r[f"{theme}/identity_signed_in_blocked"]
+            check(f"{theme}: a signed-in turn blocked by AI Defense still carries the identity evidence",
+                  blocked["result"]["policy_blocked"] is True
+                  and blocked["governance"]["guardrail_ids"] == ["cisco_ai_defense"]
+                  and blocked["identity"] == verified and blocked["identity_on_every_event"] is True,
+                  f"{blocked['identity']} {blocked['governance']['guardrail_ids']}")
+            check(f"{theme}: an anonymous turn carries no identity evidence",
+                  r[f"{theme}/benign"]["identity"]["identity_verified"] is None
+                  and r[f"{theme}/benign"]["identity"]["identity_source"] is None)
         check("benign turn passes the whole POST chain",
               r["medadvice/benign"]["guardrail_stages"][-1] == "governance")
         # MCP Tool Thrash: the shared chain's launch/join nodes run on every turn,

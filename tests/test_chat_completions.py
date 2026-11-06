@@ -54,7 +54,7 @@ llm.invoke_chat = _fake_llm
 
 from fastapi.testclient import TestClient  # noqa: E402
 from backend.main import app  # noqa: E402
-from backend.models.schemas import ChatRequest  # noqa: E402
+from backend.models.schemas import ChatCompletionRequest, ChatRequest  # noqa: E402
 from backend.routers import chat as chat_router  # noqa: E402
 
 BASIC = {"Authorization": "Basic " + base64.b64encode(f"x:{KEY}".encode()).decode()}
@@ -234,6 +234,56 @@ def flag_checks(c) -> None:
     check("the turn's user_message is the last user message", prot.get("user_message") == "protected")
 
 
+def identity_checks(c) -> None:
+    """Lab 5: the turn's identity comes from the identity middleware (a signed-in
+    cookie), never from the request body; a signed-in call owns its session."""
+    print("identity (Lab 5)")
+    from backend.middleware.identity import COOKIE_NAME
+    from backend.services import identity_store
+    from backend.services.enduser_pool import ENDUSER_IDS
+
+    check("ChatCompletionRequest has no identity / enduser field",
+          not any(n == "enduser_id" or n.startswith("identity") for n in ChatCompletionRequest.model_fields))
+    seen: list = []
+    real = chat_router._dispatch_chat_turn
+
+    def fake_dispatch(**kwargs):
+        seen.append(kwargs)
+        return {"message": "stub reply", "type": "recommendation", "escalated": False}
+
+    spoof = {"identity_session": {"username": "victim.user", "source": "duo"}, "enduser_id": "victim.user"}
+    saved = settings.duo_enabled
+    settings.duo_enabled = True
+    token, _ = identity_store.create("Nina.Osei")
+    signed_in = {**HEADER, "Cookie": f"{COOKIE_NAME}={token}"}
+    chat_router._dispatch_chat_turn = fake_dispatch
+    try:
+        r_in = c.post(URL, json=body(user("signed in"), **spoof), headers=signed_in)
+        r_anon = c.post(URL, json=body(user("anonymous"), **spoof), headers=HEADER)
+    finally:
+        chat_router._dispatch_chat_turn = real
+    try:
+        check("signed in -> 200", r_in.status_code == 200, f"{r_in.status_code} {r_in.text[:160]}")
+        check("anonymous -> 200", r_anon.status_code == 200, f"{r_anon.status_code} {r_anon.text[:160]}")
+        if len(seen) != 2:
+            check("two turns dispatched", False, f"{len(seen)}")
+            return
+        signed, anon = seen
+        check("signed in: identity_session is the middleware's verified identity",
+              (signed.get("identity_session") or {}).get("username") == "nina.osei")
+        check("signed in: enduser_id is the verified username, not the body's",
+              signed.get("enduser_id") == "nina.osei")
+        check("anonymous: a body identity_session / enduser_id never reaches the turn",
+              anon.get("identity_session") is None and anon.get("enduser_id") in ENDUSER_IDS,
+              f"{anon.get('identity_session')} {anon.get('enduser_id')}")
+        sid = r_in.json()["pseudoco_assistant_turn"]["session_id"]
+        check("the signed-in call's session is owned: 404 to an anonymous reader",
+              c.get(f"/api/chat/session/{sid}", headers=HEADER).status_code == 404
+              and c.get(f"/api/chat/session/{sid}", headers=signed_in).status_code == 200)
+    finally:
+        settings.duo_enabled = saved
+
+
 def main() -> int:
     contract_checks()
     with TestClient(app) as c:
@@ -242,6 +292,7 @@ def main() -> int:
         session_checks(c)
         validation_checks(c)
         flag_checks(c)
+        identity_checks(c)
     print(f"\n{'OK' if not _fails else f'{_fails} FAILED'}")
     return 1 if _fails else 0
 

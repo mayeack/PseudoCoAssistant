@@ -13,6 +13,7 @@ from backend.logging.log_handlers import setup_logging
 from backend.middleware.request_logging import RequestLoggingMiddleware
 from backend.middleware.access_key import AccessKeyMiddleware
 from backend.middleware.body_limit import ChatBodyLimitMiddleware
+from backend.middleware.identity import IdentityMiddleware
 from backend.middleware.settings_gate import has_settings_access
 from backend.routers import chat, admin, auth, settings as settings_routes, incident, spray, toolguard, analytics, appointments, attachments
 from backend.telemetry import otel, tracestate_guard
@@ -58,9 +59,16 @@ app.add_middleware(
 # /api/chat/message[/stream] larger than the biggest allowed attachment plus
 # headroom. Added BEFORE the access-key gate so it runs INSIDE it -- an
 # unauthenticated caller still gets its 401 first, and nobody can make the app
-# count an anonymous upload. Resulting order:
-# RequestLogging -> AccessKey -> ChatBodyLimit -> CORS -> app.
+# count an anonymous upload.
 app.add_middleware(ChatBodyLimitMiddleware)
+
+# Identity (Lab 5, backend/middleware/identity.py): resolves the Duo sign-in
+# cookie into request.state.identity. Inert unless DUO_ENABLED. Added after the
+# body cap and before the access-key gate, so it runs INSIDE the room-key gate
+# (the room key stays the outer trust boundary) and outside the body cap.
+# Resulting order:
+# RequestLogging -> AccessKey -> Identity -> ChatBodyLimit -> CORS -> app.
+app.add_middleware(IdentityMiddleware)
 
 # Access-key gate (Basic Auth) — added before request logging so logging stays
 # outermost and still records rejected (401) requests. No-op unless ACCESS_KEY is set.

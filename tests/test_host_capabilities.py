@@ -217,6 +217,59 @@ def test_pdf_attachments_rule() -> None:
         hc._cache.clear(); hc._cached_at = 0.0; hc._refreshing = False
 
 
+def test_duo_signin_rule() -> None:
+    """Lab 5 Duo sign-in: settings plus the cached startup health check, no
+    network call. Reasons in order: disabled; Web SDK keys missing; PUBLIC_BASE_URL
+    not https on a DNS name; the health check not run yet / failed."""
+    from backend.config import Settings
+
+    g = hc.gated_rules(_caps(gpu_present=False), _Settings())
+    check("gated_rules carries duo_signin; a stub without identity keys reads as disabled",
+          g.get("duo_signin", {}).get("enabled") is False and "DUO_ENABLED" in g["duo_signin"]["reason"],
+          str(g.get("duo_signin")))
+
+    hc.reset_duo_health()
+    try:
+        s = Settings(duo_enabled=False, duo_client_id="DIXXXXXXXXXXXXXXXXXX", duo_client_secret="s" * 40,
+                     duo_api_host="api-x.duosecurity.com", public_base_url="https://l5-ws-1.pseudocoassistant.com")
+        check("1. disabled wins over everything else",
+              hc.duo_signin_gate(s) == {"enabled": False, "reason": "Duo sign-in is off (DUO_ENABLED is not true)."})
+        s = Settings(duo_enabled=True, duo_client_secret="s" * 40, public_base_url="http://x")
+        r = hc.duo_signin_gate(s)
+        check("2. Web SDK keys missing: named, never shown",
+              r["enabled"] is False and r["reason"] == "Duo Web SDK keys missing: DUO_CLIENT_ID, DUO_API_HOST."
+              and "sss" not in r["reason"], str(r))
+        for url in ("", "http://l5-ws-1.pseudocoassistant.com", "https://203.0.113.7",
+                    "https://l5-ws-1.pseudocoassistant.com/app"):
+            s = Settings(duo_enabled=True, duo_client_id="DI1", duo_client_secret="sec", duo_api_host="api-x.duosecurity.com",
+                         public_base_url=url)
+            r = hc.duo_signin_gate(s)
+            check(f"3. PUBLIC_BASE_URL not https on a DNS name ({url!r})",
+                  r["enabled"] is False and r["reason"].startswith("PUBLIC_BASE_URL must be https://"), str(r))
+        ok = Settings(duo_enabled=True, duo_client_id="DI1", duo_client_secret="sec",
+                      duo_api_host="api-x.duosecurity.com", public_base_url="https://l5-ws-1.pseudocoassistant.com")
+        check("4. not checked yet = gated",
+              hc.duo_signin_gate(ok) == {"enabled": False, "reason": "The Duo health check has not run yet."})
+        hc.record_duo_health(False, "ConnectTimeout\n  (api host)")
+        check("4. failed health check = gated, with its sanitized detail",
+              hc.duo_signin_gate(ok) == {"enabled": False,
+                                         "reason": "Duo health check failed: ConnectTimeout (api host)"},
+              str(hc.duo_signin_gate(ok)))
+        hc.record_duo_health(True)
+        check("everything in place and a passing health check -> enabled",
+              hc.duo_signin_gate(ok) == {"enabled": True, "reason": ""})
+        check("the earlier reasons still win over a passing health check",
+              hc.duo_signin_gate(Settings(duo_enabled=False))["enabled"] is False)
+        hc._cache.clear(); hc._cached_at = 0.0
+        hc._cache.update({"capabilities": {}, "gated": {"duo_signin": {"enabled": True, "reason": ""}}})
+        hc.record_duo_health(False, "HTTP 503")
+        check("recording a health result patches the cached snapshot at once",
+              hc.current()["gated"]["duo_signin"]["enabled"] is False, str(hc.current()["gated"]))
+    finally:
+        hc.reset_duo_health()
+        hc._cache.clear(); hc._cached_at = 0.0; hc._refreshing = False
+
+
 def main() -> int:
     for fn in (
         test_gpu_less_mac_greys_nvidia_and_nemoclaw_on_podman,
@@ -226,6 +279,7 @@ def main() -> int:
         test_probes_never_raise_and_cache_refreshes,
         test_current_revalidates_a_stale_snapshot,
         test_pdf_attachments_rule,
+        test_duo_signin_rule,
     ):
         try:
             fn()
