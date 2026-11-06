@@ -92,8 +92,12 @@ before any screen or model.
      in memory only: after a restart, or while Duo refuses the Status keys,
      no email is known yet, CII is not asked, and the lookup says so
      (`unavailable`, error `no_login`), never `not_found`. `lab5-setup
-     status` runs this lookup for the room's victim on each box, and fails a
-     box that cannot ask Duo or CII.
+     status` runs this lookup for the room's victim on each box. A box that
+     cannot ask Duo or CII fails, unless its gate blocks the victim on a
+     reason that holds anyway: a Duo account that is disabled (a contained
+     victim) or pending deletion, or a CII block in what did answer. Its row is
+     then OK and names what did not answer. A Duo lockout alone does not
+     hold: Duo lifts it on its own in about 15 minutes.
    - **Limits.** Each call allows 3 s to connect and 5 s per read, and runs
      off the event loop. Each source's answer is cached per user for
      `IDENTITY_STATUS_TTL_SECONDS` (10 s), failures included.
