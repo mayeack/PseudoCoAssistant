@@ -541,6 +541,15 @@ def test_victim_self_check_on_a_refused_client() -> None:
             check(f"{message!r} {where}: the box's victim row is FAIL (cannot verify), never WARN 'no record in CII'",
                   status == "FAIL" and "cannot verify avery.kim (cii graphql_error)" in detail
                   and "no record in CII" not in detail, f"{status}: {detail}")
+            # The row carries only the code, so its advice is the facilitator's
+            # only pointer: a refused client is the API client's role or scopes
+            # (its token was issued), never only "the query does not match".
+            check(f"{message!r} {where}: the row's advice names the API client's role or scopes and the Mac's "
+                  "self-check (which prints CII's message), and never says the query alone is at fault",
+                  all(n in detail for n in ("the CII API client's role or scopes", "persona_activity.py selfcheck",
+                                            "spikes S5/S6"))
+                  and "query does not match the tenant" not in detail and "pseudoco-lab5-cii-" not in detail,
+                  detail)
     fake.cii_body = None
     lookup.clear_cache()
 

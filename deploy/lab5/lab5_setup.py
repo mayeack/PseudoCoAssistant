@@ -465,16 +465,27 @@ print(json.dumps(answer))
 # What to fix when a box's lookup cannot ask one source about the victim.
 _SOURCE_FIX = {"duo": "the Status app's keys (Keychain items pseudoco-lab5-duo-status-ikey / -skey, then re-run up)",
                "cii": "the CII API client (Keychain items pseudoco-lab5-cii-*, then re-run up)"}
-# CII did answer, but with an error (a partial answer) or in a shape the gate
-# cannot read: its credentials worked, so they are not the thing to check.
-_CII_ANSWER_ERRORS = ("graphql_error", "bad_response")
-_CII_ANSWER_FIX = ("CII's answer, which carried an error or a shape the gate cannot read (a passing upstream "
-                   "failure is gone by the next status; one that stays means the query does not match the tenant: "
-                   "spikes S5/S6 pin it)")
+# CII did answer: the box's API client got a token, so its ID and secret are
+# right and re-entering them fixes nothing. An error that stays in the answer
+# is what that client may read (its role or scopes in CII: every refusal of a
+# permission, scope or role is an error, never "no such user"), a query the
+# tenant rejects, or CII's answer for a login it has no record of; spikes
+# S5/S6 pin the last two. The row carries only the code, so the advice names
+# the Mac's self-check, which asks with the same API client and prints CII's
+# own message. An answer in a shape the gate cannot read is the query's.
+_CII_ANSWER_FIX = {
+    "graphql_error": ("CII's answer, which carried an error (a passing upstream failure is gone by the next status; "
+                      "one that stays is the CII API client's role or scopes, which must let it read end users, or "
+                      "an answer spikes S5/S6 pin: a query the tenant rejects, or CII's answer for a login it has "
+                      "no record of. `persona_activity.py selfcheck` on the Mac asks CII with the same API client "
+                      "and prints CII's own message)"),
+    "bad_response": ("CII's answer, in a shape the gate cannot read (a passing upstream failure is gone by the next "
+                     "status; one that stays means the query does not match the tenant: spikes S5/S6 pin it)"),
+}
 
 
 def _source_fix(source: str, error: Optional[str]) -> str:
-    return _CII_ANSWER_FIX if source == "cii" and error in _CII_ANSWER_ERRORS else _SOURCE_FIX[source]
+    return (_CII_ANSWER_FIX.get(error or "") if source == "cii" else None) or _SOURCE_FIX[source]
 
 
 # Block reasons that do not hold: Duo unlocks a locked-out account on its own
