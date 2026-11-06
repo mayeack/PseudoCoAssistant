@@ -212,10 +212,17 @@ class IdentitySession(Base):
     revoked_reason = Column(String, nullable=True)
     # Unblock me (plan 12.1, A4): set while the user has overridden the
     # Identity Risk Gate for this session. The gate then lets its turns through
-    # (recording the real verdict and identity_override=true on every event)
-    # and the Duo revocation pull leaves it alone; POST /api/identity/reblock
-    # clears it. Never touches Duo or Cisco Identity Intelligence.
+    # (recording the real verdict and identity_override=true on every event);
+    # POST /api/identity/reblock clears it, and so does a revocation (it ends
+    # the session). Never touches Duo or Cisco Identity Intelligence.
     unblocked_at = Column(DateTime, nullable=True)
+    # The revocation reason this override cleared, when Unblock me brought a
+    # revoked session back (else NULL). Only an override that cleared a
+    # "duo_disabled" tombstone keeps the Duo revocation pull off the session,
+    # and only while Duo keeps the account disabled: an override turned on for
+    # a gate block, or before any block, never stops a Duo disable from ending
+    # the session.
+    unblock_cleared = Column(String, nullable=True)
 
 class Appointment(Base):
     """One appointment booked from the chat's scheduling flow (docs/scheduling.md).

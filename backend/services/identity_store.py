@@ -18,9 +18,14 @@ backend/middleware/identity.py). Everything behind it lives here:
   ``identity_session_revoked`` audit event.
 - ``purge`` deletes rows past their expiry (run from ``create``, throttled).
 - ``unblock`` / ``reblock`` set and clear the session's Unblock me override
-  (``unblocked_at``; plan 12.1). ``unblock`` also clears a tombstone. Each
-  writes its audit event (``identity_unblocked`` / ``identity_reblocked``) and
-  neither ever talks to Duo or Cisco Identity Intelligence.
+  (``unblocked_at``; plan 12.1). ``unblock`` also clears a tombstone and
+  records the revocation reason it cleared (``unblock_cleared``): only an
+  override that brought the session back from a Duo disable keeps the
+  revocation pull off it (``IdentitySnapshot.holds_open``), and ``rearm``
+  drops that once Duo has enabled the account again. A revocation ends the
+  override (it ends the session). ``unblock`` / ``reblock`` each write their
+  audit event (``identity_unblocked`` / ``identity_reblocked``) and none of
+  these ever talks to Duo or Cisco Identity Intelligence.
 - Every write drops the lookup cache, and a lookup that read the database
   before such a drop never stores its (stale) row: the cache has a generation.
 
@@ -95,10 +100,20 @@ class IdentitySnapshot:
     client_address: Optional[str] = None
     #: Set while Unblock me overrides the Identity Risk Gate for this session.
     unblocked_at: Optional[datetime] = None
+    #: The revocation reason that override cleared (Unblock me turned on for a
+    #: revoked session), or None (turned on for a gate block, or pre-emptively).
+    unblock_cleared: Optional[str] = None
 
     @property
     def overridden(self) -> bool:
         return self.unblocked_at is not None
+
+    def holds_open(self, reason: str) -> bool:
+        """True while Unblock me holds this session open past a revocation for
+        ``reason``: the override brought the session back from exactly that.
+        An override turned on for a gate block (or before any block) holds
+        nothing open, so a Duo disable still ends the session."""
+        return self.overridden and self.unblock_cleared == reason
 
     def to_state(self) -> Dict[str, Any]:
         """The turn-state form (``identity_session``): what the chain and the
@@ -180,6 +195,7 @@ def _row_facts(row: IdentitySession) -> _Row:
             duo_txid=row.duo_txid,
             client_address=row.client_address,
             unblocked_at=getattr(row, "unblocked_at", None),
+            unblock_cleared=getattr(row, "unblock_cleared", None),
         ),
         revoked_at=row.revoked_at,
         revoked_reason=row.revoked_reason,
@@ -310,7 +326,11 @@ def revoke(session_ref: str, *, reason: str, actor: str = "system",
            now: Optional[datetime] = None) -> bool:
     """Revoke a session, keeping it as a tombstone, and write the
     ``identity_session_revoked`` audit event. Returns False when the session
-    does not exist or was already revoked (no second event)."""
+    does not exist or was already revoked (no second event).
+
+    A revocation ends the session, so it ends its Unblock me override too:
+    Unblock me can then bring the session back (``unblock``), which records
+    that it cleared this revocation."""
     now = now or _utcnow()
     with get_db_context() as db:
         row = db.query(IdentitySession).filter(IdentitySession.id == session_ref).first()
@@ -318,6 +338,8 @@ def revoke(session_ref: str, *, reason: str, actor: str = "system",
             return False
         row.revoked_at = now
         row.revoked_reason = reason
+        row.unblocked_at = None
+        row.unblock_cleared = None
         snapshot = _row_facts(row).snapshot
     clear_cache()
     from backend.logging import identity_audit
@@ -338,7 +360,13 @@ def unblock(session_ref: str, *, client_address: Optional[str] = None,
     and clear its tombstone, if any. Writes ``identity_unblocked`` when that
     changed anything. Returns the session's snapshot, or None when it does not
     exist or has expired. Never talks to Duo or Identity Intelligence: the
-    account itself stays as Duo has it."""
+    account itself stays as Duo has it.
+
+    Clearing a tombstone records its revocation reason (``unblock_cleared``,
+    and ``details.cleared`` on the event). Only that keeps the Duo revocation
+    pull off the session (``IdentitySnapshot.holds_open``): an override turned
+    on for a live session, blocked by the gate or not, does not, so a later
+    Duo disable still ends the session and this can bring it back."""
     now = now or _utcnow()
     with get_db_context() as db:
         row = db.query(IdentitySession).filter(IdentitySession.id == session_ref).first()
@@ -348,6 +376,8 @@ def unblock(session_ref: str, *, client_address: Optional[str] = None,
         changed = row.unblocked_at is None or row.revoked_at is not None
         if changed:
             row.unblocked_at = row.unblocked_at or now
+            if cleared:
+                row.unblock_cleared = cleared
             row.revoked_at = None
             row.revoked_reason = None
         snapshot = _row_facts(row).snapshot
@@ -374,6 +404,7 @@ def reblock(session_ref: str, *, client_address: Optional[str] = None,
             return None
         changed = row.unblocked_at is not None
         row.unblocked_at = None
+        row.unblock_cleared = None
         snapshot = _row_facts(row).snapshot
     clear_cache()
     if changed:
@@ -383,6 +414,22 @@ def reblock(session_ref: str, *, client_address: Optional[str] = None,
                                      client_address=client_address or snapshot.client_address,
                                      session_ref=snapshot.session_ref)
     return snapshot
+
+
+def rearm(session_ref: str) -> bool:
+    """Duo reports the account enabled again: the revocation this session's
+    Unblock me cleared is over, so forget it (``unblock_cleared``) and a new
+    Duo disable ends the session again. The override itself stays on (the
+    gate keeps recording it). Returns True when it changed anything; no audit
+    event (the override did not change), and nothing is sent to Duo."""
+    with get_db_context() as db:
+        changed = db.query(IdentitySession).filter(
+            IdentitySession.id == session_ref,
+            IdentitySession.unblock_cleared.isnot(None)).update(
+            {IdentitySession.unblock_cleared: None}, synchronize_session=False)
+    if changed:
+        clear_cache()
+    return bool(changed)
 
 
 def status(session_ref: str) -> Optional[LookupResult]:

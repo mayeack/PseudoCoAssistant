@@ -227,7 +227,10 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   The CII query is the one constant `CII_END_USER_QUERY`.
 - **Fail open (A3):** an unavailable lookup allows the turn with
   `identity_check="unavailable"`; a block resting on what WAS learned still
-  blocks.
+  blocks. CII is asked with the email Duo last gave (`remembered_email`), so
+  a Duo outage never hides a CII block; a source that was not asked is
+  `unavailable`, never `not_found`, and "no such user" from CII is an answer
+  (`identity_check="ok"`), not an outage.
 - **No side effects in the chain.** The gate never revokes and never writes
   to Duo or CII. Revocation is the middleware's pull: Duo `disabled` revokes
   the session (a tombstone); `locked out` only blocks turns.
@@ -235,6 +238,9 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   session, never a Demo Controls card or request field, and never touches Duo
   or CII. The gate records the real verdict plus `identity_override=true` on
   every event; the audit events are `identity_unblocked` / `identity_reblocked`.
+  It never exempts a session from the pull: only an override that brought a
+  session back from a Duo revocation (`unblock_cleared`, `holds_open`) keeps
+  it open, and only while Duo keeps the account disabled.
 - The block event: `guardrail_ids=["cisco_identity_intelligence"]`,
   `safety_categories=["compromised_identity"]`, severity HIGH (never
   EMERGENCY), no escalation, the typed message only, `theme=` and the turn's

@@ -16,6 +16,9 @@ no identity broker: the app calls both services itself, read-only.
   GraphQL API at ``CII_API_URL`` for the user's level of trust and current
   failing checks. CII's login is the user's email, so the Duo answer's email
   is the CII login (a username that is already an email is used as is).
+  The last email Duo gave for each username is kept beyond the cache
+  (``remembered_email``; it does not change), so CII is still asked while
+  Duo cannot answer: a Duo outage or throttle never hides a CII block.
 
 Rules:
 
@@ -33,7 +36,11 @@ Rules:
 
 ``lookup(username)`` returns ``{duo_status, trust_level, failing_checks,
 as_of, available, sources}``; ``available`` is True only when both sources
-answered about this user.
+answered about this user, where "no such user" (``not_found``) is an answer:
+a user CII has no record of yet (a new participant account) is not an
+outage. ``sources`` says what each one actually answered; a source that could
+not be asked (no CII login known) is ``unavailable`` (error ``no_login``),
+never ``not_found``.
 """
 from __future__ import annotations
 
@@ -62,6 +69,10 @@ USER_AGENT = "pseudoco-assistant-identity-lookup"
 
 #: Source states.
 OK, UNAVAILABLE, NOT_CONFIGURED, NOT_FOUND = "ok", "unavailable", "not_configured", "not_found"
+#: States in which a source answered about the user ("no such user" included).
+ANSWERED = frozenset({OK, NOT_FOUND})
+#: The CII error when no login is known to ask it with (Duo gave no email).
+NO_LOGIN = "no_login"
 
 DUO_USERS_PATH = "/admin/v1/users"
 #: Duo account statuses, normalized (Duo writes "locked out", "pending deletion").
@@ -182,7 +193,7 @@ _http: Optional[httpx.Client] = None
 def set_transport(transport: Optional[httpx.BaseTransport] = None) -> None:
     """Route every lookup through ``transport`` (tests pass an
     ``httpx.MockTransport``); ``None`` restores the network. Drops the client,
-    the caches and the CII token."""
+    the caches, the CII token and the remembered emails."""
     global _transport, _http
     with _client_lock:
         _transport = transport
@@ -193,6 +204,7 @@ def set_transport(transport: Optional[httpx.BaseTransport] = None) -> None:
                 pass
         _http = None
     clear_cache()
+    forget_emails()
 
 
 def _client() -> httpx.Client:
@@ -264,14 +276,50 @@ _cii_cache = _Cache()
 _token_lock = threading.Lock()
 _token: Optional[Tuple[str, float]] = None      # (access token, monotonic expiry)
 
+# username -> the email of Duo's last successful answer about it: CII's login.
+# Not an answer cache (no TTL): an email does not change with the account's
+# status, and keeping it lets CII be asked while Duo cannot answer. Updated by
+# every Duo read that succeeds (sign-in start, the pull, the gate, /me).
+_EMAILS_MAX = 4096
+_emails_lock = threading.Lock()
+_emails: Dict[str, str] = {}
+
 
 def clear_cache() -> None:
-    """Forget every cached answer and the CII token (tests, configuration change)."""
+    """Forget every cached answer and the CII token (tests, configuration
+    change). The remembered emails stay (``forget_emails``)."""
     global _token
     _duo_cache.clear()
     _cii_cache.clear()
     with _token_lock:
         _token = None
+
+
+def forget_emails() -> None:
+    """Forget every remembered email (tests; ``set_transport`` does this)."""
+    with _emails_lock:
+        _emails.clear()
+
+
+def remembered_email(username: Any) -> Optional[str]:
+    """The email Duo last gave for ``username``, or None."""
+    with _emails_lock:
+        return _emails.get(_normalize_username(username))
+
+
+def _remember_email(username: str, answer: Mapping[str, Any]) -> None:
+    """Keep the email of a successful Duo answer; an answer without one
+    forgets it (Duo no longer has an email on file). Failures change nothing."""
+    if answer.get("state") != OK:
+        return
+    mail = answer.get("email")
+    with _emails_lock:
+        if isinstance(mail, str) and mail:
+            if username not in _emails and len(_emails) >= _EMAILS_MAX:
+                _emails.clear()
+            _emails[username] = mail
+        else:
+            _emails.pop(username, None)
 
 
 def _now_iso() -> str:
@@ -340,6 +388,7 @@ def duo_user(username: Any) -> Dict[str, Any]:
             result = _unavailable(_error_code(exc))
         if result["state"] == UNAVAILABLE:
             logger.warning("Duo status lookup unavailable (%s)", result.get("error"))
+        _remember_email(name, result)
         return result
 
     return _duo_cache.get(name, fetch)
@@ -433,9 +482,13 @@ def _cii_fetch(login: str) -> Dict[str, Any]:
 
 
 def cii_login(username: str, duo_answer: Optional[Mapping[str, Any]] = None) -> Optional[str]:
-    """The CII login for a user: the email Duo has on file, else the username
-    when it is an email already."""
-    mail = (duo_answer or {}).get("email")
+    """The CII login for a user: the email Duo has on file (this answer's;
+    when Duo could not answer now, the email of its last answer), else the
+    username when it is an email already."""
+    answer = duo_answer or {}
+    mail = answer.get("email")
+    if not (isinstance(mail, str) and _EMAIL_RE.fullmatch(mail)) and answer.get("state") != OK:
+        mail = remembered_email(username)
     if isinstance(mail, str) and _EMAIL_RE.fullmatch(mail):
         return mail.lower()
     return username if _EMAIL_RE.fullmatch(username or "") else None
@@ -443,11 +496,13 @@ def cii_login(username: str, duo_answer: Optional[Mapping[str, Any]] = None) -> 
 
 def cii_user(login: Optional[str]) -> Dict[str, Any]:
     """The CII half of a lookup: ``{state, trust_level, failing_checks, [error], fetched_at}``.
-    Cached per login; never raises; no request unless the API client is set."""
+    Cached per login; never raises; no request unless the API client is set.
+    Without a login nothing is asked, and the answer says so: ``unavailable``
+    with error ``no_login`` (never ``not_found``, which is CII's own answer)."""
     if not cii_configured():
         return {"state": NOT_CONFIGURED, "trust_level": None, "failing_checks": [], "fetched_at": _now_iso()}
     if not login:
-        return {"state": NOT_FOUND, "trust_level": None, "failing_checks": [], "fetched_at": _now_iso()}
+        return {**_unavailable(NO_LOGIN), "trust_level": None, "failing_checks": []}
 
     def fetch() -> Dict[str, Any]:
         try:
@@ -476,7 +531,7 @@ def lookup(username: Any) -> Dict[str, Any]:
         "trust_level": cii.get("trust_level"),
         "failing_checks": list(cii.get("failing_checks") or []),
         "as_of": min(times) if times else _now_iso(),
-        "available": duo.get("state") == OK and cii.get("state") == OK,
+        "available": duo.get("state") in ANSWERED and cii.get("state") in ANSWERED,
         "sources": {"duo": duo.get("state"), "cii": cii.get("state")},
         "errors": {k: v.get("error") for k, v in (("duo", duo), ("cii", cii)) if v.get("error")},
     }

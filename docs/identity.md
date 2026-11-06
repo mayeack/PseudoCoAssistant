@@ -61,6 +61,11 @@ before any screen or model.
      `CII_END_USER_QUERY` against `CII_API_URL`:
      `getEndUser(login)` → `endUserDetails { failingChecks endUserTrustScore { levelOfTrust } }`.
      CII's login is the email, so the email Duo returned is the login.
+   - **CII is asked even while Duo can't answer.** The last email Duo gave
+     for each username is kept beyond the 10 s cache (an email doesn't change
+     with the account's status), so a Duo outage or throttle never hides a
+     CII block. If no email is known yet, CII is not asked, and the lookup
+     says so (`unavailable`, error `no_login`), never `not_found`.
    - **Limits.** Each call allows 3 s to connect and 5 s per read, and runs
      off the event loop. Each source's answer is cached per user for
      `IDENTITY_STATUS_TTL_SECONDS` (10 s), failures included.
@@ -80,7 +85,12 @@ before any screen or model.
    - With `IDENTITY_FAIL_OPEN=false`, the turn is refused with a neutral
      "could not be verified" banner instead.
    - A block based on what *was* learned always applies. A disabled Duo
-     account is blocked even while CII is down.
+     account is blocked even while CII is down, and a CII block holds while
+     Duo is down.
+   - "No such user" is an answer, not an outage. A user CII has no record
+     of yet, such as a new participant account, gets `identity_check="ok"`
+     and, with nothing against it, is allowed. The badge shows no trust
+     level for it.
 
 ### The block event
 
@@ -123,14 +133,20 @@ are not promoted to HEC indexed fields.
 On a valid session's request, the middleware reads the user's Duo status,
 cached for 10 s and run in the threadpool. If Duo says `disabled`, the
 middleware:
-- revokes the session there and then, keeping it as a tombstone
+- revokes the session there and then, keeping it as a tombstone, and ends
+  its Unblock me override
 - writes `identity_session_revoked` (reason `duo_disabled`, actor `duo`)
 - answers that request `403 identity_session_revoked`, or `303 /login/duo?revoked=1` for a page
 
 Other cases:
 - **`locked out`** only blocks turns, through the gate.
 - **Duo unreachable:** nothing happens.
-- **Unblock me session:** never revoked.
+- **Unblock me turned on for a gate block, or before any block:** revoked
+  like any other session. A disabled account ends the session, and Unblock
+  me can then bring it back.
+- **A session Unblock me brought back from that revocation:** left alone
+  while Duo keeps the account disabled. Once Duo reports the account
+  enabled again, that is forgotten, so a new disable ends the session again.
 
 The chat page polls every 10 s, so the banner appears within about 10-20 s.
 
@@ -152,12 +168,16 @@ When a block or a revocation happens, the banner explains it and shows an
 
 - **On** (`POST /api/identity/unblock`):
   - Sets `unblocked_at` on this identity session and clears its tombstone.
+    A cleared tombstone's reason is kept as `unblock_cleared`.
   - Writes `identity_unblocked`. `user` is who overrode, and
     `details.cleared` is the revocation reason it cleared.
   - From then on the gate lets this session's turns through. Every event
     still carries the real `identity_risk` verdict plus
-    `identity_override=true`, and the revocation pull leaves the session
-    alone.
+    `identity_override=true`.
+  - It doesn't stop a Duo disable from ending the session. Only an override
+    that brought the session back from a Duo revocation keeps the
+    revocation pull off it, and only while Duo keeps the account disabled
+    (see Revocation above).
 - **Off** (`POST /api/identity/reblock`):
   - Clears the override and writes `identity_reblocked`.
   - The next turn is gated again, and a Duo-disabled account's session is
@@ -165,8 +185,8 @@ When a block or a revocation happens, the banner explains it and shows an
 - **Never touches Duo or CII.** The Duo account stays disabled, so the
   containment evidence stays intact for the debrief.
 - **Per identity session.** The override ends when the session ends (sign
-  out, sign in again, or expiry). It is never a Demo Controls card or a
-  request field.
+  out, sign in again, expiry, or a revocation). It is never a Demo Controls
+  card or a request field.
 - **Cross-site requests are refused.** `next=/app`, and nothing else, turns
   the answer into a redirect for the sign-in page's form.
 
@@ -195,11 +215,14 @@ with the room access key can rewrite those.
 
 - `tests/test_identity_gate.py` covers:
   - the signer, checked against known answers
-  - the lookup through fakes, including token refresh, caching and failures
+  - the lookup through fakes, including token refresh, caching and failures,
+    CII asked with the remembered email while Duo is down, and a user CII
+    doesn't know
   - `decide()`
   - both engines
   - the revocation pull
-  - Unblock me
+  - Unblock me, including that a Duo disable still ends an unblocked session
+    unless the override brought it back from that revocation
   - the store's cache generation
   - the rules
 - `tests/test_blueprint_parity.py` runs these scenarios through both
@@ -212,5 +235,6 @@ with the room access key can rewrite those.
   - `identity_unavailable_fail_open`
   - `identity_spray_actor`
   - `identity_unblocked`
+  - `identity_blocked_duo_down`: Duo can't answer, CII still blocks
 - `tests/test_identity_sessions.py` and `tests/test_duo_signin.py` cover
   sessions and sign-in.

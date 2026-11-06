@@ -334,8 +334,11 @@ def identity_unblock(request: Request, next_path: str = Form("", alias="next")):
     Identity Risk Gate, and bring a revoked session back. Every later event
     of the session carries ``identity_override=true`` beside the real verdict;
     writes ``identity_unblocked``. Never touches Duo or Identity Intelligence:
-    a disabled account stays disabled. Answers JSON, or 303 ``/app`` for the
-    sign-in page's form (``next=/app``, nothing else)."""
+    a disabled account stays disabled. Only bringing a Duo-revoked session back
+    keeps the revocation pull off it; an override turned on before Duo
+    disables the account does not, so that disable still ends the session
+    (and this brings it back). Answers JSON, or 303 ``/app`` for the sign-in
+    page's form (``next=/app``, nothing else)."""
     refusal = _override_refusal(request)
     if refusal is not None:
         return refusal

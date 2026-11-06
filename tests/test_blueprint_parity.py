@@ -565,7 +565,8 @@ _IDENTITY_KEYS = ("enduser_id", "identity_verified", "identity_source", "identit
 # answer each one gets (anonymous and the spray's actor get a blocking answer:
 # it must never be asked).
 _GATE_SCENARIOS = ("identity_anonymous", "identity_allowed", "identity_blocked", "identity_document_blocked",
-                   "identity_unavailable_fail_open", "identity_spray_actor", "identity_unblocked")
+                   "identity_unavailable_fail_open", "identity_spray_actor", "identity_unblocked",
+                   "identity_blocked_duo_down")
 _GATE_STATUS = {
     "allowed": {"duo_status": "active", "trust_level": "QUESTIONABLE", "failing_checks": [],
                 "as_of": "2026-11-05T10:00:00", "available": True, "sources": {"duo": "ok", "cii": "ok"}},
@@ -573,8 +574,13 @@ _GATE_STATUS = {
                 "as_of": "2026-11-05T10:00:00", "available": True, "sources": {"duo": "ok", "cii": "ok"}},
     "unavailable": {"duo_status": None, "trust_level": None, "failing_checks": [], "as_of": "2026-11-05T10:00:00",
                     "available": False, "sources": {"duo": "unavailable", "cii": "unavailable"}},
+    # Duo cannot answer, but CII was still asked (with the email Duo last
+    # gave): what identity_lookup returns for the victim during a Duo outage.
+    "duo_down": {"duo_status": None, "trust_level": "UNTRUSTED", "failing_checks": ["MFA Flood", "Impossible Travel"],
+                 "as_of": "2026-11-05T10:00:00", "available": False, "sources": {"duo": "unavailable", "cii": "ok"}},
 }
-_GATE_STATUS_FOR = {"identity_allowed": "allowed", "identity_unavailable_fail_open": "unavailable"}
+_GATE_STATUS_FOR = {"identity_allowed": "allowed", "identity_unavailable_fail_open": "unavailable",
+                    "identity_blocked_duo_down": "duo_down"}
 _VICTIM = "avery.kim"
 # Scenarios that need the sample PDF.
 _NEEDS_DOC = _DOC_SCENARIOS + ("identity_document_blocked",)
@@ -797,6 +803,15 @@ def _gate_checks(outcomes: Dict[str, Dict[str, Dict[str, Any]]], keys: List[str]
                   unavailable["result"]["policy_blocked"] is False
                   and unavailable["identity"]["identity_check"] == "unavailable"
                   and unavailable["identity"]["identity_risk"] == "allow", str(unavailable["identity"]))
+            duo_down = r[f"{theme}/identity_blocked_duo_down"]
+            check(f"{tag}: Duo down, CII still answered: the CII block holds (fail open never hides it)",
+                  duo_down["result"]["policy_blocked"] is True
+                  and duo_down["governance"]["guardrail_ids"] == ["cisco_identity_intelligence"]
+                  and duo_down["identity"]["identity_check"] == "unavailable"
+                  and duo_down["identity"]["identity_risk_reasons"] == ["trust_untrusted", "mfa_flood", "impossible_travel"]
+                  and duo_down["ai_defense_calls"] == 0 and duo_down["agents"] == []
+                  and duo_down["safety_categories"] == ["compromised_identity"],
+                  f"{duo_down['governance']} {duo_down['identity']} {duo_down['ai_defense_calls']}")
             spray = r[f"{theme}/identity_spray_actor"]
             check(f"{tag}: the spray's actor (enduser_id=victim, no session): no lookup, AI Defense still blocks",
                   spray["looked_up"] == [] and spray["governance"]["guardrail_ids"] == ["cisco_ai_defense"]

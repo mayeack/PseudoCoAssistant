@@ -21,9 +21,13 @@ Behaviour, only while ``DUO_ENABLED`` is on (off, the cookie is not even read):
 - the revocation pull (plan 12.1, A4): on a valid session's request, Duo's
   status for the user (``identity_lookup.duo_user``, 10 s cache, off the event
   loop) is checked, and ``disabled`` revokes the session there and then (a
-  tombstone and an ``identity_session_revoked`` audit event). Locked out only
-  blocks turns (the gate). An Unblock me session is left alone, and nothing
-  happens without the Admin API keys or when Duo cannot be reached;
+  tombstone and an ``identity_session_revoked`` audit event), Unblock me or
+  not: a disabled account ends the session, and Unblock me can bring it back.
+  Only a session Unblock me brought back from that revocation is left alone,
+  while Duo keeps the account disabled (``holds_open``; once Duo enables it
+  again, ``identity_store.rearm``). Locked out only blocks turns (the gate),
+  and nothing happens without the Admin API keys or when Duo cannot be
+  reached;
 - no response here ever carries ``WWW-Authenticate: Basic`` (that would pop the
   browser's Basic-auth dialog over the room-key gate's).
 
@@ -181,13 +185,24 @@ def pull_revocation(identity: Optional[identity_store.IdentitySnapshot]) -> bool
 
     Blocking (a cached Duo Admin API read), so the middleware runs it in the
     threadpool. Returns True when it revoked. Never raises: a lookup that
-    cannot answer leaves the session as it is (the gate decides turns), and an
-    Unblock me session is never revoked here."""
-    if identity is None or identity.overridden or not identity_lookup.duo_configured():
+    cannot answer leaves the session as it is (the gate decides turns).
+
+    An Unblock me override does not stop it (plan 12.1: a disabled account
+    ends the session, and Unblock me brings it back), unless the override is
+    what brought this session back from a Duo disable (``holds_open``). That
+    session stays while Duo keeps the account disabled; once Duo answers that
+    the account is enabled again, ``identity_store.rearm`` forgets the
+    revocation it cleared, so a new disable ends the session again."""
+    if identity is None or not identity_lookup.duo_configured():
         return False
     try:
         answer = identity_lookup.duo_user(identity.username)
-        if answer.get("duo_status") != "disabled":
+        disabled = answer.get("duo_status") == "disabled"
+        if identity.holds_open(DUO_DISABLED_REASON):
+            if answer.get("state") == identity_lookup.OK and not disabled:
+                identity_store.rearm(identity.session_ref)
+            return False
+        if not disabled:
             return False
         identity_store.revoke(identity.session_ref, reason=DUO_DISABLED_REASON, actor="duo")
         return True

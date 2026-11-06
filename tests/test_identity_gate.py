@@ -2,11 +2,13 @@
 """Lab 5 Identity Risk Gate and Duo-driven revocation (plan 12.1, PR-3).
 
 Covers the status lookup (Duo Admin API request signing, the CII OAuth token
-and GraphQL query, caching, sanitized failures), the pure decide(), the
-identity_risk node in both engines, the revocation pull in the identity
-middleware, Unblock me (POST /api/identity/unblock and /reblock, the audit
-events, identity_override on later events), the identity store's cache
-generation, and the rules: no Demo Controls card, no request field, no
+and GraphQL query, caching, sanitized failures, CII still asked with the
+remembered Duo email while Duo is down, "no such user" as an answer), the pure
+decide(), the identity_risk node in both engines, the revocation pull in the
+identity middleware, Unblock me (POST /api/identity/unblock and /reblock, the
+audit events, identity_override on later events, and that only an override
+which brought a Duo-revoked session back holds it open), the identity store's
+cache generation, and the rules: no Demo Controls card, no request field, no
 network call to Duo or CII except through the fakes below.
 
 Side-effect-safe: a temp SQLite database and log directory, the LLM stubbed,
@@ -311,16 +313,24 @@ def test_lookup() -> None:
           and fake.count(url=CII_API_URL) == queries + 2, f"{st} {fake.tokens_issued - before}")
 
     lookup.clear_cache()
+    n = fake.count(url=CII_API_URL)
     st = lookup.lookup("ghost.user")
-    check("a user Duo does not know: duo not_found, no CII login to ask",
-          st["sources"] == {"duo": "not_found", "cii": "not_found"} and st["available"] is False, str(st))
+    check("a user Duo does not know: duo not_found; with no CII login to ask, CII says so (never not_found)",
+          st["sources"] == {"duo": "not_found", "cii": "unavailable"} and st["errors"] == {"cii": "no_login"}
+          and st["available"] is False and fake.count(url=CII_API_URL) == n, str(st))
     fake.duo["mail.only"] = {"status": "active", "email": "mail.only@pseudocoassistant.com"}
     st = lookup.lookup("mail.only")
-    check("a user CII does not know: cii not_found (not an error)", st["sources"]["cii"] == "not_found", str(st))
+    v = gate.decide(st)
+    check("a user CII does not know (a new account): cii not_found is an answer, not an outage: check ok, allowed",
+          st["sources"] == {"duo": "ok", "cii": "not_found"} and st["available"] is True
+          and v["check"] == "ok" and v["verdict"] == "allow" and v["trust_level"] is None, f"{st} {v}")
 
+    check("Duo's email is remembered beyond the answer cache (clear_cache keeps it)",
+          lookup.remembered_email("Nina.Osei") == "nina.osei@pseudocoassistant.com")
     for mode, code in (("duo_500", "http_500"), ("duo_connect", "connect_error"), ("duo_timeout", "timeout")):
         lookup.clear_cache()
         fake.fail = mode
+        queries = fake.count(url=CII_API_URL)
         try:
             st = lookup.lookup("nina.osei")
             raised = False
@@ -330,7 +340,39 @@ def test_lookup() -> None:
         check(f"Duo {mode}: no exception, unavailable with a fixed code, nothing leaked",
               not raised and st.get("sources", {}).get("duo") == "unavailable" and st.get("errors", {}).get("duo") == code
               and DUO_HOST not in text and IKEY not in text and SKEY not in text and "<html>" not in text, text)
+        check(f"Duo {mode}: CII is still asked, with the email Duo last gave",
+              st.get("sources", {}).get("cii") == "ok" and st.get("trust_level") == "QUESTIONABLE"
+              and fake.count(url=CII_API_URL) == queries + 1, text)
+    lookup.clear_cache()
+    fake.fail = "duo_500"
+    st = lookup.lookup("avery.kim")
+    v = gate.decide(st)
+    check("Duo down: a CII block still holds (UNTRUSTED, failing checks), check unavailable",
+          st["sources"] == {"duo": "unavailable", "cii": "ok"} and v["verdict"] == "block"
+          and v["reasons"] == ["trust_untrusted", "mfa_flood", "impossible_travel"] and v["check"] == "unavailable",
+          f"{st} {v}")
+    lookup.forget_emails()
+    lookup.clear_cache()
+    queries = fake.count(url=CII_API_URL)
+    st = lookup.lookup("nina.osei")
+    check("Duo down and no email known yet: CII is not asked, and the answer says so (no_login)",
+          st["sources"] == {"duo": "unavailable", "cii": "unavailable"}
+          and st["errors"] == {"duo": "http_500", "cii": "no_login"} and fake.count(url=CII_API_URL) == queries,
+          str(st))
     fake.fail = None
+    lookup.clear_cache()
+    lookup.lookup("nina.osei")
+    fake.duo["nina.osei"]["email"] = ""
+    lookup.clear_cache()
+    st = lookup.lookup("nina.osei")
+    check("a Duo answer without an email forgets the remembered one (no CII login to ask)",
+          lookup.remembered_email("nina.osei") is None and st["errors"] == {"cii": "no_login"}, str(st))
+    fake.duo["nina.osei"]["email"] = "nina.osei@pseudocoassistant.com"
+    lookup.clear_cache()
+    lookup.lookup("nina.osei")
+    fake = _fresh_fake()
+    check("set_transport (a fresh fake) forgets the remembered emails", lookup.remembered_email("nina.osei") is None)
+    fake.set_user("nina.osei", trust="QUESTIONABLE")
     lookup.clear_cache()
     n = len(fake.requests)
     lookup.lookup("nina.osei")
@@ -473,6 +515,14 @@ def test_engines() -> None:
           and evs and evs[-1].get("safety_categories") == ["identity_unverified"]
           and evs[-1].get("severity") == "MEDIUM", str(evs[-1:])[:300])
     settings.identity_fail_open = True
+    del _LLM_CALLS[:]
+    res, evs = _turn_events(lambda: graph.run_turn(**common, identity_session=dict(_SESSION)))
+    check("Duo down, fail open: the victim's CII block still refuses the turn (claim 2 holds)",
+          res.get("policy_blocked") is True and _LLM_CALLS == [] and evs
+          and evs[-1].get("guardrail_ids") == ["cisco_identity_intelligence"]
+          and evs[-1].get("identity_risk_reasons") == ["trust_untrusted", "mfa_flood"]
+          and evs[-1].get("identity_check") == "unavailable" and not evs[-1].get("identity_duo_status"),
+          str(evs[-1:])[:400])
     fake.fail = None
     lookup.clear_cache()
     n = len(fake.requests)
@@ -514,6 +564,33 @@ def test_store_generation() -> None:
     store.clear_cache()
     store._cache_put("h", None, gen)
     check("_cache_put drops a value read under an older generation", "h" not in store._cache)
+
+
+def test_store_override() -> None:
+    print("identity store: what an Unblock me override holds open")
+    token, snap = store.create("override.user")
+    ref = snap.session_ref
+    s = store.unblock(ref)
+    check("unblock of a live session: override on, nothing cleared, holds no revocation open",
+          s.overridden and s.unblock_cleared is None and not s.holds_open("duo_disabled"))
+    check("revoke: True, and it ends the override (a revocation ends the session)",
+          store.revoke(ref, reason="duo_disabled", actor="duo")
+          and store.get(ref).unblocked_at is None and store.get(ref).unblock_cleared is None)
+    s = store.unblock(ref)
+    check("unblock of the tombstone: valid again, holding open exactly the revocation it cleared",
+          store.lookup(token).status == store.VALID and s.unblock_cleared == "duo_disabled"
+          and s.holds_open("duo_disabled") and not s.holds_open("other"))
+    s = store.unblock(ref)
+    check("unblock again keeps what it holds open", s.holds_open("duo_disabled"))
+    check("rearm: forgets the cleared revocation once, keeps the override",
+          store.rearm(ref) is True and store.rearm(ref) is False
+          and store.get(ref).overridden and store.get(ref).unblock_cleared is None)
+    store.revoke(ref, reason="duo_disabled", actor="duo")
+    store.unblock(ref)
+    s = store.reblock(ref)
+    check("reblock clears the override and what it held open",
+          not s.overridden and s.unblock_cleared is None and store.get(ref).unblock_cleared is None)
+    store.end(token)
 
 
 # --------------------------------------------------------------------------- the app
@@ -646,6 +723,102 @@ def test_app(c: TestClient) -> None:
     fake.fail = None
 
 
+def _unblocked(user):
+    return [e for e in _audits("identity_unblocked") if e.get("user") == user]
+
+
+def test_override_and_pull(c: TestClient) -> None:
+    print("Unblock me never stops a Duo disable from ending the session (12.1, claim 4)")
+    _configure(True)
+    fake = _fresh_fake()
+    fake.set_user("gate.victim", status="active", trust="UNTRUSTED", failing=["MFA Flood", "Impossible Travel"])
+    fake.set_user("early.user", trust="QUESTIONABLE")
+    fake.duo["new.account"] = {"status": "active", "email": "new.account@pseudocoassistant.com"}
+
+    # 1. IDENTITY AT RISK before any turn; the attendee turns Unblock me on.
+    token, snap = store.create("gate.victim")
+    me = c.get("/api/identity/me", headers=ck(token)).json()
+    check("the /me poll reports the gate block before any turn (the banner offers Unblock me)",
+          me.get("verdict") == "block" and me.get("override") is False, str(me))
+    r = c.post("/api/identity/unblock", headers=ck(token))
+    ub = _unblocked("gate.victim")
+    check("Unblock me for a gate block: on, nothing cleared",
+          r.status_code == 200 and r.json().get("override") is True and len(ub) == 1
+          and ub[0].get("details") == {"reason": "unblock_me"}, str(ub)[:300])
+    sid = str(uuid.uuid4())
+    check("...and the turn goes on", _chat(c, token, sid).status_code == 200
+          and (_events("governance", session_id=sid) or [{}])[-1].get("identity_override") is True)
+
+    # 2. The response agent disables the account in Duo: the session ends anyway.
+    fake.duo["gate.victim"]["status"] = "disabled"
+    lookup.clear_cache()
+    r = c.get("/api/server-info", headers=ck(token))
+    rev = _revoked("gate.victim")
+    check("Duo disables the account: the overridden session is revoked on its next request",
+          r.status_code == 403 and r.json() == {"detail": "identity_session_revoked"}
+          and store.lookup(token).status == store.REVOKED and len(rev) == 1
+          and rev[0].get("details") == {"reason": "duo_disabled"} and rev[0].get("actor") == "duo", r.text)
+    check("...the revocation ended the override",
+          store.get(snap.session_ref).unblocked_at is None and store.get(snap.session_ref).unblock_cleared is None)
+    me = c.get("/api/identity/me", headers=ck(token)).json()
+    check("...and the /me poll shows SESSION ENDED (the tombstone)",
+          me.get("revoked") is True and me.get("revoked_reason") == "duo_disabled", str(me))
+
+    # 3. Unblock me brings it back, and that one holds while Duo keeps it disabled.
+    r = c.post("/api/identity/unblock", headers=ck(token))
+    ub = _unblocked("gate.victim")
+    check("Unblock me again: the session is back, and the event says what it cleared",
+          r.status_code == 200 and store.lookup(token).status == store.VALID and len(ub) == 2
+          and ub[1].get("details") == {"reason": "unblock_me", "cleared": "duo_disabled"}, str(ub)[-1:])
+    lookup.clear_cache()
+    r = c.get("/api/server-info", headers=ck(token))
+    sid = str(uuid.uuid4())
+    r2 = _chat(c, token, sid)
+    evs = _events("governance", session_id=sid)
+    check("...not revoked again while Duo keeps the account disabled; turns carry the override and the real status",
+          r.status_code == 200 and r2.status_code == 200 and len(_revoked("gate.victim")) == 1 and evs
+          and all(e.get("identity_override") is True and e.get("identity_duo_status") == "disabled" for e in evs))
+
+    # 4. Duo enables the account again: a new disable ends the session again.
+    fake.duo["gate.victim"]["status"] = "active"
+    lookup.clear_cache()
+    r = c.get("/api/server-info", headers=ck(token))
+    check("Duo enables the account again: the revocation Unblock me cleared is forgotten, the override stays",
+          r.status_code == 200 and store.get(snap.session_ref).unblock_cleared is None
+          and store.get(snap.session_ref).overridden)
+    fake.duo["gate.victim"]["status"] = "disabled"
+    lookup.clear_cache()
+    r = c.get("/api/server-info", headers=ck(token))
+    check("...so a second Duo disable ends the session again", r.status_code == 403
+          and len(_revoked("gate.victim")) == 2)
+    lookup.clear_cache()
+    fake.fail = "duo_connect"
+    c.post("/api/identity/unblock", headers=ck(token))
+    r = c.get("/api/server-info", headers=ck(token))
+    check("Duo unreachable: a held-open session stays, and nothing is forgotten",
+          r.status_code == 200 and store.get(snap.session_ref).unblock_cleared == "duo_disabled")
+    fake.fail = None
+
+    # 5. A pre-emptive Unblock me (nothing blocked) holds nothing open either.
+    t2, s2 = store.create("early.user")
+    me = c.get("/api/identity/me", headers=ck(t2)).json()
+    r = c.post("/api/identity/unblock", headers=ck(t2))
+    fake.duo["early.user"]["status"] = "disabled"
+    lookup.clear_cache()
+    r2 = c.get("/api/server-info", headers=ck(t2))
+    check("a pre-emptive Unblock me (verdict allow) does not stop a Duo disable from ending the session",
+          me.get("verdict") == "allow" and r.status_code == 200 and r2.status_code == 403
+          and len(_revoked("early.user")) == 1, f"{me.get('verdict')} {r.status_code} {r2.status_code}")
+
+    # A user CII has no record of yet (a new participant account) is checked, not "unavailable".
+    t3, _ = store.create("new.account")
+    me = c.get("/api/identity/me", headers=ck(t3)).json()
+    check("a user CII does not know yet: /me says identity_check ok, allowed, no trust level (no 'unavailable' badge)",
+          me.get("identity_check") == "ok" and me.get("verdict") == "allow" and me.get("trust_level") is None, str(me))
+    for t in (token, t2, t3):
+        store.end(t)
+
+
 # --------------------------------------------------------------------------- the rules
 def test_rules() -> None:
     print("rules: shared chain, no toggle or request field, .env-only, UI, docs, suite registration")
@@ -709,6 +882,8 @@ def main() -> int:
         with TestClient(app) as c:
             governance_logger.set_logs_directory(os.path.join(_TMP, "logs"))
             test_app(c)
+            test_override_and_pull(c)
+        test_store_override()
         test_rules()
     finally:
         lookup.set_transport(None)
