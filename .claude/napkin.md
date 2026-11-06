@@ -278,6 +278,11 @@ Curated, high-value runbook. Read before work; keep only recurring guidance.
 - Leave `AI_DEFENSE_ENABLED_RULES` **empty**: the connection is SCC-policy-bound,
   so explicit rules get HTTP 400 and fall back to the console policy anyway.
 - Full procedure + 4-tier verification: skill `connect-ai-defense`.
+- **AI Red Teaming + AI Inventory live in a DIFFERENT org (PseudoCo)** and use the
+  Management key in `~/.aibom-ai-defense-key`, not the inspection key. Skill
+  `ai-defense-red-team-and-inventory` (`refresh.py`); a desktop scheduled task
+  reruns it on the 5th of each month. A red-team run = ~2,000 real governed turns
+  in the DB, Splunk and the MedAdvice Agent stream.
 
 ## Chat latency (2026-07-15 remediation — where the time goes)
 - **Multi-Agent Mode defaults OFF (2026-07-28):** a default turn = 1 Ollama

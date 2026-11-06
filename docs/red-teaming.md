@@ -120,3 +120,22 @@ Then **Start red teaming**, pick the target and a profile.
   `multi_agent_mode: true` each turn makes several model calls and takes
   longer still.
 - The tunnel and the app have to stay up for the whole run.
+
+## Keeping it fresh
+
+The skill `ai-defense-red-team-and-inventory`
+(`.claude/skills/ai-defense-red-team-and-inventory/`) drives red teaming and
+the AI Inventory scan through the AI Defense API with the PseudoCo org's
+Management key. A desktop scheduled task runs its `refresh.py refresh` at
+07:00 on the 5th of every month. One refresh does four things:
+
+1. It re-scans `main` with `cisco-aibom` and uploads the result to AI
+   Inventory. If `main` hasn't moved, it re-uploads the last report instead.
+2. It starts a Quick Start run (1,998 prompts) against the "with AI Defense"
+   target and waits for it, about 2 h.
+3. It compares the run with the previous run on that target.
+4. It writes a summary to `~/.ai-defense-refresh/reports/<date>/`.
+
+The unprotected baseline is opt-in (`--targets protected,baseline`). With
+every prompt reaching the local model, it runs past 10 h and hits Cisco's
+per-attack deadline.
