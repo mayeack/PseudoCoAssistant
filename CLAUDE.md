@@ -139,8 +139,11 @@ keep it honest:
   `host_capabilities.pdf_attachments_gate`) and nothing else: the API answers
   503 from it and the Attach button greys out from it.
 - `attachment_intake` is `PRE_NODES[0]` in the **shared chain**
-  (`blueprints/guardrails.py`), ahead of `policy`. It is never in
-  `_MAY_TERMINATE`, and a failed read is `status: "error"`, never a raise.
+  (`blueprints/guardrails.py`), ahead of `identity_risk` (`PRE_NODES[1]`,
+  Lab 5) and `policy`. It is never in `_MAY_TERMINATE`, and a failed read is
+  `status: "error"`, never a raise. `identity_risk` reads neither the message
+  nor the document; its block event carries the typed message and the
+  `attachment` metadata only, and its banner never gets the document sentence.
 - **The screens and the model see the same composed text.** Every prompt-stage
   guardrail screens `screened_prompt(state)`, and the shared synthesizer gets
   `with_attachment(...)`. Both come from `attachments.compose_user_turn` and
@@ -191,6 +194,107 @@ keep it honest:
   verdict, never on a fail-closed "could not be reviewed" banner.
 - Extend `tests/test_attachments.py` and the `document_injection_*` scenarios in
   `tests/test_blueprint_parity.py` in the same PR as any attachment change.
+
+## Identity sign-in
+
+`docs/identity.md` is the design (Lab 5, "Verify: Cisco Identity Intelligence").
+Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
+
+- **Identity comes only from the verified session**: `request.state.identity`,
+  set by the identity middleware (`backend/middleware/identity.py`) from the
+  `__Host-pseudoco_assistant_identity` cookie. Never from `enduser_id`, never
+  from a request body. `identity_session` is a `run_turn` /
+  `build_initial_state` / legacy `process_message` parameter, never a
+  `ChatRequest` or `ChatCompletionRequest` field, and there is no Demo Controls
+  card for anything identity: a client cannot switch enforcement off.
+- **Secrets live in `.env` only** (`DUO_*`, `CII_*`, `IDENTITY_*`,
+  `PUBLIC_BASE_URL`), never in `settings_store` or `_INTEGRATION_FIELDS`:
+  anyone holding the room access key can rewrite those.
+- **The Duo redirect URI comes only from `PUBLIC_BASE_URL`**
+  (`settings.duo_redirect_uri`), never from the Host header; https only, on a
+  DNS name, and the scheme is the trusted proxy's.
+- Store and Duo calls run off the event loop; the middleware is pure ASGI (it
+  sits on the SSE path).
+- **No identity secret in any log, at any level.** `backend/logging/redaction.py`
+  (installed by `setup_logging` as a log record factory, so child loggers such
+  as `urllib3.connectionpool` are covered) redacts every record by pattern:
+  - the `duo_code`, `code`, `state`, `client_assertion`, `assertion` and token
+    query parameters;
+  - Authorization, Cookie, Set-Cookie and X-Access-Key values, the app's own
+    cookies, Bearer tokens and JWT-shaped strings;
+  - the exact values of the configured secrets (`DUO_CLIENT_SECRET`,
+    `DUO_ADMIN_SKEY`, `CII_CLIENT_SECRET`, `ACCESS_KEY`), compiled once at
+    startup and again when the config changes.
+
+  Nothing a request sends is ever registered, so no input can blank a username
+  out of the logs. A new credential goes on that configured-secrets list.
+  Every pattern must stay linear-time: a test times them all on adversarial
+  input. Every record's text is first cut to 64 KB (`MAX_SCAN_CHARS`, with a
+  `[TRUNCATED: N more characters]` marker), Duo on or off; the governance
+  JSONL, the database and HEC are not log records and are never cut.
+- **Inert means no requests.** `chat.js` polls `GET /api/identity/me` only
+  while `gated.duo_signin` is open or `/api/server-info` `identity_session`
+  says this browser holds a session (or the page already shows one). With
+  `DUO_ENABLED` off, Labs 0-4 send no identity request.
+- **Bounded Duo.** `begin()` checks the allowlist before it takes a rate
+  slot; the rate table evicts least-recently-used names, never all at once.
+  Every Duo call has a deadline that gives its slot back even if Duo never
+  answers, and the SDK's sockets get `DUO_HTTP_TIMEOUT` (duo_universal takes
+  no timeout). The `duo_signin` gate re-checks Duo's health every 5 minutes
+  (every minute while it fails) on a daemon thread. Duo's TLS uses the CA
+  bundle in `REQUESTS_CA_BUNDLE` (else `CURL_CA_BUNDLE`) like every other
+  outbound client, and duo_universal's pinning only when none is configured.
+
+## Identity Risk Gate
+
+- **`identity_risk` is `PRE_NODES[1]`** in the shared chain, after
+  `attachment_intake` and before `policy`, in `_MAY_TERMINATE`. Both
+  blueprints get it by construction; the legacy engine calls the same
+  `identity_gate_turn` before its policy check.
+- **No identity session, no work:** the node returns `{}` before any span,
+  log or lookup (the spray's actor has none, so AI Defense still sees it).
+- **`identity_gate.decide` is pure.** Lookups (`backend/services/identity_lookup.py`:
+  Duo Admin API, signed HMAC-SHA512; CII token + GraphQL) never raise, are
+  bounded (3 s connect / 5 s read), cached 10 s, and go out only over https.
+  The CII query is the one constant `CII_END_USER_QUERY`.
+- **Fail open (A3):** an unavailable lookup allows the turn with
+  `identity_check="unavailable"`; a block resting on what WAS learned still
+  blocks, an `UNTRUSTED` or failing check in a partial CII answer included
+  (`_cii_parse` keeps what the answer did say; the check stays
+  `unavailable`). CII is asked with the email Duo last gave
+  (`remembered_email`, in memory only), so once Duo has answered for a user
+  since the app started, a Duo outage never hides that user's CII block; a
+  source that was not asked is `unavailable`, never `not_found`, and "no such
+  user" from CII is an answer (`identity_check="ok"`), not an outage. It is
+  an answer with no error and null details, or CII's own error for a login
+  it has no record of (`CII_UNKNOWN_LOGIN_ANSWER`, captured from the live
+  API), matched exactly but for `locations`; any other error is never "no
+  such user", whatever its words or code say.
+- **No side effects in the chain.** The gate never revokes and never writes
+  to Duo or CII. Revocation is the middleware's pull: Duo `disabled` revokes
+  the session (a tombstone); `locked out` only blocks turns. `revoke()` is one
+  `UPDATE ... WHERE revoked_at IS NULL` and writes its event only when it
+  changed a row, so racing pulls make one tombstone and one event.
+- **Unblock me** (`POST /api/identity/unblock` / `/reblock`) is per identity
+  session, never a Demo Controls card or request field, and never touches Duo
+  or CII. The gate records the real verdict plus `identity_override=true` on
+  every event; the audit events are `identity_unblocked` / `identity_reblocked`.
+  It never exempts a session from the pull: only an override that brought a
+  session back from a Duo revocation (`unblock_cleared`, `holds_open`) keeps
+  it open, and only while Duo keeps the account disabled.
+- The block event: `guardrail_ids=["cisco_identity_intelligence"]`,
+  `safety_categories=["compromised_identity"]`, severity HIGH (never
+  EMERGENCY), no escalation, the typed message only, `theme=` and the turn's
+  identity / attachment fields. Never tagged "injection" (Lab 4's correlation).
+  A fail-closed block (`IDENTITY_FAIL_OPEN` off and nothing known against the
+  identity: `identity_gate.unverified_only`) is neutral on purpose:
+  `safety_categories=["identity_unverified"]`, severity MEDIUM and the
+  IDENTITY NOT VERIFIED banner, so the executive overlay never counts every
+  signed-in user as a compromised identity during a Duo or CII outage. Never
+  "fix" it to `compromised_identity` / HIGH.
+- Extend `tests/test_identity_gate.py` and the `identity_*` scenarios in
+  `tests/test_blueprint_parity.py` in the same PR as any identity change. The
+  attachment rules above are unchanged.
 
 ## Product naming
 

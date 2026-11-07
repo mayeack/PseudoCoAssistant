@@ -128,6 +128,11 @@ _GOVERNANCE_KEYS = (
     "session_id", "request_id", "conversation_id",
     "provider_name", "request_model", "response_model",
     "service_name", "deployment_id", "enduser_id",
+    # Lab 5: present only on a verified (Duo-signed-in) turn: the identity,
+    # the Identity Risk Gate's real verdict, and the Unblock me override.
+    "identity_verified", "identity_source", "identity_override",
+    "identity_risk", "identity_check", "identity_risk_reasons",
+    "identity_duo_status", "identity_trust_level", "identity_failing_checks",
     "safety_violated", "safety_categories", "guardrail_triggered",
     "policy_blocked", "pii_detected", "pii_types",
     "toxic_detected", "toxic_types",

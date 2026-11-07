@@ -577,6 +577,8 @@ function renderHostCaps(d) {
   const c = d.capabilities || {}, g = d.gated || {};
   const gpu = c.nvidia_gpu || {}, rt = c.container_runtime || {}, nim = c.nim || {};
   const nimGate = g.nim_local || {}, clawGate = g.nemoclaw_runtime || {};
+  // Lab 5 Duo sign-in (gated.duo_signin): the reason names what is missing.
+  const duoGate = g.duo_signin || {};
   box.innerHTML = [
     capChip(gpu.present ? `GPU: ${gpu.count}x ${gpu.name} (${gpu.vram_mb} MB)` : 'GPU: none', !!gpu.present,
             gpu.present ? `driver ${gpu.driver || '?'} via ${gpu.source}` : (g.provider_nvidia || {}).reason),
@@ -586,6 +588,8 @@ function renderHostCaps(d) {
             nimGate.enabled ? nim.base_url : nimGate.reason),
     capChip(`NemoClaw runtime: ${clawGate.enabled ? 'supported' : 'unsupported'}`, !!clawGate.enabled,
             clawGate.reason),
+    capChip(`Duo sign-in: ${duoGate.enabled ? 'ready' : 'unavailable'}`, !!duoGate.enabled,
+            duoGate.reason),
   ].join('');
 }
 

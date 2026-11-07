@@ -111,11 +111,37 @@ def reconcile_schema(target_engine=None):
     return added
 
 
+# Indexes on columns reconcile_schema() may have ADDED to an existing table: it
+# adds bare columns only, so each index such a column declares (index=True) is
+# also created here, by the name create_all gives it on a fresh database.
+# (index name, table, column)
+EXPLICIT_INDEXES = (
+    ("ix_audit_logs_enduser_id", "audit_logs", "enduser_id"),
+)
+
+
+def ensure_indexes(target_engine=None):
+    """Idempotently create ``EXPLICIT_INDEXES`` (``CREATE INDEX IF NOT EXISTS``,
+    which SQLite and PostgreSQL both support). Returns the names it ran;
+    failures are logged, never raised, like reconcile_schema."""
+    eng = target_engine or engine
+    done = []
+    for name, table, column in EXPLICIT_INDEXES:
+        try:
+            with eng.begin() as conn:
+                conn.execute(text(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({column})"))
+            done.append(name)
+        except Exception as e:
+            logger.error("schema reconcile: could not create index %s: %s", name, e)
+    return done
+
+
 def init_db():
     """Initialize database tables"""
     try:
         Base.metadata.create_all(bind=engine)
         reconcile_schema()
+        ensure_indexes()
         logger.info("Database tables created successfully")
     except Exception as e:
         logger.error(f"Error initializing database: {e}")

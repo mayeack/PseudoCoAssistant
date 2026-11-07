@@ -43,7 +43,7 @@ from langgraph.graph import END, START, StateGraph
 
 from backend.agents.blueprints import DEFAULT_BLUEPRINT, get_blueprint
 from backend.agents.blueprints.guardrails import wire_guardrails
-from backend.agents.state import PseudoCoAssistantState, build_initial_state
+from backend.agents.state import PseudoCoAssistantState, build_initial_state, identity_turn_fields
 from backend.agents.supervisor import route_to_theme, router_node
 from backend.agents.themes import THEMES
 from backend.config import settings
@@ -153,6 +153,7 @@ def _build_turn_state(
     client_tz: Optional[str] = None,
     scheduling_action: Optional[Dict[str, Any]] = None,
     attachment: Optional[Dict[str, Any]] = None,
+    identity_session: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the initial workflow state shared by run_turn / run_turn_stream."""
     bp = get_blueprint(blueprint or active_blueprint_key())
@@ -178,6 +179,7 @@ def _build_turn_state(
         client_tz=client_tz,
         scheduling_action=scheduling_action,
         attachment=attachment,
+        identity_session=identity_session,
     )
     state["request_id"] = str(uuid.uuid4())
     # Provisional: replaced by the OTel trace id once the workflow span is open
@@ -230,6 +232,7 @@ def run_turn(
     client_tz: Optional[str] = None,
     scheduling_action: Optional[Dict[str, Any]] = None,
     attachment: Optional[Dict[str, Any]] = None,
+    identity_session: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run one chat turn through the multi-agent workflow.
 
@@ -260,6 +263,7 @@ def run_turn(
         client_tz=client_tz,
         scheduling_action=scheduling_action,
         attachment=attachment,
+        identity_session=identity_session,
     )
     runner = get_agentic_runner(state["blueprint"])
     request_id = state["request_id"]
@@ -271,6 +275,10 @@ def run_turn(
             session_id=session_id,
             request_id=request_id,
             blueprint=state["blueprint"],
+            # The turn's end user (the verified username when signed in) and
+            # the caller's address, so APM can be searched by actor.
+            enduser_id=state.get("enduser_id"),
+            client_address=state.get("client_address"),
         ) as span:
             _adopt_otel_trace_id(state, span)
             final_state = runner.invoke(state)
@@ -287,7 +295,8 @@ def run_turn(
             error_type=type(exc).__name__,
             error_message=str(exc),
             stack_trace=None,
-            enduser_id=enduser_id,
+            enduser_id=state.get("enduser_id"),
+            **identity_turn_fields(state),
         )
         return _generic_error_result()
 
@@ -318,6 +327,8 @@ def run_turn_stream(**kwargs: Any) -> Iterator[Dict[str, Any]]:
             session_id=kwargs.get("session_id"),
             request_id=request_id,
             blueprint=state["blueprint"],
+            enduser_id=state.get("enduser_id"),
+            client_address=state.get("client_address"),
         ) as span:
             _adopt_otel_trace_id(state, span)
             # subgraphs=True surfaces the theme subgraph's inner nodes
@@ -347,7 +358,8 @@ def run_turn_stream(**kwargs: Any) -> Iterator[Dict[str, Any]]:
             error_type=type(exc).__name__,
             error_message=str(exc),
             stack_trace=None,
-            enduser_id=kwargs.get("enduser_id"),
+            enduser_id=state.get("enduser_id"),
+            **identity_turn_fields(state),
         )
         result = _generic_error_result()
     yield {"event": "final", "result": result}

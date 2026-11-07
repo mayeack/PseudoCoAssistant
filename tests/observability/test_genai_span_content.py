@@ -178,6 +178,46 @@ def check_workflow_parents_agents_across_a_generator():
         )
 
 
+def check_workflow_span_carries_actor():
+    """The workflow span names who the turn is for and where it came from
+    (Lab 5): ``enduser.id`` (the governance event's enduser_id -- the verified
+    username when signed in) and ``client.address``. Unset values are skipped."""
+    _EXPORTER.clear()
+    provider = trace.get_tracer_provider()
+    otel._STATE["tracer"] = trace.get_tracer("test", tracer_provider=provider)
+    otel._STATE["enabled"] = True
+    try:
+        with otel.workflow_span(workflow_name="pseudoco_multi_agent", theme="medadvice",
+                                enduser_id="nina.osei", client_address="203.0.113.7"):
+            pass
+        with otel.workflow_span(workflow_name="pseudoco_multi_agent", theme="medadvice"):
+            pass
+    finally:
+        otel._STATE["enabled"] = False
+        otel._STATE["tracer"] = None
+    spans = [s for s in _EXPORTER.get_finished_spans() if s.name.startswith("workflow ")]
+    assert len(spans) == 2, f"expected 2 workflow spans, got {len(spans)}"
+    assert _attr(spans[0], "enduser.id") == "nina.osei", f"enduser.id missing: {_attr(spans[0], 'enduser.id')}"
+    assert _attr(spans[0], "client.address") == "203.0.113.7", "client.address missing on the workflow span"
+    assert "enduser.id" not in (spans[1].attributes or {}) and "client.address" not in (spans[1].attributes or {}), \
+        "unset actor attributes must be skipped, not set to None"
+
+
+def check_both_graph_call_sites_pass_the_actor():
+    """run_turn and run_turn_stream both open the workflow span with the
+    turn's enduser_id and client_address (a static read of backend/agents/graph.py,
+    so no graph is compiled here)."""
+    import re as _re
+    from pathlib import Path as _Path
+
+    src = (_Path(__file__).resolve().parents[2] / "backend" / "agents" / "graph.py").read_text()
+    calls = _re.findall(r"otel\.workflow_span\((.*?)\) as span", src, _re.S)
+    assert len(calls) == 2, f"expected the two graph call sites, found {len(calls)}"
+    for call in calls:
+        assert 'enduser_id=state.get("enduser_id")' in call and 'client_address=state.get("client_address")' in call, \
+            "a graph call site does not pass enduser_id / client_address to the workflow span"
+
+
 def main():
     _setup_tracer()
     ok = True
@@ -185,7 +225,10 @@ def main():
                      ("LLM span carries the output-token cache split", check_output_token_cache_split),
                      ("Agent span carries prompt+response", check_agent),
                      ("workflow parents agents across a generator + thread hop",
-                      check_workflow_parents_agents_across_a_generator)]:
+                      check_workflow_parents_agents_across_a_generator),
+                     ("workflow span carries enduser.id + client.address", check_workflow_span_carries_actor),
+                     ("both graph call sites pass the actor to the workflow span",
+                      check_both_graph_call_sites_pass_the_actor)]:
         try:
             fn()
             print(f"  PASS  {name}")

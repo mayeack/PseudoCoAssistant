@@ -1,7 +1,10 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
+import ipaddress
 import os
+import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # Manually load .env file as a workaround.
 # Mirrors python-dotenv semantics: an already-exported real environment variable
@@ -35,6 +38,48 @@ _ca_bundle = Path(__file__).parent.parent / "ca-bundle.pem"
 if _ca_bundle.exists():
     os.environ.setdefault("SSL_CERT_FILE", str(_ca_bundle))
     os.environ.setdefault("REQUESTS_CA_BUNDLE", str(_ca_bundle))
+
+
+# One DNS label (RFC 1034 preferred-name syntax, with RFC 1123's leading digit).
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def https_origin(url: str) -> str:
+    """``https://host[:port]`` for an https URL on a DNS name, else ``""``.
+
+    The only accepted shape for ``PUBLIC_BASE_URL``: scheme https, a host that
+    is an RFC 1034 name and not an IP address (no IPv4 or IPv6 literal, and a
+    last label with a letter, so short forms like ``127.1`` are refused), no
+    credentials, and nothing after the origin but an optional ``/``. Trailing
+    dots, non-ASCII hosts and over-long names are refused too. The Duo
+    redirect URI is built from the result and from nothing else.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+        port = parts.port
+    except ValueError:
+        return ""
+    host = parts.hostname or ""
+    if (parts.scheme.lower() != "https" or not host or parts.username is not None
+            or parts.password is not None or parts.path not in ("", "/")
+            or parts.query or parts.fragment or len(host) > 253):
+        return ""
+    try:
+        ipaddress.ip_address(host)
+        return ""
+    except ValueError:
+        pass
+    labels = host.split(".")
+    if not all(_DNS_LABEL.fullmatch(label) for label in labels):
+        return ""
+    if labels[-1].isdigit():
+        return ""
+    return f"https://{host}" + (f":{port}" if port not in (None, 443) else "")
+
+
 
 class Settings(BaseSettings):
     # AI Provider Selection (supports multiple providers)
@@ -128,7 +173,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "PseudoCo Assistant v4"
-    app_version: str = "4.22.1"
+    app_version: str = "4.23.0"
     environment: str = "development"  # "development" or "production"
     debug: bool = True
 
@@ -495,6 +540,51 @@ class Settings(BaseSettings):
     otel_enabled: bool = False
     otel_service_name: str = "pseudoco-assistant"
 
+    # -------------------------------------------------------------------------
+    # Identity (Lab 5, "Verify: Cisco Identity Intelligence")
+    # -------------------------------------------------------------------------
+    # Duo Universal Prompt sign-in, Duo / Cisco Identity Intelligence status
+    # lookups and the HEC host stamp. Inert by default: with DUO_ENABLED off the
+    # app behaves exactly as without these keys (the identity middleware does
+    # not even read its cookie). Every value is .env-only, deliberately never a
+    # settings_store / Settings-API field: anyone holding the room access key
+    # can rewrite those (tests/test_identity_sessions.py pins this).
+    #
+    # The instance's https name, e.g. https://l5-ws-3.pseudocoassistant.com. The
+    # ONLY source of the Duo redirect URI (duo_redirect_uri); never derived
+    # from a request's Host header.
+    public_base_url: str = ""
+    # Master switch. Off = Labs 0-4 exactly as before.
+    duo_enabled: bool = False
+    # Duo Web SDK application "PseudoCo Lab: Sign-in" (Universal Prompt).
+    duo_client_id: str = ""
+    duo_client_secret: str = ""
+    duo_api_host: str = ""
+    # Duo Admin API application "PseudoCo Lab: Status (read-only)": grant read
+    # resource only. Reads a user's status (active / disabled / locked out).
+    duo_admin_ikey: str = ""
+    duo_admin_skey: str = ""
+    # Cisco Identity Intelligence API client (OAuth client credentials) for the
+    # GraphQL API: trust level and current failing checks, read-only.
+    cii_client_id: str = ""
+    cii_client_secret: str = ""
+    cii_token_url: str = ""
+    cii_api_url: str = ""
+    # Comma list of the usernames this instance accepts (trusted personas, the
+    # room's victim, this instance's participant account).
+    identity_allowed_users: str = ""
+    # Lifetime of an identity session (the cookie and its server-side row).
+    identity_session_ttl_minutes: int = 720
+    # Cache for Duo / Identity Intelligence status lookups.
+    identity_status_ttl_seconds: int = 10
+    # When Duo or Identity Intelligence cannot be reached: True lets the turn
+    # through and records identity_check="unavailable" on the event.
+    identity_fail_open: bool = True
+    # Stamped as the Splunk HEC "host" of every event, so ES can tell lab
+    # instances apart. Empty keeps each destination's own host (default
+    # "medadvice").
+    hec_host: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -580,6 +670,36 @@ class Settings(BaseSettings):
             for root in (self.tool_guard_workspace_roots or "").split(",")
             if root.strip()
         ]
+
+    @property
+    def public_base_origin(self) -> str:
+        """``PUBLIC_BASE_URL`` normalized to ``https://host[:port]``, or ``""``
+        when it is not https on a DNS name (see ``https_origin``)."""
+        return https_origin(self.public_base_url)
+
+    @property
+    def public_base_url_is_https(self) -> bool:
+        """True when ``PUBLIC_BASE_URL`` is https on an RFC 1034 host, not an IP."""
+        return bool(self.public_base_origin)
+
+    @property
+    def duo_redirect_uri(self) -> str:
+        """The Duo redirect URI: ``PUBLIC_BASE_URL`` + ``/auth/duo/callback``.
+
+        The only redirect source, never derived from the Host header. Empty when
+        ``PUBLIC_BASE_URL`` is not https on a DNS name, which also keeps the
+        ``duo_signin`` host gate closed."""
+        origin = self.public_base_origin
+        return f"{origin}/auth/duo/callback" if origin else ""
+
+    @property
+    def identity_allowed_users_set(self) -> frozenset:
+        """Lowercased usernames parsed from ``IDENTITY_ALLOWED_USERS``."""
+        return frozenset(
+            name.strip().lower()
+            for name in (self.identity_allowed_users or "").split(",")
+            if name.strip()
+        )
 
 # Global settings instance
 settings = Settings()

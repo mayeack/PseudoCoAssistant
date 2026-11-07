@@ -145,12 +145,14 @@ Both sample endpoints sit behind the access key like every other `/api` route.
 ## Where it runs in the pipeline
 
 `attachment_intake` is the first node of the **shared guardrail chain**
-(`blueprints/guardrails.py`), so both blueprints get it by construction:
+(`PRE_NODES[0]` in `blueprints/guardrails.py`), so both blueprints get it by
+construction. The Identity Risk Gate, `identity_risk` (Lab 5,
+`docs/identity.md`), is `PRE_NODES[1]`, between it and `policy`:
 
 ```
-START -> attachment_intake -> policy -> prompt_defense -> agent_control_prompt
-      -> nemo_input_rails -> scheduling_intake -> ehr_lookup -> internal_docs
-      -> mcp_thrash_launch -> <blueprint core>
+START -> attachment_intake -> identity_risk -> policy -> prompt_defense
+      -> agent_control_prompt -> nemo_input_rails -> scheduling_intake
+      -> ehr_lookup -> internal_docs -> mcp_thrash_launch -> <blueprint core>
       -> safety -> injection -> scheduling -> compliance -> agent_control
       -> nemo_output_rails -> response_defense -> mcp_thrash_join -> governance
 ```
@@ -176,6 +178,16 @@ document…*.
 The node is first because every prompt screen must see the document: the free
 internal policy engine, Cisco AI Defense, the Agent Observability Controls
 prompt stage and the NeMo input rails all run after it.
+
+`identity_risk` runs right after it, so it gets a turn whose document is
+already reduced to metadata. It reads neither the message nor the document: on
+a signed-in turn it decides from the identity alone (Duo account status, Cisco
+Identity Intelligence trust level and failing checks), and on an anonymous
+turn it does nothing at all. When it refuses a signed-in turn, that happens
+before any prompt screen or model runs. Its block event carries the typed
+message and the attachment's metadata (the `attachment` field), never the
+document text, and its banner never gets the "screened together" sentence
+(below), because the gate screened no text.
 
 ## Who sees what
 
@@ -203,6 +215,7 @@ defence.
 
 | Reader | What it gets |
 | --- | --- |
+| Identity Risk Gate (`identity_risk`, Lab 5) | Neither: it decides from the signed-in identity. Its block event records the typed message and the attachment's metadata only |
 | Internal policy engine (`policy`) | The composed text |
 | Cisco AI Defense prompt inspection (`prompt_defense`) | The composed text, as one user-role message |
 | Agent Observability Controls, prompt stage (`agent_control_prompt`) | The composed text |
@@ -233,8 +246,8 @@ real verdict, the banner adds one factual sentence: *Your attached document
 '<name>' was screened together with your message.* The sentence goes before the
 theme's closing urgent-help line, or after the crisis text for a policy block.
 It never says which part triggered the block. Fail-closed "could not be
-reviewed" banners and response-stage banners do not get it, because there it
-would not be true.
+reviewed" banners, response-stage banners and the Identity Risk Gate's banner
+do not get it, because there it would not be true.
 
 ## What is logged where
 
@@ -560,7 +573,7 @@ Multi-Agent Mode off, 24 turns):
   `screened_prompt`, `with_attachment`, `with_attachment_note`,
   `attachment_governance_fields`, `block_banner_suffix`.
 - `backend/agents/blueprints/guardrails.py`: wires the node in as
-  `PRE_NODES[0]`.
+  `PRE_NODES[0]`, ahead of `identity_risk` (`PRE_NODES[1]`) and `policy`.
 - `backend/agents/nodes/policy.py`, `defense.py`, `agent_control.py`,
   `nemo_rails.py`: screen the composed text.
 - `backend/agents/nodes/synthesizer.py`: `with_attachment`.

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.yeack.pseudoco-assistant-lab5-baseline</string>
+
+    <!-- Lab 5 persona baseline (plan 4.5, your I2 choice): one successful sign-in
+         per persona through the Auth API app PseudoCo VPN, at random points in
+         personas.yaml baseline.jitter_minutes, then the daily self-check, which
+         raises a macOS notification on any problem. Does nothing (and says so)
+         until personas.yaml baseline.enabled is true, after spikes S1, S2, S7.
+         Daily, one-shot (KeepAlive=false); a run missed while the Mac sleeps
+         runs when it wakes, but nothing runs while it is shut down.
+         run-lab5-job.sh raises a macOS notification when the job cannot start
+         (LAB5_PYTHON missing or broken), which the self-check never could.
+         Installed by install-lab5.sh, which fills in the placeholders. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__PSEUDOCO_ASSISTANT_DIR__/deploy/launchd/run-lab5-job.sh</string>
+        <string>baseline</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LAB5_PYTHON</key>
+        <string>__LAB5_PYTHON__</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>__PSEUDOCO_ASSISTANT_DIR__</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>20</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>__PSEUDOCO_ASSISTANT_DIR__/logs/launchd-lab5-baseline.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PSEUDOCO_ASSISTANT_DIR__/logs/launchd-lab5-baseline.log</string>
+</dict>
+</plist>

@@ -33,6 +33,9 @@ os.environ["SPLUNK_AO_LOGGING_DISABLED"] = "1"
 
 import backend.config  # noqa: E402,F401
 from backend.config import settings  # noqa: E402
+import identity_isolation  # noqa: E402  (no real Duo / CII, whatever .env holds)
+
+identity_isolation.isolate(settings)
 
 settings.prewarm_llm = False
 settings.pii_injection_rate = settings.toxic_injection_rate = 0.0

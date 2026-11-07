@@ -35,6 +35,9 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from backend import settings_store  # noqa: E402
 from backend.config import settings  # noqa: E402
+import identity_isolation  # noqa: E402  (no real Duo / CII, whatever .env holds)
+
+identity_isolation.isolate(settings)
 from backend.models.schemas import ChatRequest  # noqa: E402
 from test_integration_settings import _TempStore  # noqa: E402  (in-memory store, never the real row)
 

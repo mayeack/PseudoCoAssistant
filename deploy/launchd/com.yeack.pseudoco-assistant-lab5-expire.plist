@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.yeack.pseudoco-assistant-lab5-expire</string>
+
+    <!-- Lab 5 participant accounts (plan 12.2, 12.3): `lab5-setup expire` disables
+         every account lab5-setup created once it is 7 days old and deletes it (and
+         its HOTP token) at day 14, which frees the Duo seat. It never touches a
+         persona and is safe to run any time. Daily, one-shot (KeepAlive=false);
+         a run missed while the Mac sleeps runs when it wakes. Reads the
+         Provisioner keys from the login Keychain through `security`.
+         run-lab5-job.sh raises a macOS notification when the job cannot start
+         (LAB5_PYTHON missing or broken); the job notifies on a failed run.
+         Installed by install-lab5.sh, which fills in the placeholders. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__PSEUDOCO_ASSISTANT_DIR__/deploy/launchd/run-lab5-job.sh</string>
+        <string>expire</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LAB5_PYTHON</key>
+        <string>__LAB5_PYTHON__</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>__PSEUDOCO_ASSISTANT_DIR__</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>15</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>__PSEUDOCO_ASSISTANT_DIR__/logs/launchd-lab5-expire.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PSEUDOCO_ASSISTANT_DIR__/logs/launchd-lab5-expire.log</string>
+</dict>
+</plist>

@@ -1,0 +1,1117 @@
+{
+  "_about": "getEndUser answers that the app's gate (backend/services/identity_lookup._cii_parse) and the Mac's persona self-check (deploy/lab5/lab5_cii.parse_end_user) must read the same way. expect: found (details, no error), not_found (CII's 'no such user': no error at all, and getEndUser null or a present, null endUserDetails), or CII's own error for a login it has no record of, matched exactly: every key and value of the live API's answer, each error's locations aside), unavailable (anything else, every other answer that carries an error included, whatever the error says and whatever code it carries). No error at all is errors absent, null or an empty list; any other errors value carries one, an empty object, an empty string, 0 or false included. An unavailable case may carry trust, failing and reasons: what a partial answer did say, which the gate keeps and still blocks on (reasons: its block; none: nothing against the user), while the self-check reads every unavailable answer as a failed query. error_messages and coded_errors are errors tried in every shape of error_shapes (coded_errors puts each of its codes in each of its places), each unavailable with nothing learned. Spike S5 captured CII's answer for a login it has no record of on 2026-11-06: an error (getEndUser, errorType \"404\", \"Not Found\", data null). It is here as not_found, matched exactly in both copies (identity_lookup.CII_UNKNOWN_LOGIN_ANSWER, lab5_cii.UNKNOWN_LOGIN_ANSWER), and every near miss next to it stays unavailable: never its words or its code alone. No table lists every message or code a rule could key on, so tests/test_identity_personas.py also pins each copy's first statement, which turns away every answer that carries an error before anything reads it, and the path to it: each side's fetch hands its parser CII's answer untouched, and each parser answers nothing but a failure between the rule and its errors guard. Run by tests/test_identity_gate.py and tests/test_identity_personas.py.",
+  "login": "avery.kim@pseudocoassistant.com",
+  "cases": [
+    {
+      "name": "details, an untrusted user failing two checks",
+      "expect": "found",
+      "trust": "UNTRUSTED",
+      "failing": [
+        "Impossible Travel",
+        "MFA Flood"
+      ],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [
+                "MFA Flood",
+                "Impossible Travel"
+              ],
+              "endUserTrustScore": {
+                "levelOfTrust": "UNTRUSTED",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "details, a neutral user failing nothing",
+      "expect": "found",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [],
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "the published shape for a user CII has no record of: endUserDetails null, no error",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": null,
+            "providerEndUserDetails": []
+          }
+        }
+      }
+    },
+    {
+      "name": "getEndUser null, no error",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": null
+        }
+      }
+    },
+    {
+      "name": "getEndUser null, a not-found error on it (an error, so never 'no such user')",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "endUserDetails null, a not-found error on endUserDetails (an error, so never 'no such user')",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": null
+          }
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser",
+              "endUserDetails"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "getEndUser null, a not-found error on its non-null endUserDetails (an error, so never 'no such user')",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "No such user",
+            "path": [
+              "getEndUser",
+              "endUserDetails"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "a request-level error (no data: a query the schema rejects)",
+      "expect": "unavailable",
+      "body": {
+        "errors": [
+          {
+            "message": "Field 'endUserDetails' not found in type: 'EndUser'"
+          }
+        ]
+      }
+    },
+    {
+      "name": "data null, an error with no path (a tenant problem)",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "message": "Tenant configuration not found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "a permission error on getEndUser itself",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "Permission does not exist for this API client",
+            "path": [
+              "getEndUser"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "a deeper partial failure (the details are null)",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": null
+          }
+        },
+        "errors": [
+          {
+            "message": "Trust score record not found",
+            "path": [
+              "getEndUser",
+              "endUserDetails",
+              "endUserTrustScore"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "details present, but failingChecks failed and came back null (an untrusted user)",
+      "expect": "unavailable",
+      "trust": "UNTRUSTED",
+      "failing": [],
+      "reasons": [
+        "trust_untrusted"
+      ],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": null,
+              "endUserTrustScore": {
+                "levelOfTrust": "UNTRUSTED",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": [
+          {
+            "message": "Upstream timeout",
+            "path": [
+              "getEndUser",
+              "endUserDetails",
+              "failingChecks"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "details present, a neutral user whose failingChecks failed (never a clean check)",
+      "expect": "unavailable",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "reasons": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": null,
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": [
+          {
+            "message": "Upstream timeout",
+            "path": [
+              "getEndUser",
+              "endUserDetails",
+              "failingChecks"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "details present, the trust score failed, two blocking checks known",
+      "expect": "unavailable",
+      "trust": null,
+      "failing": [
+        "MFA Flood",
+        "Impossible Travel"
+      ],
+      "reasons": [
+        "mfa_flood",
+        "impossible_travel"
+      ],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [
+                "MFA Flood",
+                "Impossible Travel"
+              ],
+              "endUserTrustScore": null
+            }
+          }
+        },
+        "errors": [
+          {
+            "message": "Upstream timeout",
+            "path": [
+              "getEndUser",
+              "endUserDetails",
+              "endUserTrustScore"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "details present, only lastUpdated failed (a field the gate never reads)",
+      "expect": "unavailable",
+      "trust": "UNTRUSTED",
+      "failing": [
+        "MFA Flood"
+      ],
+      "reasons": [
+        "trust_untrusted",
+        "mfa_flood"
+      ],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [
+                "MFA Flood"
+              ],
+              "endUserTrustScore": {
+                "levelOfTrust": "UNTRUSTED",
+                "lastUpdated": null
+              }
+            }
+          }
+        },
+        "errors": [
+          {
+            "message": "Upstream timeout",
+            "path": [
+              "getEndUser",
+              "endUserDetails",
+              "endUserTrustScore",
+              "lastUpdated"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "a generic not-found with no path",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "message": "Requested resource not found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "a long message that opens with a not-found sentence (an error, so never 'no such user')",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found. Details: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "path": [
+              "getEndUser"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "a long message whose not-found sentence comes last (an error, so never 'no such user')",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "message": "Lookup failed: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx. End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "a not-found error on getEndUser while getEndUser is an object",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": null
+          }
+        },
+        "errors": [
+          {
+            "message": "End user avery.kim@pseudocoassistant.com not found",
+            "path": [
+              "getEndUser"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "an empty data object",
+      "expect": "unavailable",
+      "body": {
+        "data": {}
+      }
+    },
+    {
+      "name": "data null, no error",
+      "expect": "unavailable",
+      "body": {
+        "data": null
+      }
+    },
+    {
+      "name": "getEndUser without endUserDetails",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": {}
+        }
+      }
+    },
+    {
+      "name": "errors that are not a list",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": "boom"
+      }
+    },
+    {
+      "name": "errors an empty object, with details (an errors value that is not a list is never 'no error')",
+      "expect": "unavailable",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [],
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": {}
+      }
+    },
+    {
+      "name": "errors an empty object, getEndUser null (an errors value that is not a list is never 'no error', so never 'no such user')",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": {}
+      }
+    },
+    {
+      "name": "errors an empty string, with details (an errors value that is not a list is never 'no error')",
+      "expect": "unavailable",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [],
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": ""
+      }
+    },
+    {
+      "name": "errors an empty string, getEndUser null (an errors value that is not a list is never 'no error', so never 'no such user')",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": ""
+      }
+    },
+    {
+      "name": "errors 0, with details (an errors value that is not a list is never 'no error')",
+      "expect": "unavailable",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [],
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": 0
+      }
+    },
+    {
+      "name": "errors 0, getEndUser null (an errors value that is not a list is never 'no error', so never 'no such user')",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": 0
+      }
+    },
+    {
+      "name": "errors false, with details (an errors value that is not a list is never 'no error')",
+      "expect": "unavailable",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [],
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": false
+      }
+    },
+    {
+      "name": "errors false, getEndUser null (an errors value that is not a list is never 'no error', so never 'no such user')",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": false
+      }
+    },
+    {
+      "name": "errors an empty list, getEndUser null (no error at all)",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": []
+      }
+    },
+    {
+      "name": "errors null, endUserDetails null (no error at all)",
+      "expect": "not_found",
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": null
+          }
+        },
+        "errors": null
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, as the live API gave it on 2026-11-06 (spike S5, the Mac's query): getEndUser fails with a 404",
+      "expect": "not_found",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": null,
+            "errorType": "404",
+            "locations": [
+              {
+                "line": 1,
+                "column": 38,
+                "sourceName": null
+              }
+            ],
+            "message": "Not Found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, at the gate's query's position (locations point into the query text, not at the verdict)",
+      "expect": "not_found",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": null,
+            "errorType": "404",
+            "locations": [
+              {
+                "line": 1,
+                "column": 51,
+                "sourceName": null
+              }
+            ],
+            "message": "Not Found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, with no locations",
+      "expect": "not_found",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": null,
+            "errorType": "404",
+            "message": "Not Found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, but errorType 403 (an exact match only)",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": null,
+            "errorType": "403",
+            "locations": [
+              {
+                "line": 1,
+                "column": 38,
+                "sourceName": null
+              }
+            ],
+            "message": "Not Found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, but errorType the number 404 (an exact match only)",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": null,
+            "errorType": 404,
+            "locations": [
+              {
+                "line": 1,
+                "column": 38,
+                "sourceName": null
+              }
+            ],
+            "message": "Not Found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, but another message (an exact match only)",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": null,
+            "errorType": "404",
+            "locations": [
+              {
+                "line": 1,
+                "column": 38,
+                "sourceName": null
+              }
+            ],
+            "message": "Not Found: missing permission read:user"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, but the message in another case (an exact match only)",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": null,
+            "errorType": "404",
+            "locations": [
+              {
+                "line": 1,
+                "column": 38,
+                "sourceName": null
+              }
+            ],
+            "message": "not found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, but the error carries extensions too (an exact match only)",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": null,
+            "errorType": "404",
+            "locations": [
+              {
+                "line": 1,
+                "column": 38,
+                "sourceName": null
+              }
+            ],
+            "message": "Not Found",
+            "extensions": {
+              "code": "FORBIDDEN"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, but the answer carries extensions too (an exact match only)",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": null,
+            "errorType": "404",
+            "locations": [
+              {
+                "line": 1,
+                "column": 38,
+                "sourceName": null
+              }
+            ],
+            "message": "Not Found"
+          }
+        ],
+        "extensions": {
+          "reason": "client not permitted"
+        }
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, twice (an exact match only)",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": null,
+            "errorType": "404",
+            "locations": [
+              {
+                "line": 1,
+                "column": 38,
+                "sourceName": null
+              }
+            ],
+            "message": "Not Found"
+          },
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": null,
+            "errorType": "404",
+            "locations": [
+              {
+                "line": 1,
+                "column": 38,
+                "sourceName": null
+              }
+            ],
+            "message": "Not Found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, next to a second error (an exact match only)",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": null,
+            "errorType": "404",
+            "locations": [
+              {
+                "line": 1,
+                "column": 38,
+                "sourceName": null
+              }
+            ],
+            "message": "Not Found"
+          },
+          {
+            "message": "Unauthorized",
+            "errorType": "Unauthorized"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, but on endUserDetails (an exact match only)",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "path": [
+              "getEndUser",
+              "endUserDetails"
+            ],
+            "data": null,
+            "errorType": "404",
+            "locations": [
+              {
+                "line": 1,
+                "column": 38,
+                "sourceName": null
+              }
+            ],
+            "message": "Not Found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, but with data (an exact match only)",
+      "expect": "unavailable",
+      "body": {
+        "data": {
+          "getEndUser": null
+        },
+        "errors": [
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": null,
+            "errorType": "404",
+            "locations": [
+              {
+                "line": 1,
+                "column": 38,
+                "sourceName": null
+              }
+            ],
+            "message": "Not Found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CII's answer for a login it has no record of, but the error's data is not null (an exact match only)",
+      "expect": "unavailable",
+      "body": {
+        "data": null,
+        "errors": [
+          {
+            "path": [
+              "getEndUser"
+            ],
+            "data": {},
+            "errorType": "404",
+            "locations": [
+              {
+                "line": 1,
+                "column": 38,
+                "sourceName": null
+              }
+            ],
+            "message": "Not Found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "errors an empty list, with details (no error at all)",
+      "expect": "found",
+      "trust": "NEUTRAL",
+      "failing": [],
+      "body": {
+        "data": {
+          "getEndUser": {
+            "endUserDetails": {
+              "login": "avery.kim@pseudocoassistant.com",
+              "status": "ACTIVE",
+              "failingChecks": [],
+              "endUserTrustScore": {
+                "levelOfTrust": "NEUTRAL",
+                "lastUpdated": "2026-11-05T09:00:00Z"
+              }
+            }
+          }
+        },
+        "errors": []
+      }
+    }
+  ],
+  "error_shapes": {
+    "_about": "Where an error in a getEndUser answer sits, each tried with every message of error_messages and every error coded_errors builds: on getEndUser (getEndUser null), on its endUserDetails (getEndUser an object, endUserDetails null), on getEndUser with data null (the shape the published schema gives such an error: getEndUser returns the non-null GetEndUserOutput!, so an error on it nulls the whole of data), and with no path (data null).",
+    "shapes": [
+      {
+        "where": "on getEndUser",
+        "data": {
+          "getEndUser": null
+        },
+        "path": [
+          "getEndUser"
+        ]
+      },
+      {
+        "where": "on endUserDetails",
+        "data": {
+          "getEndUser": {
+            "endUserDetails": null
+          }
+        },
+        "path": [
+          "getEndUser",
+          "endUserDetails"
+        ]
+      },
+      {
+        "where": "on getEndUser, data null (its non-null GetEndUserOutput! failed)",
+        "data": null,
+        "path": [
+          "getEndUser"
+        ]
+      },
+      {
+        "where": "with no path, data null",
+        "data": null,
+        "path": null
+      }
+    ]
+  },
+  "error_messages": {
+    "_about": "Messages of a code-less error, each tried in every shape of error_shapes. Every one is unavailable, whatever it says: the first ones read like CII saying 'no such user', the rest are about something else (a permission, a scope, a role, a pool, a session, another principal). No error is ever read as that answer by its words.",
+    "messages": [
+      "End user avery.kim@pseudocoassistant.com not found",
+      "User does not exist",
+      "No such user",
+      "No such user.",
+      "No such end user: avery.kim@pseudocoassistant.com",
+      "That user doesn't exist",
+      "The user has not been found",
+      "User with login 'avery.kim@pseudocoassistant.com' was not found",
+      "The requested end user (avery.kim@pseudocoassistant.com) was not found",
+      "User could not be found",
+      "No user found",
+      "No user with login avery.kim@pseudocoassistant.com",
+      "End user record not found",
+      "No user.",
+      "No user: avery.kim@pseudocoassistant.com",
+      "No user matching avery.kim@pseudocoassistant.com",
+      "No such user; check the login",
+      "End user \"avery.kim@pseudocoassistant.com\" does not exist",
+      "User `avery.kim@pseudocoassistant.com` not found",
+      "user:avery.kim@pseudocoassistant.com not found",
+      "No user 'avery.kim@pseudocoassistant.com'",
+      "No user (avery.kim@pseudocoassistant.com)",
+      "No user for avery.kim@pseudocoassistant.com",
+      "No user with email: avery.kim@pseudocoassistant.com",
+      "No user permissions are granted to this API client",
+      "No user scope on this access token",
+      "User pool not found",
+      "Could not load user avery.kim@pseudocoassistant.com: upstream configuration not found",
+      "Permission 'read:user' not found for this API client",
+      "User permission does not exist for this API client",
+      "Required scope user.read not found in access token",
+      "User session not found",
+      "Role end-user-reader does not exist",
+      "Permission does not exist for this API client",
+      "Upstream timeout",
+      "No user permissions.",
+      "No user scope.",
+      "No user context.",
+      "No user role.",
+      "Forbidden: no user access.",
+      "Access denied: no user permissions.",
+      "The API client has no user permissions.",
+      "Token has no user.",
+      "Forbidden: no user.",
+      "Token has no user.read scope",
+      "Token has no user:read scope",
+      "No user:read permission granted",
+      "No user, group or role permission granted to this API client",
+      "No user with the required permissions",
+      "No such user pool",
+      "Could not resolve user scope. Not found.",
+      "No user (or group) permission granted to this API client",
+      "No user (read) access granted",
+      "No user 'read' scope granted to this API client",
+      "No user \"read\" permission",
+      "No user `read` scope",
+      "No user with 'read' permission",
+      "No user with \"end_user:read\" scope",
+      "No user: 'read'",
+      "No user named 'read.all'",
+      "No user (s) found",
+      "No user for id token",
+      "Required scope user:read.all not found in access token",
+      "Scope user:read.all does not exist",
+      "Scope end_user:read.all not found",
+      "Scope user 'read.all' not found",
+      "User (read) not found",
+      "Role for user api.client not found",
+      "No user 'read access@tenant' granted"
+    ]
+  },
+  "coded_errors": {
+    "_about": "Errors that carry a code, built by tests/cii_end_user_answers.coded_errors: each code of codes in each place of places, alone and then in all of them at once, on each message of messages, then the errors listed here (two different codes on one error). So a code is tried in every place, never only where an entry happened to put it. The whole-path checks (the gate's lookup and decision, the Mac's CIIClient.end_user) put them on every message the table holds instead (cii_end_user_answers.all_messages: this section's, error_messages and those of cases), so no code and no message the table holds go untried together; the box's victim row and the self-check's row keep this section's messages. Each is tried, with its path from the shape, in every shape of error_shapes, data null on getEndUser (the published schema's shape) included. The places are where GraphQL servers commonly put a code: extensions.code (Apollo Server, Hasura), extensions.errorType (Netflix DGS), extensions.classification (graphql-java, Spring for GraphQL), and errorType (AppSync) and type (GitHub's GraphQL API) on the error itself. The codes are not found, user not found and end user not found, each spelled four ways (NOT_FOUND, NotFound, not-found, not_found), and two refusals. Every one is unavailable, whatever its code says and wherever the code sits: a code that reads 'not found' or 'user not found' is still an error, and no error is ever 'no such user' (a refused API client can carry one, as on the permission message here). CII's own answer for an unknown login (captured by spike S5) is in cases, matched exactly; none of these errors is it.",
+    "places": [
+      "extensions.code",
+      "extensions.errorType",
+      "extensions.classification",
+      "errorType",
+      "type"
+    ],
+    "codes": [
+      "NOT_FOUND",
+      "USER_NOT_FOUND",
+      "END_USER_NOT_FOUND",
+      "NotFound",
+      "UserNotFound",
+      "EndUserNotFound",
+      "not-found",
+      "user-not-found",
+      "end-user-not-found",
+      "not_found",
+      "user_not_found",
+      "end_user_not_found",
+      "FORBIDDEN",
+      "Unauthorized"
+    ],
+    "messages": [
+      "End user avery.kim@pseudocoassistant.com not found",
+      "User does not exist",
+      "Permission read:user not found for this API client"
+    ],
+    "errors": [
+      {
+        "name": "a NOT_FOUND code next to an Unauthorized errorType",
+        "error": {
+          "message": "End user avery.kim@pseudocoassistant.com not found",
+          "extensions": {
+            "code": "NOT_FOUND"
+          },
+          "errorType": "Unauthorized"
+        }
+      }
+    ]
+  }
+}

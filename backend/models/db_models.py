@@ -175,11 +175,54 @@ class AuditLog(Base):
     actor = Column(String, nullable=False)
     details = Column(JSON, nullable=False)
     ip_address = Column(String, nullable=True)
+    # The event's end user (CIM ``user``): the synthetic chat persona, or the
+    # signed-in username on identity events. Added by reconcile_schema() on an
+    # existing database; its index comes from database.db.ensure_indexes(),
+    # because reconcile_schema adds bare columns only.
+    enduser_id = Column(String, nullable=True, index=True)
 
     __table_args__ = (
         Index('idx_action_timestamp', 'action', 'timestamp'),
         Index('idx_actor_timestamp', 'actor', 'timestamp'),
     )
+
+
+class IdentitySession(Base):
+    """One signed-in identity session (Lab 5, Duo Universal Prompt).
+
+    The browser holds a random 32-byte cookie; only its sha256 is stored here,
+    so reading this table never yields a usable cookie. ``id`` is the public
+    session reference used in logs and audit events, never derived from the
+    token. A revoked row is kept as a tombstone until it expires, so the
+    session keeps answering ``identity_session_revoked`` until the user signs
+    in again or signs out. A separate table, so create_all needs no migration.
+    Read and written only by backend/services/identity_store.py."""
+    __tablename__ = "identity_sessions"
+
+    id = Column(String, primary_key=True)
+    token_hash = Column(String, unique=True, index=True, nullable=False)
+    username = Column(String, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    last_seen_at = Column(DateTime, nullable=True)
+    client_address = Column(String, nullable=True)
+    user_agent = Column(String, nullable=True)
+    duo_txid = Column(String, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    revoked_reason = Column(String, nullable=True)
+    # Unblock me (plan 12.1, A4): set while the user has overridden the
+    # Identity Risk Gate for this session. The gate then lets its turns through
+    # (recording the real verdict and identity_override=true on every event);
+    # POST /api/identity/reblock clears it, and so does a revocation (it ends
+    # the session). Never touches Duo or Cisco Identity Intelligence.
+    unblocked_at = Column(DateTime, nullable=True)
+    # The revocation reason this override cleared, when Unblock me brought a
+    # revoked session back (else NULL). Only an override that cleared a
+    # "duo_disabled" tombstone keeps the Duo revocation pull off the session,
+    # and only while Duo keeps the account disabled: an override turned on for
+    # a gate block, or before any block, never stops a Duo disable from ending
+    # the session.
+    unblock_cleared = Column(String, nullable=True)
 
 class Appointment(Base):
     """One appointment booked from the chat's scheduling flow (docs/scheduling.md).
