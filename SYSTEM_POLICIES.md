@@ -66,6 +66,11 @@ Any mention of:
 - Crisis resources provided
 - Escalation reason: "Self-harm ideation expressed"
 
+The hard block (the crisis response in place of an answer) is the **Internal
+Policy Engine** (Demo Controls → Guardrails, `internal_policy_review`), which
+is **off by default**. With it off, the turn is still escalated for review but
+the model answers.
+
 **Policy Summary:**
 > If you are experiencing thoughts of self-harm or suicide, please contact emergency services (911) or a crisis helpline immediately. The National Suicide Prevention Lifeline is available at 988.
 

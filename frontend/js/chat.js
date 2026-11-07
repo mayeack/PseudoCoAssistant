@@ -7,7 +7,7 @@ let boundaryEnabled = false;
 let aiDefenseEnabled = false;
 let agentControlEnabled = false;
 let nemoGuardrailsEnabled = false;
-let internalPolicyEnabled = true;
+let internalPolicyEnabled = false;
 let multiAgentEnabled = false;
 let autoPromptEnabled = false;
 let autoPromptStatusInterval = null;
@@ -512,8 +512,8 @@ document.addEventListener('DOMContentLoaded', function() {
         agentControlEnabled = savedAgentControlEnabled === 'true';
         // NeMo Guardrails defaults OFF unless explicitly turned on.
         nemoGuardrailsEnabled = savedNemoGuardrailsEnabled === 'true';
-        // Internal policy engine defaults ON unless explicitly turned off.
-        internalPolicyEnabled = savedInternalPolicyEnabled !== 'false';
+        // Internal policy engine defaults OFF unless explicitly turned on.
+        internalPolicyEnabled = savedInternalPolicyEnabled === 'true';
         // Multi-agent mode defaults OFF unless explicitly turned on.
         multiAgentEnabled = savedMultiAgentEnabled === 'true';
         // Mint a fresh session (clears the old transcript) rather than reusing
@@ -2314,17 +2314,37 @@ async function checkAutoPromptStatus() {
     }
 }
 
+// Time left on the Auto-Generate Sessions run timer: whole minutes (rounded
+// up) while a minute or more remains, then seconds.
+function formatAutoPromptRemaining(seconds) {
+    if (seconds == null) return '';
+    return seconds >= 60 ? Math.ceil(seconds / 60) + 'm' : Math.max(0, seconds) + 's';
+}
+
 function updateAutoPromptStatus(data) {
     const statusElement = document.getElementById('autoPromptStatus');
     const statsElement = document.getElementById('autoPromptStats');
     const countElement = document.getElementById('autoPromptCount');
-    
+    const remainingElement = document.getElementById('autoPromptRemaining');
+    const limitMin = data.duration_s ? Math.round(data.duration_s / 60) : 60;
+
     if (data.running) {
-        setPill(statusElement, true);
+        const left = formatAutoPromptRemaining(data.remaining_s);
+        setPill(statusElement, true, null,
+            left ? 'Creating one session per minute. Turns off automatically in ' + left + '.' : '');
         statsElement.classList.remove('hidden');
         countElement.textContent = data.sessions_created || 0;
+        if (remainingElement) {
+            remainingElement.textContent = left ? left + ' left' : '';
+            remainingElement.classList.toggle('hidden', !left);
+        }
     } else {
-        setPill(statusElement, false);
+        setPill(statusElement, false, null,
+            data.auto_stopped ? 'Turned off automatically after ' + limitMin + ' minutes.' : '');
+        if (remainingElement) {
+            remainingElement.textContent = '';
+            remainingElement.classList.add('hidden');
+        }
         if (data.sessions_created > 0) {
             statsElement.classList.remove('hidden');
             countElement.textContent = data.sessions_created;

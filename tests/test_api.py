@@ -1049,8 +1049,11 @@ def main() -> int:
               re.search(r'id="sprayDuration"[^>]*value="60"', _drawer) is not None)
         check("Drawer: pills carry only the uniform On/Off text in the markup",
               re.search(r'id="\w+Status"[^>]*>\s*(OFF|ON|ALWAYS ON)\s*<', _drawer) is None)
-        check("Drawer: the default-on pill (Internal Policy) is the green On pill",
-              re.search(r'id="internalPolicyStatus"[^>]*bg-green-100 text-green-700[^>]*>\s*On\s*<', _drawer) is not None)
+        check("Drawer: Internal Policy starts Off (grey Off pill, switch unticked)",
+              re.search(r'id="internalPolicyStatus"[^>]*bg-gray-100 text-gray-600[^>]*>\s*Off\s*<', _drawer) is not None
+              and re.search(r'id="internalPolicyToggle"[^>]*\bchecked\b', _drawer) is None)
+        check("Drawer: no card's switch is ticked in the markup (every control starts Off)",
+              re.search(r'type="checkbox"[^>]*\bchecked\b', _drawer) is None)
         # One toggle accent for every card: an On switch looks the same whichever control it is.
         _accents = set(re.findall(r"peer-checked:bg-[a-z]+-\d+|peer-focus:ring-[a-z]+-\d+", _drawer))
         check("Drawer: every toggle uses the same On accent (green-600 / ring-green-300)",
@@ -1073,7 +1076,17 @@ def main() -> int:
         check("Composer: attachment chip row present", 'id="attachmentChip"' in a_html)
         check("Composer: the attachment controls are outside the Demo Controls drawer",
               all(f'id="{i}"' not in _drawer for i in ("attachButton", "attachmentInput", "attachmentChip")))
-        check("Chat: chat.js cache-buster bumped to v=40", "/static/js/chat.js?v=40" in a_html)
+        check("Chat: chat.js cache-buster bumped to v=41", "/static/js/chat.js?v=41" in a_html)
+        # Auto-Generate Sessions turns itself off after 60 minutes; the countdown
+        # lives inside the existing #autoPromptStats counter, beside the pill.
+        check("Auto-Generate Sessions: card says it turns off after 60 minutes",
+              "Turns off after 60 minutes." in _drawer)
+        check("Auto-Generate Sessions: countdown span sits inside #autoPromptStats",
+              re.search(r'id="autoPromptStats"[^>]*>\s*Sessions: <span id="autoPromptCount">0</span>'
+                        r'<span id="autoPromptRemaining"', a_html) is not None)
+        check("chat.js: Auto-Generate Sessions renders remaining_s and the auto-stop tooltip",
+              "data.remaining_s" in _chat_js and "data.auto_stopped" in _chat_js
+              and "getElementById('autoPromptRemaining')" in _chat_js)
         check("chat.js: a stage label for attachment_intake", "attachment_intake:" in _chat_js)
         check("chat.js: the payload carries the attachment and keeps the hidden-control line",
               "attachment: attachment ?" in _chat_js and "_hiddenControls.has(key)) payload[flag] = null" in _chat_js)

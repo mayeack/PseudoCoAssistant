@@ -327,7 +327,7 @@
                         <div class="flex items-center justify-between">
                             <div class="flex items-center space-x-3">
                                 <label class="relative inline-flex items-center cursor-pointer">
-                                    <input type="checkbox" id="internalPolicyToggle" class="sr-only peer" onchange="toggleInternalPolicy()" checked>
+                                    <input type="checkbox" id="internalPolicyToggle" class="sr-only peer" onchange="toggleInternalPolicy()">
                                     <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-green-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600"></div>
                                 </label>
                                 <div>
@@ -335,8 +335,8 @@
                                     <p class="text-xs text-gray-500">Our built-in pre-AI safety guardrail (e.g. self-harm crisis block) — separate from Cisco AI Defense</p>
                                 </div>
                             </div>
-                            <div id="internalPolicyStatus" class="px-3 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-700">
-                                On
+                            <div id="internalPolicyStatus" class="px-3 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-600">
+                                Off
                             </div>
                         </div>
                     </div>
@@ -477,12 +477,12 @@
                                 </label>
                                 <div>
                                     <span class="text-sm font-semibold text-gray-700">Auto-Generate Sessions</span>
-                                    <p class="text-xs text-gray-500">Automatically creates realistic consultation sessions (1 per minute)</p>
+                                    <p class="text-xs text-gray-500">Automatically creates realistic consultation sessions (1 per minute). Turns off after 60 minutes.</p>
                                 </div>
                             </div>
                             <div class="flex items-center space-x-3">
-                                <div id="autoPromptStats" class="text-xs text-indigo-600 hidden">
-                                    Sessions: <span id="autoPromptCount">0</span>
+                                <div id="autoPromptStats" class="text-xs text-indigo-600 text-right whitespace-nowrap hidden">
+                                    Sessions: <span id="autoPromptCount">0</span><span id="autoPromptRemaining" class="block hidden"></span>
                                 </div>
                                 <div id="autoPromptStatus" class="px-3 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-600">
                                     Off
@@ -801,6 +801,6 @@
         </div>
     </div>
 
-    <script src="/static/js/chat.js?v=40"></script>
+    <script src="/static/js/chat.js?v=41"></script>
 </body>
 </html>

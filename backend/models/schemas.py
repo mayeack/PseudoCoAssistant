@@ -59,7 +59,7 @@ class ChatRequest(BaseModel):
     force_hallucination_injection: Optional[bool] = None  # Override hallucination injection rate
     force_boundary_injection: Optional[bool] = None  # Force the theme's outside-of-authority content (MedAdvice: prescriptive overreach; TelecomChatbot: unauthorized commitment; Retail: unauthorized refund; Manufacturing: safety override) in the response
     ai_defense_review: Optional[bool] = None  # Send prompt to Cisco AI Defense for policy review
-    internal_policy_review: Optional[bool] = None  # Run the built-in internal policy engine (default on)
+    internal_policy_review: Optional[bool] = None  # Run the built-in internal policy engine (None/False = off, the default)
     multi_agent_mode: Optional[bool] = None  # True = coordinator/specialists/synthesizer pipeline; None/False (default) = the domain agent answers directly
     agent_control_review: Optional[bool] = None  # Submit the response to Agent Control for evaluation against the console's Controls
     nemo_guardrails_review: Optional[bool] = None  # Run NVIDIA NeMo Guardrails input rails on the prompt and output rails on the answer

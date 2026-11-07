@@ -2407,9 +2407,9 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                     return identity_block
 
             # Internal policy engine (built-in, separate from Cisco AI Defense).
-            # Defaults to on when the caller doesn't specify, preserving the
-            # always-on safety behavior for non-UI callers (e.g. auto-prompter).
-            run_internal_policy = internal_policy_review is not False
+            # Defaults to off: runs only when the caller explicitly enables it
+            # (same default as the agentic chain, nodes/policy.py).
+            run_internal_policy = internal_policy_review is True
             # Pre-AI policy block: intercept dangerous content before calling the model
             should_block, block_reasons = (
                 self.escalation_rules.check_policy_block(user_message)

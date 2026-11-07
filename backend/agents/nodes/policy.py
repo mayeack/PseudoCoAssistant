@@ -2,8 +2,11 @@
 
 Mirrors the built-in policy block in the legacy ``process_message``: dangerous
 content (e.g. self-harm patterns) is intercepted before any model call. Defaults
-to on unless the request explicitly disabled it (``internal_policy_review`` is
-False), preserving the always-on behavior for non-UI callers.
+to OFF: it runs only when the request explicitly enables it
+(``internal_policy_review`` is True). An unset flag -- an API caller, the
+Auto-Generate Sessions traffic, a card hidden on the Settings page -- skips it,
+like the other guardrails. Self-harm escalation (``safety`` node) is separate
+and still runs either way.
 
 It screens ``screened_prompt(state)``: the typed message, plus the attached
 document's text on a document turn (docs/attachments.md) -- so a real document
@@ -31,7 +34,7 @@ from backend.telemetry import otel
 
 
 def policy_block_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    run_internal = state.get("internal_policy_review") is not False
+    run_internal = state.get("internal_policy_review") is True
     # Exactly user_message without an attachment.
     user_message = screened_prompt(state)
 
