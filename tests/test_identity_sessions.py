@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lab 5 identity groundwork (4.22.0): config, session store, the identity
+"""Lab 5 identity groundwork (4.23.0): config, session store, the identity
 middleware, chat threading, the evidence fields and the identity audit events.
 
 Inert unless configured: with DUO_ENABLED off nothing changes (the cookie is not
@@ -152,8 +152,8 @@ def test_config() -> None:
         check(f".env.example documents {key.upper()} (commented)",
               re.search(rf"^# {key.upper()}=", env_example, re.M) is not None)
     version = re.search(r"^APP_VERSION=(\S+)", env_example, re.M)
-    check("app_version and APP_VERSION move together (4.22.0)",
-          version is not None and version.group(1) == Settings.model_fields["app_version"].default == "4.22.0",
+    check("app_version and APP_VERSION move together (4.23.0)",
+          version is not None and version.group(1) == Settings.model_fields["app_version"].default == "4.23.0",
           f"{version.group(1) if version else None} vs {Settings.model_fields['app_version'].default}")
 
     from backend import settings_store

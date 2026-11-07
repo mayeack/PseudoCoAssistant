@@ -244,7 +244,7 @@ deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at
 <h2>What <code>up</code> does to a box</h2>
 <ol>
 <li>
-<p><strong>Version check.</strong> The box's <code>/health</code> must report at least <code>required_version</code> (default 4.22.0). There is no code upgrade (I5). A box below that is refused with &quot;the Show template needs that release (12.6)&quot;. It also checks <code>sudo -n</code>, <code>cloudflared</code> and the app unit, and that exactly one HEC destination sends to the room stack.</p>
+<p><strong>Version check.</strong> The box's <code>/health</code> must report at least <code>required_version</code> (default 4.23.0). There is no code upgrade (I5). A box below that is refused with &quot;the Show template needs that release (12.6)&quot;. It also checks <code>sudo -n</code>, <code>cloudflared</code> and the app unit, and that exactly one HEC destination sends to the room stack.</p>
 </li>
 <li>
 <p><strong>Backup.</strong> <code>.env</code> (byte for byte) and <code>medadvice.db</code> (SQLite online backup, safe while the app writes) go to <code>~/.pseudoco-lab5/backups/&lt;workshop&gt;-&lt;UTC stamp&gt;-&lt;random&gt;/</code> on the box, mode 0600 in a 0700 directory. Each run gets a new directory.</p>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lab 5 Duo Universal Prompt sign-in (4.22.0, plan 12.1 / PR-2): the
+"""Lab 5 Duo Universal Prompt sign-in (4.23.0, plan 12.1 / PR-2): the
 duo_universal wrapper, the sign-in routes, the state and identity cookies, the
 redaction of Duo's one-time code, and the frontend hooks.
 

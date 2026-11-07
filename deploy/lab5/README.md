@@ -99,7 +99,7 @@ Copy `deploy/lab5/workshop.example.yaml`, one per delivery. It holds no secrets:
 
 ## What `up` does to a box
 
-1. **Version check.** The box's `/health` must report at least `required_version` (default 4.22.0). There is no code upgrade (I5). A box below that is refused with "the Show template needs that release (12.6)". It also checks `sudo -n`, `cloudflared` and the app unit, and that exactly one HEC destination sends to the room stack.
+1. **Version check.** The box's `/health` must report at least `required_version` (default 4.23.0). There is no code upgrade (I5). A box below that is refused with "the Show template needs that release (12.6)". It also checks `sudo -n`, `cloudflared` and the app unit, and that exactly one HEC destination sends to the room stack.
 2. **Backup.** `.env` (byte for byte) and `medadvice.db` (SQLite online backup, safe while the app writes) go to `~/.pseudoco-lab5/backups/<workshop>-<UTC stamp>-<random>/` on the box, mode 0600 in a 0700 directory. Each run gets a new directory.
 3. **Lab 5 keys.** Only the keys of the 12.1 table change, `PUBLIC_BASE_URL` and `HEC_HOST` included. The first live line of a key is replaced in place, and a missing key is appended. Every other line keeps its bytes, comments, quoting and line endings. The file is written atomically, with its mode kept. If the file changed since it was read, nothing is written.
 4. **Tunnel and DNS.** These are created through the Cloudflare API:

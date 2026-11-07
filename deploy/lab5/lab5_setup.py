@@ -61,7 +61,7 @@ from lab5_personas import DEFAULT_CAST, load_cast  # noqa: E402
 import lab5_remote as remote  # noqa: E402
 
 DEFAULT_ZONE = "pseudocoassistant.com"
-DEFAULT_REQUIRED_VERSION = "4.22.0"     # 12.6: the first tag with PR-1/PR-2, at least v4.22.0
+DEFAULT_REQUIRED_VERSION = "4.23.0"     # 12.6: the first release with Lab 5 (PR-1 to PR-3); 4.22.x has none of it
 DEFAULT_TRUSTED = ("marcus.bell", "elena.sousa", "grace.lin")   # 4.3 cast
 CLOUDFLARE_ITEM = "pseudoco-lab5-cloudflare"
 # .env key -> Keychain item (service name). workshop.yaml `keychain:` overrides any of them.
@@ -271,7 +271,7 @@ def workshop_from_dict(doc: Dict[str, Any]) -> Workshop:
     email_domain = str(part.get("email_domain") or zone)
     _require(bool(_ZONE_RE.match(email_domain)), "`participants.email_domain` must be a domain")
     required = str(doc.get("required_version") or DEFAULT_REQUIRED_VERSION)
-    _require(parse_version(required) is not None, "`required_version` must look like 4.22.0")
+    _require(parse_version(required) is not None, "`required_version` must look like 4.23.0")
     protocol = str(cloudflare.get("tunnel_protocol") or "")
     _require(protocol in ("", "auto", "http2", "quic"), "`cloudflare.tunnel_protocol` is auto, http2 or quic")
     return Workshop(

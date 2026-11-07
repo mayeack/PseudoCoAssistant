@@ -8,7 +8,7 @@ workshop: acme-1105
 
 # `up` refuses a box whose /health reports less (no code upgrade, I5); the
 # Show template is re-baked on this release instead (plan 12.6).
-required_version: "4.22.0"
+required_version: "4.23.0"
 zone: pseudocoassistant.com
 
 # The room's Splunk stack. `up` looks for the box's existing HEC destination

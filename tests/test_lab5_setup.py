@@ -98,7 +98,7 @@ class FakeSecurity:
 # --------------------------------------------------------------------------- a Show box
 LABS_0_4_ENV = (
     "# PseudoCo Assistant .env (Show image)\n"
-    "APP_VERSION=4.22.0\n"
+    "APP_VERSION=4.23.0\n"
     "AI_PROVIDER=ollama\n"
     "OLLAMA_MODEL=llama3.1:8b\n"
     f"AI_DEFENSE_API_KEY={OTHER_LAB_SECRETS[0]}\n"
@@ -149,7 +149,7 @@ READ_ONLY = ("printf", "true", "command -v", "systemctl cat", "systemctl is-acti
 class FakeBox:
     """An in-memory Show box: files, systemd units and the app's API."""
 
-    def __init__(self, world: "FakeWorld", nn: str, version: str = "4.22.0") -> None:
+    def __init__(self, world: "FakeWorld", nn: str, version: str = "4.23.0") -> None:
         self.world, self.nn, self.version = world, nn, version
         self.files: Dict[str, Tuple[bytes, int]] = {
             "/home/splunk/DemoBot/.env": (labs_env(nn), 0o600),
@@ -296,7 +296,7 @@ class FakeBox:
             enabled = self.running["DUO_ENABLED"] == "true" and (self.running["PUBLIC_BASE_URL"] or "").startswith("https://")
             gate = {"enabled": enabled, "reason": "" if enabled else "Duo sign-in is disabled (DUO_ENABLED)"}
             gated = {"pdf_attachments": {"enabled": True, "reason": ""}}
-            if ls.version_at_least(self.version, "4.22.0"):
+            if ls.version_at_least(self.version, "4.23.0"):
                 gated["duo_signin"] = gate
             return 200, {"version": self.version, "gated": gated}
         if path == "/api/hec/destinations" and method == "GET":
@@ -429,7 +429,7 @@ class FakeCloudflare:
 
 # --------------------------------------------------------------------------- the world
 class FakeWorld:
-    def __init__(self, versions=("4.22.0", "4.22.0")) -> None:
+    def __init__(self, versions=("4.23.0", "4.23.0")) -> None:
         self.cf = FakeCloudflare(self)
         self.boxes = {f"{i + 1:02d}": FakeBox(self, f"{i + 1:02d}", v) for i, v in enumerate(versions)}
         self.security = FakeSecurity()
@@ -501,7 +501,7 @@ class FakeWorld:
 
 WORKSHOP_YAML = """
 workshop: acme
-required_version: "4.22.0"
+required_version: "4.23.0"
 stack:
   hec_url: https://http-inputs-acme.splunkcloud.com/services/collector
   hec_token_item: pseudoco-lab5-hec-acme
@@ -630,7 +630,7 @@ def test_up_status_down() -> None:
                   and "ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run\n" in unit)
             check(f"[{nn}] app restarted once", box.restarts == 1)
         check("preflight passed through the public name", out.count("not gated") == 2
-              and "https://l5-acme-01.pseudocoassistant.com/health 4.22.0" in out, out)
+              and "https://l5-acme-01.pseudocoassistant.com/health 4.23.0" in out, out)
         check("one tunnel and one proxied CNAME per box",
               len(world.cf._live()) == 2 and len(world.cf.records) == 2
               and all(r["proxied"] and r["content"].endswith(".cfargotunnel.com") for r in world.cf.records.values()))
@@ -713,7 +713,7 @@ def test_up_status_down() -> None:
 
 def test_refusals() -> None:
     print("== refusals: old release, no room destination, unrecorded tunnel ==")
-    world = FakeWorld(versions=("4.21.0", "4.22.0"))
+    world = FakeWorld(versions=("4.22.1", "4.23.0"))  # 4.22.1: main's release before Lab 5
     world.boxes["02"].destinations = [lab2_destination()]
     with tempfile.TemporaryDirectory() as tmp:
         rc, out = run_cli(world, Path(tmp), "up")
