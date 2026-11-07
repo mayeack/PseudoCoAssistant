@@ -178,18 +178,24 @@ Duo is down.</li>
 of yet, such as a new participant account, gets <code>identity_check=&quot;ok&quot;</code>
 and, with nothing against it, is allowed. The badge shows no trust
 level for it.</li>
-<li>CII's &quot;no such user&quot; is read from the answer's shape alone: an answer
+<li>CII's &quot;no such user&quot; is one of two answers. The first is an answer
 with no error at all, whose <code>getEndUser</code> is null or holds a present,
 null <code>endUserDetails</code> (the published <code>GetEndUserOutput!</code> answer for a
-user CII has no record of). No error is ever that answer, whatever it
-says, what code it carries or where it sits: telling &quot;User … not found&quot;
+user CII has no record of). The second is what the live API actually
+sends for such a login, captured by spike S5 on 2026-11-06: <code>data</code>
+null and one error on <code>getEndUser</code>, <code>errorType</code> <code>&quot;404&quot;</code>, message
+<code>&quot;Not Found&quot;</code> (<code>CII_UNKNOWN_LOGIN_ANSWER</code>). It is matched exactly,
+every key and value, except each error's <code>locations</code>, which point into
+the query text rather than at CII's verdict. No other error is ever
+that answer, whatever it says, what code it carries or where it sits:
+an answer with another code, other words, an extra key or a second
+error is still an error. Telling &quot;User … not found&quot;
 from &quot;Permission read:user not found&quot; or &quot;Role end-user does not exist&quot;
 by their words is a guess, and so is reading a <code>NOT_FOUND</code> or
 <code>USER_NOT_FOUND</code> code, which says something was not found but not what.
-A wrong guess turns a CII failure into a clean check.
-Spikes S5/S6 capture CII's real answer for a login it has no record of;
-if it is an error, that exact answer is added to the rule and the shared
-table, matched exactly.</li>
+A wrong guess turns a CII failure into a clean check. If CII ever
+changes that answer, the gate reads unknown users as unavailable until
+the new exact answer is added to both copies and the shared table.</li>
 <li>Any answer that carries an error is <code>unavailable</code>, details or not,
 wherever the error sits: on <code>getEndUser</code> itself (with <code>getEndUser</code>
 null, or <code>data</code> null, since <code>GetEndUserOutput!</code> is non-null), on its

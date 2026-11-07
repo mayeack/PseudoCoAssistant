@@ -495,8 +495,10 @@ class FakeCII:
         login = doc["variables"]["login"]
         user = self.users.get(login)
         if user is None:
-            return 200, json.dumps({"data": {"getEndUser": {"endUserDetails": None,
-                                                            "providerEndUserDetails": []}}}).encode()
+            # The live API's answer for a login CII has no record of (spike S5, 2026-11-06).
+            return 200, json.dumps({"data": None, "errors": [{
+                "path": ["getEndUser"], "data": None, "errorType": "404",
+                "locations": [{"line": 1, "column": 38, "sourceName": None}], "message": "Not Found"}]}).encode()
         checks = user.get("failing", [])
         if self.shape == "objects":
             score = {"levelOfTrust": {"level": user.get("trust", "UNKNOWN")}}

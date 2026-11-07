@@ -124,18 +124,24 @@ before any screen or model.
      of yet, such as a new participant account, gets `identity_check="ok"`
      and, with nothing against it, is allowed. The badge shows no trust
      level for it.
-   - CII's "no such user" is read from the answer's shape alone: an answer
+   - CII's "no such user" is one of two answers. The first is an answer
      with no error at all, whose `getEndUser` is null or holds a present,
      null `endUserDetails` (the published `GetEndUserOutput!` answer for a
-     user CII has no record of). No error is ever that answer, whatever it
-     says, what code it carries or where it sits: telling "User … not found"
+     user CII has no record of). The second is what the live API actually
+     sends for such a login, captured by spike S5 on 2026-11-06: `data`
+     null and one error on `getEndUser`, `errorType` `"404"`, message
+     `"Not Found"` (`CII_UNKNOWN_LOGIN_ANSWER`). It is matched exactly,
+     every key and value, except each error's `locations`, which point into
+     the query text rather than at CII's verdict. No other error is ever
+     that answer, whatever it says, what code it carries or where it sits:
+     an answer with another code, other words, an extra key or a second
+     error is still an error. Telling "User … not found"
      from "Permission read:user not found" or "Role end-user does not exist"
      by their words is a guess, and so is reading a `NOT_FOUND` or
      `USER_NOT_FOUND` code, which says something was not found but not what.
-     A wrong guess turns a CII failure into a clean check.
-     Spikes S5/S6 capture CII's real answer for a login it has no record of;
-     if it is an error, that exact answer is added to the rule and the shared
-     table, matched exactly.
+     A wrong guess turns a CII failure into a clean check. If CII ever
+     changes that answer, the gate reads unknown users as unavailable until
+     the new exact answer is added to both copies and the shared table.
    - Any answer that carries an error is `unavailable`, details or not,
      wherever the error sits: on `getEndUser` itself (with `getEndUser`
      null, or `data` null, since `GetEndUserOutput!` is non-null), on its

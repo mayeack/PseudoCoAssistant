@@ -241,12 +241,13 @@ class FakeServices:
         login = body.get("variables", {}).get("login")
         user = self.cii.get(login)
         if user is None:
-            # The published schema's answer for a user CII has no record of
-            # (GetEndUserOutput! with null details), the same as the Mac's
-            # tests/lab5_fakes.FakeCII; the other "no such user" shapes are in
-            # tests/fixtures/cii_end_user_answers.json.
-            return httpx.Response(200, json={"data": {"getEndUser": {"endUserDetails": None,
-                                                                     "providerEndUserDetails": []}}})
+            # The live API's answer for a login CII has no record of (spike S5,
+            # 2026-11-06), at the gate's query's position, as the Mac's
+            # tests/lab5_fakes.FakeCII answers too; the other "no such user"
+            # shapes are in tests/fixtures/cii_end_user_answers.json.
+            return httpx.Response(200, json={"data": None, "errors": [{
+                "path": ["getEndUser"], "data": None, "errorType": "404",
+                "locations": [{"line": 1, "column": 51, "sourceName": None}], "message": "Not Found"}]})
         return httpx.Response(200, json={"data": {"getEndUser": {"endUserDetails": {
             "login": login, "status": "ACTIVE", "failingChecks": user["failingChecks"],
             "endUserTrustScore": {"levelOfTrust": user["levelOfTrust"], "lastUpdated": "2026-11-05T09:00:00Z"}}}}})

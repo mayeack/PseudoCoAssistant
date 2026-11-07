@@ -608,15 +608,23 @@ def test_cii_client() -> None:
         return (isinstance(node, ast.If) and not node.orelse and len(node.body) == 1
                 and isinstance(node.body[0], ast.Return))
 
-    def turns_away_errors(fn):
-        """fn's first statement is `if ... or <answer>.get("errors") not in
-        (None, []) or ...: return False`."""
+    def turns_away_errors(fn, exact):
+        """fn starts with `if <exact>(<answer>): return True` (CII's own answer
+        for a login it has no record of, matched exactly), and then with
+        `if ... or <answer>.get("errors") not in (None, []) or ...: return
+        False`: every other answer that carries an error is turned away there."""
         body = docless(fn)
-        if not (fn.args.args and body and lone_return(body[0]) and isinstance(body[0].body[0].value, ast.Constant)
-                and body[0].body[0].value.value is False):
+        arg = fn.args.args[0].arg if fn.args.args else None
+        if not arg or len(body) < 2 or not lone_return(body[0]) or not lone_return(body[1]):
             return False
-        test = body[0].test
-        guard = ast.dump(ast.parse(f'{fn.args.args[0].arg}.get("errors") not in (None, [])', mode="eval").body)
+        call, first_value, guard_value = body[0].test, body[0].body[0].value, body[1].body[0].value
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == exact
+                and len(call.args) == 1 and not call.keywords and isinstance(call.args[0], ast.Name)
+                and call.args[0].id == arg and isinstance(first_value, ast.Constant) and first_value.value is True
+                and isinstance(guard_value, ast.Constant) and guard_value.value is False):
+            return False
+        test = body[1].test
+        guard = ast.dump(ast.parse(f'{arg}.get("errors") not in (None, [])', mode="eval").body)
         return any(ast.dump(operand) == guard for operand in
                    (test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or) else [test]))
 
@@ -672,14 +680,40 @@ def test_cii_client() -> None:
             return ""
         return f"{name} is bound at line(s) {', '.join(str(getattr(n, 'lineno', '?')) for n in found) or 'none'}"
 
-    for label, tree, name in (("the gate's", app_tree, "_cii_not_found"), ("the self-check's", mac_tree, "not_found")):
+    # The one error that is "no such user": CII's own answer for a login it has
+    # no record of (spike S5, 2026-11-06), matched exactly. Its constant is the
+    # same in both copies and is the table's captured answer, each error's
+    # locations aside; its matcher is the same code in both; neither is rebound.
+    table = json.loads((ROOT / "tests" / "fixtures" / "cii_end_user_answers.json").read_text())
+    live = next(c["body"] for c in table["cases"] if c["name"].startswith(
+        "CII's answer for a login it has no record of, as the live API gave it"))
+    captured = {**live, "errors": [{k: v for k, v in e.items() if k != "locations"} for e in live["errors"]]}
+
+    def constant(tree, name):
+        node = next(n for n in tree.body if isinstance(n, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == name for t in n.targets))
+        return ast.literal_eval(node.value)
+
+    exact = (("the gate's", app_tree, "_cii_not_found", "_cii_unknown_login", "CII_UNKNOWN_LOGIN_ANSWER"),
+             ("the self-check's", mac_tree, "not_found", "unknown_login", "UNKNOWN_LOGIN_ANSWER"))
+    check("CII 'no such user', the one error that is it: CII's own answer for a login it has no record of, the same "
+          "constant in both copies and the table's live answer (spike S5), each error's locations aside; the same "
+          "matcher code in both, which compares the whole answer with that constant",
+          all(constant(tree, const) == captured for _, tree, _, _, const in exact)
+          and canonical(function(app_tree, "_cii_unknown_login")) == canonical(function(mac_tree, "unknown_login"))
+          and all(any(isinstance(n, ast.Name) and n.id == const for n in ast.walk(function(tree, matcher)))
+                  for _, tree, _, matcher, const in exact)
+          and all(len(module_bindings(tree, const)) == 1 and not bound_once(tree, matcher)
+                  for _, tree, _, matcher, const in exact), json.dumps(captured))
+    for label, tree, name, matcher, _ in exact:
         fn = function(tree, name)
         rebound = bound_once(tree, name)
-        check(f"CII 'no such user', {label} copy ({name}): its first statement returns False for every answer that "
-              "carries an error (errors not absent, null or []), so no rule after it, whatever it reads, makes an "
-              "error 'no such user'; and nothing in its module rebinds or wraps it",
-              turns_away_errors(fn) and not rebound,
-              rebound or (ast.unparse(docless(fn)[0]) if docless(fn) else f"{name} is empty"))
+        check(f"CII 'no such user', {label} copy ({name}): its first statement is the exact match ({matcher}) and "
+              "its second returns False for every other answer that carries an error (errors not absent, null or "
+              "[]), so no rule after them, whatever it reads, makes an error 'no such user'; and nothing in its "
+              "module rebinds or wraps it",
+              turns_away_errors(fn, matcher) and not rebound,
+              rebound or "; ".join(ast.unparse(st) for st in docless(fn)[:2]) or f"{name} is empty")
 
     app_fns = {n.name: n for n in app_tree.body if isinstance(n, ast.FunctionDef)}
     under_rule = first_under(app_fns["_cii_parse"], "_cii_not_found")

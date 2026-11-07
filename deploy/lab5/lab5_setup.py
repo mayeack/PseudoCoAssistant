@@ -469,17 +469,18 @@ _SOURCE_FIX = {"duo": "the Status app's keys (Keychain items pseudoco-lab5-duo-s
 # CII did answer: the box's API client got a token, so its ID and secret are
 # right and re-entering them fixes nothing. An error that stays in the answer
 # is what that client may read (its role or scopes in CII: every refusal of a
-# permission, scope or role is an error, never "no such user"), a query the
-# tenant rejects, or CII's answer for a login it has no record of; spikes
-# S5/S6 pin the last two. The row carries only the code, so the advice names
+# permission, scope or role is an error, never "no such user"), or a query
+# the tenant rejects (spikes S5/S6 pin the query). CII's own answer for a
+# login it has no record of is an error too, but the gate reads it, matched
+# exactly, as "no such user", so it never reaches this row as one. The row
+# carries only the code, so the advice names
 # the Mac's self-check, which asks with the same API client and prints CII's
 # own message. An answer in a shape the gate cannot read is the query's.
 _CII_ANSWER_FIX = {
     "graphql_error": ("CII's answer, which carried an error (a passing upstream failure is gone by the next status; "
                       "one that stays is the CII API client's role or scopes, which must let it read end users, or "
-                      "an answer spikes S5/S6 pin: a query the tenant rejects, or CII's answer for a login it has "
-                      "no record of. `persona_activity.py selfcheck` on the Mac asks CII with the same API client "
-                      "and prints CII's own message)"),
+                      "a query the tenant rejects: spikes S5/S6 pin the query. `persona_activity.py selfcheck` on the "
+                      "Mac asks CII with the same API client and prints CII's own message)"),
     "bad_response": ("CII's answer, in a shape the gate cannot read (a passing upstream failure is gone by the next "
                      "status; one that stays means the query does not match the tenant: spikes S5/S6 pin it)"),
 }

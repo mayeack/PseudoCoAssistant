@@ -14,12 +14,13 @@ tests/test_identity_personas.py pins the two together):
 carries ``failingChecks`` and ``endUserTrustScore { levelOfTrust }``. A user
 CII has no record of yet reads the way the gate reads it (``not_found``): an
 answer with no error at all whose ``getEndUser`` is null or holds a present,
-null ``endUserDetails``. Any answer that carries an error is a failed query,
-never "not in CII yet", whatever the error says, what code it carries or what
-its details hold: reading a missing user from the words of a message, or from
-a code such as ``USER_NOT_FOUND``, is a guess that a permission or scope error
-can pass. If spikes S5/S6 show CII answers an unknown login with
-an error, that exact answer is added to both copies and the shared table.
+null ``endUserDetails``, or CII's own error for a login it has no record of,
+matched exactly (``UNKNOWN_LOGIN_ANSWER``, the live API's answer captured on
+2026-11-06). Any other answer that carries an error is a failed query, never
+"not in CII yet", whatever the error says, what code it carries or what its
+details hold: reading a missing user from the words of a message, or from a
+code such as ``USER_NOT_FOUND``, is a guess that a permission or scope error
+can pass.
 ``tests/fixtures/cii_end_user_answers.json`` holds the cases the two must read
 the same way. Spikes S5/S6 confirm the shape on the tenant; personas.yaml ``cii.end_user_query``
 overrides the query, and an override must keep that shape, which is what the
@@ -60,22 +61,44 @@ def _check_name(value: Any) -> str:
     return str(value or "").strip()
 
 
+#: CII's own answer for a login it has no record of (the gate's
+#: ``identity_lookup.CII_UNKNOWN_LOGIN_ANSWER``; tests/test_identity_personas.py
+#: pins the two equal): matched exactly, each error's ``locations`` aside.
+UNKNOWN_LOGIN_ANSWER = {"data": None, "errors": [{"path": ["getEndUser"], "data": None,
+                                                  "errorType": "404", "message": "Not Found"}]}
+
+
+def unknown_login(doc: Any) -> bool:
+    """Is this answer, exactly, CII's error for a login it has no record of
+    (``UNKNOWN_LOGIN_ANSWER``), each error's ``locations`` aside? The gate's
+    ``identity_lookup._cii_unknown_login``."""
+    if not isinstance(doc, dict) or not isinstance(doc.get("errors"), list):
+        return False
+    errors = [{k: v for k, v in e.items() if k != "locations"} if isinstance(e, dict) else e
+              for e in doc["errors"]]
+    return {**doc, "errors": errors} == UNKNOWN_LOGIN_ANSWER
+
+
 def not_found(doc: Any) -> bool:
     """Is this GraphQL answer CII's "no such user"? The gate's rule
-    (``identity_lookup._cii_not_found``): an answer with ``data`` and no error
-    at all, whose ``getEndUser`` is null or holds a present, null
-    ``endUserDetails``. An answer with any error never is, whatever it says or
-    what code it carries.
+    (``identity_lookup._cii_not_found``): CII's error for a login it has no
+    record of, matched exactly (``unknown_login``), or an answer with ``data``
+    and no error at all, whose ``getEndUser`` is null or holds a present, null
+    ``endUserDetails``. Any other answer with an error never is, whatever it
+    says or what code it carries.
     No error at all is ``errors`` absent, null or an empty list; any other
     value carries one, a falsy one (``{}``, ``""``, 0, false) included, here
     and in ``parse_end_user``. tests/test_identity_personas.py pins this code
-    to the gate's copy and pins the path to it: its first statement turns
-    away every answer that carries an error before anything reads it,
+    to the gate's copy and pins the path to it: after the one exact answer,
+    its errors guard turns away every answer that carries an error before
+    anything else reads it,
     ``parse_end_user``'s first statement (under this rule) is the only
     ``found: False`` the Mac's tools write and nothing else returns before
     its errors guard, and CIIClient hands it the transport's answer
     untouched. It also sends every error the table holds and every failed
     request through CIIClient.end_user and the self-check's row."""
+    if unknown_login(doc):
+        return True
     if not isinstance(doc, dict) or doc.get("errors") not in (None, []) or "data" not in doc:
         return False
     data = doc.get("data")
@@ -100,9 +123,9 @@ def parse_end_user(doc: Any) -> Dict[str, Any]:
     if errors not in (None, []):
         first = errors[0] if isinstance(errors, list) and errors else errors
         message = str(first.get("message") if isinstance(first, dict) else first)[:200]
-        raise Lab5Error(f"CII query failed ({message}). An error is never read as \"not in CII yet\": if CII "
-                        "answers a login it has no record of this way, spikes S5/S6 pin that answer; otherwise "
-                        "check the API client and cii.end_user_query in scripts/identity/personas.yaml")
+        raise Lab5Error(f"CII query failed ({message}). Apart from CII's own answer for a login it has no record "
+                        "of, an error is never read as \"not in CII yet\": check the API client and "
+                        "cii.end_user_query in scripts/identity/personas.yaml")
     data = doc.get("data") if isinstance(doc, dict) else None
     user = data.get("getEndUser") if isinstance(data, dict) else None
     details = user.get("endUserDetails") if isinstance(user, dict) else None

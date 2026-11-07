@@ -266,8 +266,10 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   since the app started, a Duo outage never hides that user's CII block; a
   source that was not asked is `unavailable`, never `not_found`, and "no such
   user" from CII is an answer (`identity_check="ok"`), not an outage. It is
-  read from the answer's shape alone (no error, details null): an error is
-  never "no such user", whatever its words say.
+  an answer with no error and null details, or CII's own error for a login
+  it has no record of (`CII_UNKNOWN_LOGIN_ANSWER`, captured from the live
+  API), matched exactly but for `locations`; any other error is never "no
+  such user", whatever its words or code say.
 - **No side effects in the chain.** The gate never revokes and never writes
   to Duo or CII. Revocation is the middleware's pull: Duo `disabled` revokes
   the session (a tombstone); `locked out` only blocks turns. `revoke()` is one

@@ -1126,8 +1126,9 @@ def test_status_victim_check() -> None:
              {"sources": {"duo": "ok", "cii": "unavailable"}, "errors": {"cii": "graphql_error"}, "available": False,
               "verdict": "allow", "reasons": []},
              "FAIL", ["cannot verify avery.kim (cii graphql_error)", "the CII API client's role or scopes",
-                      "persona_activity.py selfcheck", "a login it has no record of"],
-             ["query does not match the tenant", "pseudoco-lab5-cii-"]),
+                      "persona_activity.py selfcheck", "a query the tenant rejects"],
+             # CII's own answer for an unknown login reads as "no such user" (matched exactly), never as an error
+             ["query does not match the tenant", "pseudoco-lab5-cii-", "a login it has no record of"]),
             ("an answer in a shape the gate cannot read: FAIL, and the query is what to check",
              {"sources": {"duo": "ok", "cii": "unavailable"}, "errors": {"cii": "bad_response"}, "available": False,
               "verdict": "allow", "reasons": []},

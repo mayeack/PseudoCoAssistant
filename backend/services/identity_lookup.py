@@ -43,11 +43,12 @@ answered about this user, where "no such user" (``not_found``) is an answer:
 a user CII has no record of yet (a new participant account) is not an
 outage. ``sources`` says what each one actually answered; a source that could
 not be asked (no CII login known) is ``unavailable`` (error ``no_login``),
-never ``not_found``. CII's "no such user" is read from the answer's shape
-alone, an answer with no error at all (``_cii_not_found``): a failure taken
-for one would make the check "ok" and let the turn through even with
-``IDENTITY_FAIL_OPEN`` off, so no error ever counts as one, whatever it says
-or what code it carries.
+never ``not_found``. CII's "no such user" (``_cii_not_found``) is an answer
+with no error at all, or CII's own error for a login it has no record of,
+matched exactly (``CII_UNKNOWN_LOGIN_ANSWER``): a failure taken for one would
+make the check "ok" and let the turn through even with ``IDENTITY_FAIL_OPEN``
+off, so no other error ever counts as one, whatever it says or what code it
+carries.
 """
 from __future__ import annotations
 
@@ -455,37 +456,61 @@ def _cii_query(login: str, token: str) -> Tuple[Optional[httpx.Response], Option
     return response, None
 
 
+#: CII's own answer for a login it has no record of, as the live API gave it on
+#: 2026-11-06 (spike S5): ``getEndUser`` fails with a 404 and ``data`` is null.
+#: ``_cii_unknown_login`` matches it exactly, every key and value, except each
+#: error's ``locations``: they point into the query text (the gate's and the
+#: Mac's queries put ``getEndUser`` at different columns), not at CII's
+#: verdict. Any other error, another code or wording included, stays an error.
+CII_UNKNOWN_LOGIN_ANSWER = {"data": None, "errors": [{"path": ["getEndUser"], "data": None,
+                                                      "errorType": "404", "message": "Not Found"}]}
+
+
+def _cii_unknown_login(body: Any) -> bool:
+    """Whether a GraphQL answer is, exactly, CII's error for a login it has no
+    record of (``CII_UNKNOWN_LOGIN_ANSWER``), each error's ``locations`` aside."""
+    if not isinstance(body, Mapping) or not isinstance(body.get("errors"), list):
+        return False
+    errors = [{k: v for k, v in e.items() if k != "locations"} if isinstance(e, Mapping) else e
+              for e in body["errors"]]
+    return {**body, "errors": errors} == CII_UNKNOWN_LOGIN_ANSWER
+
+
 def _cii_not_found(body: Any) -> bool:
-    """Whether a GraphQL answer is CII's own "no such user": an answer with
-    ``data`` and no error at all, whose ``getEndUser`` is null or holds a
-    present, null ``endUserDetails``. The second is the published schema's
-    answer for a user CII has no record of yet (``GetEndUserOutput!`` with a
-    nullable ``endUserDetails``). No error at all is ``errors`` absent, null
+    """Whether a GraphQL answer is CII's own "no such user": CII's error for a
+    login it has no record of, matched exactly (``_cii_unknown_login``, the
+    live API's answer), or an answer with ``data`` and no error at all, whose
+    ``getEndUser`` is null or holds a present, null ``endUserDetails`` (the
+    published schema's answer for a user CII has no record of yet:
+    ``GetEndUserOutput!`` with a nullable ``endUserDetails``). No error at all is ``errors`` absent, null
     or an empty list; any other value carries one, a falsy one (``{}``,
     ``""``, 0, false) included, here and in ``_cii_parse``.
 
-    An answer that carries any error is never this answer, whatever the error
-    says, what code it carries or where it sits. Telling a missing user from a
+    Apart from that one exact answer, an answer that carries any error is
+    never this answer, whatever the error says, what code it carries or where
+    it sits. Telling a missing user from a
     missing permission, scope, role or tenant by the words of a message is a
     guess, and so is reading a code (a ``NOT_FOUND`` or ``USER_NOT_FOUND``
     says something was not found, not what); a wrong guess turns a CII
     failure into a clean check (an allow under IDENTITY_FAIL_OPEN=false).
-    Spikes S5/S6 capture CII's real answer for a login it has no record of;
-    if that answer is an error, it is added here and to the shared table
-    matched exactly, never by its wording or a code.
+    Spike S5 captured CII's real answer for a login it has no record of
+    (2026-11-06); it is an error, so it is matched exactly here and in the
+    shared table, never by its wording or a code alone.
 
     ``deploy/lab5/lab5_cii.py`` applies the same rule on the Mac,
     tests/test_identity_personas.py pins the two copies' code together, and
     ``tests/fixtures/cii_end_user_answers.json`` holds the answers both must
     read the same way. Since no table lists every message or code a rule
-    could key on, that suite also pins the path to it: this function's first
-    statement turns away every answer that carries an error before anything
-    reads it, ``_cii_parse`` makes ``NOT_FOUND`` only under this rule and
+    could key on, that suite also pins the path to it: after the one exact
+    answer, this function's errors guard turns away every answer that
+    carries an error before anything else reads it, ``_cii_parse`` makes ``NOT_FOUND`` only under this rule and
     answers nothing but a failure until its errors guard, and ``_cii_fetch``
     hands it CII's answer untouched. tests/test_identity_gate.py sends every
     error the table holds and every failed request (a status, a token
     failure, a transport error, a stale cache) through the whole lookup and
     the gate's decision."""
+    if _cii_unknown_login(body):
+        return True
     if not isinstance(body, Mapping) or body.get("errors") not in (None, []) or "data" not in body:
         return False
     data = body.get("data")
