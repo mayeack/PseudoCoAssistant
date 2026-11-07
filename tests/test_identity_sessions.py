@@ -916,9 +916,10 @@ def test_legacy_engine() -> None:
                                   expires_at=datetime(2026, 1, 2))
     sid = f"legacy-{uuid.uuid4().hex[:8]}"
     # A policy-blocked turn: logged before any model call, so nothing is stubbed.
+    # The Internal Policy Engine is opt-in since 4.22.1, so the turn enables it.
     RecommendationEngine().process_message(session_id=sid, user_message="I want to end my life",
                                            conversation_history=[], enduser_id="victim.user",
-                                           identity_session=snap.to_state())
+                                           identity_session=snap.to_state(), internal_policy_review=True)
     last = (_events("governance", session_id=sid) or [{}])[-1]
     check("legacy: the verified username is the end user, with identity_verified / identity_source",
           last.get("policy_blocked") is True and last.get("enduser_id") == "nina.osei"
@@ -929,7 +930,8 @@ def test_legacy_engine() -> None:
           and esc[0].get("identity_source") == "duo", str(esc)[:300])
     sid = f"legacy-{uuid.uuid4().hex[:8]}"
     RecommendationEngine().process_message(session_id=sid, user_message="I want to end my life",
-                                           conversation_history=[], enduser_id="t.nguyen")
+                                           conversation_history=[], enduser_id="t.nguyen",
+                                           internal_policy_review=True)
     last = (_events("governance", session_id=sid) or [{}])[-1]
     check("legacy: an anonymous turn is unchanged (no identity keys)",
           last.get("enduser_id") == "t.nguyen" and "identity_verified" not in last)

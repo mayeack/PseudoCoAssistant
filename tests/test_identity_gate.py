@@ -1328,8 +1328,8 @@ def test_rules() -> None:
     check("UI: the Unblock me toggle sits in #identityBanner (never the Demo Controls drawer), green accent",
           'id="identityUnblockToggle"' in banner and "peer-checked:bg-green-600" in banner
           and "identityUnblockToggle" not in drawer and "unblock" not in drawer.lower())
-    check("UI: the toggle calls /api/identity/unblock and /reblock; chat.js?v=40",
-          "'/api/identity/unblock' : '/api/identity/reblock'" in js and "/static/js/chat.js?v=40" in page)
+    check("UI: the toggle calls /api/identity/unblock and /reblock; chat.js?v=41",
+          "'/api/identity/unblock' : '/api/identity/reblock'" in js and "/static/js/chat.js?v=41" in page)
     banners = _banner_for({
         "fail_closed": {"signed_in": True, "username": "nina.osei", "verdict": "block", "identity_check": "unavailable",
                         "reasons": ["identity_unavailable"], "reasons_text": "your identity could not be verified"},
