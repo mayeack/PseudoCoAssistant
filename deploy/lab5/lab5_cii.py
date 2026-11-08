@@ -38,9 +38,10 @@ import base64
 import binascii
 import json
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from lab5_common import Keychain, Lab5Error
+from lab5_common import Keychain, Lab5Error, file_lock, private_dir
 
 CII_ITEMS = {"client_id": "pseudoco-lab5-cii-client-id", "client_secret": "pseudoco-lab5-cii-client-secret",
              "token_url": "pseudoco-lab5-cii-token-url", "api_url": "pseudoco-lab5-cii-api-url"}
@@ -49,6 +50,13 @@ CII_ITEMS = {"client_id": "pseudoco-lab5-cii-client-id", "client_secret": "pseud
 # (spike S16, 2026-11-07: HTTP 429, x-ratelimit-limit 6, reset on the hour).
 # A token lasts 24 h, and minting one does not end the earlier ones.
 TOKENS_PER_HOUR = 6
+# The Mac's one cached token (Keychain item value "<exp>=<token>"): every Mac
+# command (lab5-setup, the persona self-check, a spike's check) reuses it until
+# it nears expiry, so the facilitator's own checks never use up the hour.
+TOKEN_ITEM = "pseudoco-lab5-cii-access-token"
+TOKEN_ITEM_MAX = 4096
+TOKEN_LOCK = "cii-token.lock"
+MIN_LEFT_S = 600.0          # what a Mac command needs left in the cached token
 END_USER_QUERY = ("query Lab5EndUser($login: String!) { getEndUser(login: $login) "
                   "{ endUserDetails { login status failingChecks endUserTrustScore { levelOfTrust lastUpdated } } } }")
 
@@ -169,9 +177,56 @@ def parse_end_user(doc: Any) -> Dict[str, Any]:
             "found": True}
 
 
+class CIIHTTPError(Lab5Error):
+    """CII answered with an HTTP status other than 200."""
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class TokenCache:
+    """The Mac's one CII access token, kept in the Keychain (``TOKEN_ITEM``) and
+    shared by every Mac command under a file lock in ``lock_dir``. A command
+    reuses it while it has ``min_left_s`` to run; otherwise one new token is
+    minted and kept. Keeping it is best effort: a Keychain that refuses the
+    write still leaves the command its token."""
+
+    def __init__(self, keychain: Keychain, lock_dir: Path, clock: Callable[[], float] = time.time) -> None:
+        self.keychain, self.lock_dir, self.clock = keychain, Path(lock_dir), clock
+
+    def _read(self) -> Optional[Tuple[str, float]]:
+        raw = self.keychain.get(TOKEN_ITEM) or ""
+        exp, sep, token = raw.partition("=")
+        try:
+            return (token, float(exp)) if sep and token else None
+        except ValueError:
+            return None
+
+    def get(self, client: "CIIClient", min_left_s: float = MIN_LEFT_S) -> Tuple[str, float]:
+        """The cached token and its expiry, or a new one ``client`` mints."""
+        private_dir(self.lock_dir)
+        with file_lock(self.lock_dir / TOKEN_LOCK):
+            cached = self._read()
+            if cached and cached[1] - self.clock() >= min_left_s:
+                return cached
+            token, minted_expiry = client.mint()
+            expires = float(int(minted_expiry))      # what is kept: whole seconds
+            try:
+                self.keychain.store(TOKEN_ITEM, f"{int(expires)}={token}", max_len=TOKEN_ITEM_MAX)
+            except Lab5Error:
+                pass
+            return token, expires
+
+    def drop(self) -> None:
+        """Forget the cached token (CII refused it)."""
+        self.keychain.delete(TOKEN_ITEM)
+
+
 class CIIClient:
     def __init__(self, client_id: str, client_secret: str, token_url: str, api_url: str,
-                 transport: Transport, query: str = END_USER_QUERY, clock: Callable[[], float] = time.time) -> None:
+                 transport: Transport, query: str = END_USER_QUERY, clock: Callable[[], float] = time.time,
+                 cache: Optional[TokenCache] = None) -> None:
         for url, what in ((token_url, "token URL"), (api_url, "API URL")):
             if not url.lower().startswith("https://"):
                 raise Lab5Error(f"the CII {what} in the Keychain must be an https URL")
@@ -180,6 +235,7 @@ class CIIClient:
         self._transport, self.query, self._clock = transport, query or END_USER_QUERY, clock
         self._token: Optional[str] = None
         self._expires = 0.0
+        self._cache = cache
 
     def _post(self, url: str, payload: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
         body = json.dumps(payload).encode()
@@ -193,7 +249,7 @@ class CIIClient:
             raise Lab5Error(f"CII: {url.split('/')[2]} answered HTTP 429: this API client's tokens for the hour are "
                             f"used up (CII gives each client {TOKENS_PER_HOUR} an hour); they come back on the hour")
         if status != 200:
-            raise Lab5Error(f"CII: {url.split('/')[2]} answered HTTP {status}")
+            raise CIIHTTPError(f"CII: {url.split('/')[2]} answered HTTP {status}", status)
         try:
             return json.loads(data or b"{}")
         except ValueError:
@@ -217,25 +273,46 @@ class CIIClient:
     def token(self) -> str:
         if self._token and self._clock() < self._expires:
             return self._token
-        token, expires = self.mint()
+        token, expires = self._cache.get(self) if self._cache is not None else self.mint()
         self._token = token
         self._expires = max(self._clock() + 60.0, expires - 300.0)
         return token
 
     def end_user(self, login: str) -> Dict[str, Any]:
-        """``{"trust": "NEUTRAL", "failing_checks": [...], "found": bool}`` (``parse_end_user``)."""
-        doc = self._post(self.api_url, {"query": self.query, "variables": {"login": login}},
-                         {"Authorization": f"Bearer {self.token()}"})
+        """``{"trust": "NEUTRAL", "failing_checks": [...], "found": bool}`` (``parse_end_user``).
+        A cached token CII refuses (401) is dropped, and the query is asked once
+        more with a new one."""
+        payload = {"query": self.query, "variables": {"login": login}}
+        try:
+            doc = self._post(self.api_url, payload, {"Authorization": f"Bearer {self.token()}"})
+        except CIIHTTPError as exc:
+            if exc.status != 401 or self._cache is None:
+                raise
+            self._cache.drop()
+            self._token = None
+            doc = self._post(self.api_url, payload, {"Authorization": f"Bearer {self.token()}"})
         return parse_end_user(doc)
 
 
-def cii_client(keychain: Keychain, transport: Transport, query: str = "") -> CIIClient:
+def cii_client(keychain: Keychain, transport: Transport, query: str = "",
+               cache_dir: Optional[Path] = None) -> CIIClient:
+    """The Mac's CII client. With ``cache_dir`` (the Lab 5 state directory) its
+    token is the Mac's cached one (``TokenCache``); without it, each run mints
+    its own."""
     return CIIClient(
         keychain.require(CII_ITEMS["client_id"], "CII API client: client ID"),
         keychain.require(CII_ITEMS["client_secret"], "CII API client: client secret"),
         keychain.require(CII_ITEMS["token_url"], "CII API client: token URL", secret=False),
         keychain.require(CII_ITEMS["api_url"], "CII API client: API URL", secret=False),
-        transport, query=query)
+        transport, query=query, cache=TokenCache(keychain, cache_dir) if cache_dir is not None else None)
+
+
+def access_token(keychain: Keychain, transport: Transport, cache_dir: Path,
+                 min_left_s: float) -> Tuple[str, float]:
+    """The token ``lab5-setup`` pushes to the boxes and its expiry: the Mac's
+    cached one when it has ``min_left_s`` left, else a new one, which becomes
+    the Mac's cached token too."""
+    return TokenCache(keychain, cache_dir).get(cii_client(keychain, transport), min_left_s)
 
 
 def failing(checks: List[str], wanted: str) -> bool:

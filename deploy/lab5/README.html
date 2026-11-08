@@ -161,6 +161,11 @@ deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at
 <td>same</td>
 </tr>
 <tr>
+<td><code>pseudoco-lab5-cii-access-token</code></td>
+<td>(none, Mac only)</td>
+<td>written by the tools, never by you: the Mac's cached CII access token (see &quot;The CII token&quot;)</td>
+</tr>
+<tr>
 <td>your choice, per room</td>
 <td>(none)</td>
 <td>the room stack's HEC token. Optional: only its last 4 characters are compared with the box's destination.</td>
@@ -448,6 +453,14 @@ deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at
 </ul>
 </li>
 <li><strong>Refresh it on lab-day morning.</strong> A token <code>up</code> minted the day before runs out during the lab, so run <code>cii-token</code>, then <code>status</code>.</li>
+<li><strong>The Mac's own token is cached.</strong> Every Mac command uses one cached token, kept in the Keychain item <code>pseudoco-lab5-cii-access-token</code>: <code>up</code>, <code>cii-token</code>, <code>persona_activity.py selfcheck</code> and the spike checks.
+<ul>
+<li>A command reuses it while it has 10 minutes to run.</li>
+<li><code>up</code> and <code>cii-token</code> reuse it for the boxes only while it has 20 h left; otherwise they mint a fresh one and keep that.</li>
+<li>A token CII refuses (401) is dropped, and one new one is minted.</li>
+<li>The facilitator's own checks therefore never use up the hour.</li>
+</ul>
+</li>
 <li><strong>A refused mint changes nothing.</strong> If CII answers 429 when the Mac mints, the box fails before anything is written, and the message says the hour's tokens are used up. Wait for the top of the hour. <code>persona_activity.py selfcheck</code> mints from the same API client, at most once a run.</li>
 </ul>
 <h2>Secrets</h2>

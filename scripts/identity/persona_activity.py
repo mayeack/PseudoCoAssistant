@@ -335,7 +335,8 @@ def selfcheck(act: Activity, chosen: List[Persona], gate: bool, notify: bool) ->
                  f"{'on' if cast.baseline_enabled else 'off'}")
     rows: List[Dict[str, str]] = []
     try:
-        client: Optional[cii.CIIClient] = cii.cii_client(act.keychain, deps.https, cast.cii_query)
+        client: Optional[cii.CIIClient] = cii.cii_client(act.keychain, deps.https, cast.cii_query,
+                                                         cache_dir=act.state.dir.parent)
     except Lab5Error as exc:
         client = None
         rows.append({"status": "FAIL" if gate else "WARN", "persona": "cii", "detail": f"trust not checked: {exc}"})

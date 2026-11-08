@@ -59,6 +59,7 @@ Exit codes: `0` means every box, participant account and card is fine. `1` means
 | `pseudoco-lab5-cii-client-secret` | (none, Mac only) | same |
 | `pseudoco-lab5-cii-token-url` | (none, Mac only) | same |
 | `pseudoco-lab5-cii-api-url` | `CII_API_URL` | same |
+| `pseudoco-lab5-cii-access-token` | (none, Mac only) | written by the tools, never by you: the Mac's cached CII access token (see "The CII token") |
 | your choice, per room | (none) | the room stack's HEC token. Optional: only its last 4 characters are compared with the box's destination. |
 | `pseudoco-lab5-duo-provisioner-ikey` | (none, Mac only) | Admin API app **PseudoCo Provisioner** (Grant resource read + write): participant accounts and the persona cast. It never leaves the Mac. |
 | `pseudoco-lab5-duo-provisioner-skey` | (none, Mac only) | same app |
@@ -254,6 +255,11 @@ CII's token endpoint gives each API client **6 tokens a clock hour**. It answers
   - `WARN` under 8 h (less than a lab day) or when an older `up` left the box minting its own;
   - `FAIL` when it has expired or is missing.
 - **Refresh it on lab-day morning.** A token `up` minted the day before runs out during the lab, so run `cii-token`, then `status`.
+- **The Mac's own token is cached.** Every Mac command uses one cached token, kept in the Keychain item `pseudoco-lab5-cii-access-token`: `up`, `cii-token`, `persona_activity.py selfcheck` and the spike checks.
+  - A command reuses it while it has 10 minutes to run.
+  - `up` and `cii-token` reuse it for the boxes only while it has 20 h left; otherwise they mint a fresh one and keep that.
+  - A token CII refuses (401) is dropped, and one new one is minted.
+  - The facilitator's own checks therefore never use up the hour.
 - **A refused mint changes nothing.** If CII answers 429 when the Mac mints, the box fails before anything is written, and the message says the hour's tokens are used up. Wait for the top of the hour. `persona_activity.py selfcheck` mints from the same API client, at most once a run.
 
 ## Secrets

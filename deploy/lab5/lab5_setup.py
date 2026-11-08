@@ -1526,6 +1526,7 @@ class Deps:
     connect: Optional[Callable[..., Any]] = None              # (box, password, ctx) -> box session
     cloudflare_transport: Callable[..., Tuple[int, bytes]] = urllib_transport
     keychain_runner: Optional[Callable[..., Any]] = None
+    keychain_stdin_runner: Optional[Callable[..., Any]] = None   # Keychain writes (the cached CII token)
     https: Optional[Callable[[str, str, Dict[str, str]], Tuple[int, bytes]]] = None
     resolve: Optional[Callable[[str], List[str]]] = None
     prompt: Callable[[str], str] = getpass.getpass
@@ -1538,6 +1539,16 @@ class Deps:
     cii_transport: Callable[..., Tuple[int, bytes]] = urllib_transport   # mints the token up / cii-token push
     now: Callable[[], float] = time.time
     notify: Callable[[str, str], None] = desktop_notify
+
+
+def _keychain(redactor: Redactor, deps: "Deps") -> Keychain:
+    """The login Keychain, or the tests' stand-ins for `security` (reads and writes)."""
+    kwargs: Dict[str, Any] = {}
+    if deps.keychain_runner:
+        kwargs["runner"] = deps.keychain_runner
+    if deps.keychain_stdin_runner:
+        kwargs["stdin_runner"] = deps.keychain_stdin_runner
+    return Keychain(redactor, **kwargs)
 
 
 def _resolve(host: str) -> List[str]:
@@ -1958,7 +1969,7 @@ def run_expire(args: argparse.Namespace, deps: Deps) -> int:
         return 2
     private_dir(root)
     reporter = Reporter(redactor, out=out, log_path=root / "runs" / f"{utc_stamp()}-expire.log")
-    keychain = Keychain(redactor, deps.keychain_runner) if deps.keychain_runner else Keychain(redactor)
+    keychain = _keychain(redactor, deps)
     try:
         cast = load_cast(_cast_file(ws))
         admin = duo.admin_api(keychain, deps.duo_transport)
@@ -2029,7 +2040,7 @@ def run_handouts(args: argparse.Namespace, deps: Deps) -> int:
         return 2
     state.ensure()
     reporter = Reporter(redactor, out=out, log_path=state.run_log("handouts"))
-    keychain = Keychain(redactor, deps.keychain_runner) if deps.keychain_runner else Keychain(redactor)
+    keychain = _keychain(redactor, deps)
     try:
         clashes = victim_clashes(state.root, ws, deps.now())
         if clashes:
@@ -2114,8 +2125,7 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
     state = StateStore(deps.state_root or StateStore.default_root(), ws.name)
     state.ensure()
     reporter = Reporter(redactor, out=out, log_path=state.run_log(args.command))
-    ctx = Ctx(ws=ws, state=state, keychain=Keychain(redactor, deps.keychain_runner) if deps.keychain_runner
-              else Keychain(redactor), redactor=redactor, out=reporter,
+    ctx = Ctx(ws=ws, state=state, keychain=_keychain(redactor, deps), redactor=redactor, out=reporter,
               connect=lambda box, pw: (deps.connect(box, pw, ctx) if deps.connect else remote.ParamikoBox(
                   box.host, box.port, box.user, pw, remote.KnownHosts(state.known_hosts), redactor)),
               https=deps.https or _https, resolve=deps.resolve or _resolve, sleep=deps.sleep,
@@ -2123,7 +2133,7 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
               reissue=args.reissue_passcodes, now=deps.now)
     if args.command in ("up", "cii-token"):
         # S16: one token for the run, minted on this Mac only when a box needs one.
-        ctx.cii_mint = lambda: cii.cii_client(ctx.keychain, deps.cii_transport).mint()
+        ctx.cii_mint = lambda: cii.access_token(ctx.keychain, deps.cii_transport, ctx.state.root, TOKEN_KEEP_S)
     with_participants = ws.participants_enabled and args.command in ("check", "up", "status")
     with_codes = with_participants and ws.bypass_codes.enabled      # 4.3: the room personas' handout codes
     try:

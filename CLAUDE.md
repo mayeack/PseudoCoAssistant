@@ -266,8 +266,10 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   in it, then reads CII as `unavailable` (`token_expired`), and never mints
   in its place, not even on a 401 (`token_rejected`). With the API client
   instead (a dev copy), a failed token request is not repeated for
-  `Retry-After`, at least a minute. Never add a code path that mints a
-  token per box, per request or per restart.
+  `Retry-After`, at least a minute. The Mac's tools share one cached token
+  (`lab5_cii.TokenCache`, Keychain item `pseudoco-lab5-cii-access-token`).
+  Never add a code path that mints a token per box, per request, per restart
+  or per Mac command.
 - **Fail open (A3):** an unavailable lookup allows the turn with
   `identity_check="unavailable"`; a block resting on what WAS learned still
   blocks, an `UNTRUSTED` or failing check in a partial CII answer included

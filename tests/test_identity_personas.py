@@ -913,6 +913,79 @@ def test_cii_client() -> None:
               "(Lab5Error), never 'not in CII yet'", not misread, "; ".join(misread)[:600])
 
 
+def test_cii_token_cache() -> None:
+    print("== the Mac's CII token: one cached token, reused across runs (CII gives an API client 6 an hour) ==")
+    login = "a@pseudocoassistant.com"
+    fake = FakeCII()
+    fake.users[login] = {"trust": "NEUTRAL"}
+    kc = FakeKeychain()
+
+    def run_keychain(f: FakeKeychain = kc, stdin_runner: Any = None) -> Keychain:
+        """A fresh Keychain object per run: nothing shared in memory between runs."""
+        return Keychain(Redactor(), runner=f.runner, stdin_runner=stdin_runner or f.stdin_runner)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        cii.cii_client(run_keychain(), fake, cache_dir=root).end_user(login)
+        kept = kc.items.get(cii.TOKEN_ITEM, "")
+        check("the first run mints one token and keeps it in the Keychain as <exp>=<token>",
+              fake.token_requests == 1 and kept.endswith("=cii-access-token-abcdef123456")
+              and kept.split("=")[0].isdigit(), kept)
+        cii.cii_client(run_keychain(), fake, cache_dir=root).end_user(login)
+        cii.cii_client(run_keychain(), fake, cache_dir=root).end_user(login)
+        check("two more runs reuse it: still one token request in all", fake.token_requests == 1)
+        check("the token reaches the Keychain only on `security -i`'s stdin, never argv",
+              all("cii-access-token-abcdef123456" not in " ".join(a) for a in kc.argv)
+              and any("cii-access-token-abcdef123456" in s for s in kc.stdin))
+        check("the lock lives in the state directory, owner-only",
+              (root / cii.TOKEN_LOCK).exists() and stat.S_IMODE(root.stat().st_mode) == 0o700)
+
+        kc.items[cii.TOKEN_ITEM] = f"{int(time.time()) + 60}=cii-access-token-abcdef123456"
+        cii.cii_client(run_keychain(), fake, cache_dir=root).end_user(login)
+        check("a cached token with under 10 minutes left is replaced: one new mint, kept",
+              fake.token_requests == 2 and int(kc.items[cii.TOKEN_ITEM].split("=")[0]) > time.time() + 3600)
+
+        kc.items[cii.TOKEN_ITEM] = f"{int(time.time()) + 86400}=a-token-cii-refuses"
+        info = cii.cii_client(run_keychain(), fake, cache_dir=root).end_user(login)
+        check("a cached token CII refuses (401) is dropped: one new token, the query asked once more, the new one kept",
+              info["trust"] == "NEUTRAL" and fake.token_requests == 3
+              and kc.items[cii.TOKEN_ITEM].endswith("=cii-access-token-abcdef123456"), str(info))
+
+        for bad in ("garbage", "=", "123=", "soon=tok"):
+            kc.items[cii.TOKEN_ITEM] = bad
+            n = fake.token_requests
+            cii.cii_client(run_keychain(), fake, cache_dir=root).end_user(login)
+            check(f"an unreadable cached value {bad!r} is never sent: one new mint", fake.token_requests == n + 1)
+
+        # lab5-setup pushes the cached token to the boxes only with 20 h left (TOKEN_KEEP_S).
+        long_lived = (200, {"access_token": "cii-access-token-abcdef123456", "expires_in": 86400})
+        fake.token_answer = long_lived
+        kc.items[cii.TOKEN_ITEM] = f"{int(time.time()) + 10 * 3600}=cii-access-token-abcdef123456"
+        n = fake.token_requests
+        token, exp = cii.access_token(run_keychain(), fake, root, 20 * 3600)
+        check("lab5-setup with a cached token of 10 h: a fresh one for the boxes, kept as the Mac's",
+              fake.token_requests == n + 1 and exp > time.time() + 23 * 3600
+              and kc.items[cii.TOKEN_ITEM] == f"{int(exp)}={token}")
+        token2, exp2 = cii.access_token(run_keychain(), fake, root, 20 * 3600)
+        check("...and the next lab5-setup run reuses it", fake.token_requests == n + 1 and (token2, exp2) == (token, exp))
+        fake.token_answer = None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        refusing = FakeKeychain()
+        n = fake.token_requests
+        info = cii.cii_client(run_keychain(refusing, lambda argv, stdin: subprocess.CompletedProcess(argv, 1, "", "")),
+                              fake, cache_dir=Path(tmp)).end_user(login)
+        check("a Keychain that refuses the write: the run still has its token, nothing is kept",
+              info["trust"] == "NEUTRAL" and fake.token_requests == n + 1 and cii.TOKEN_ITEM not in refusing.items)
+
+    n = fake.token_requests
+    client = cii.CIIClient(CII["client_id"], CII["client_secret"], CII["token_url"], CII["api_url"], fake)
+    client.end_user(login)
+    client.end_user(login)
+    check("without a cache directory (tests, one-off clients) nothing is read or kept: one token per client",
+          fake.token_requests == n + 1)
+
+
 def test_no_cii_failure_is_not_in_cii_yet() -> None:
     print("== no CII failure is ever 'not in CII yet': every error the shared table holds and every failed "
           "request, through the CII client (transport, token, _post, parse_end_user) and the self-check's row ==")
@@ -993,6 +1066,9 @@ def test_no_cii_failure_is_not_in_cii_yet() -> None:
         wrong = []
         for name, answer, token_answer in rows:
             w.cii.answer, w.cii.token_answer = answer, token_answer
+            # Each case starts with no cached token, as a first run does, so a
+            # token endpoint failure is reached (test_cii_token_cache covers reuse).
+            w.keychain.items.pop(cii.TOKEN_ITEM, None)
             rc, out = w.pa("selfcheck", "--only", "grace.lin", "--no-notify")
             found = details(out)
             if (not any(d.startswith("CII: ") for d in found)
@@ -1153,7 +1229,7 @@ def test_daily_job_crash_notifies() -> None:
 def main() -> int:
     for test in (test_cast_is_disjoint, test_cast_validation, test_keychain_store, test_provision, test_baseline,
                  test_counter_lock, test_takeover, test_replay, test_selfcheck, test_reset_and_teardown,
-                 test_cii_client, test_no_cii_failure_is_not_in_cii_yet, test_launchd,
+                 test_cii_client, test_cii_token_cache, test_no_cii_failure_is_not_in_cii_yet, test_launchd,
                  test_daily_job_crash_notifies):
         try:
             test()

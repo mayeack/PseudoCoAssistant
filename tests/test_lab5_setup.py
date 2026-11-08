@@ -96,17 +96,34 @@ def all_secrets(world: "FakeWorld") -> List[str]:
 
 
 class FakeSecurity:
-    """Stands in for /usr/bin/security; records argv."""
+    """Stands in for /usr/bin/security; records argv. Holds what the tool
+    writes (the Mac's cached CII token) in memory: no test reaches the real
+    Keychain."""
 
     def __init__(self) -> None:
         self.calls: List[List[str]] = []
+        self.written: Dict[str, str] = {}
+        self.writes: List[Tuple[List[str], str]] = []      # `security -i` writes: (argv, the item written)
 
     def __call__(self, argv):
         self.calls.append(list(argv))
         item = argv[argv.index("-s") + 1]
+        if argv[1] == "delete-generic-password":
+            found = self.written.pop(item, None) is not None
+            return subprocess.CompletedProcess(argv, 0 if found else 44, "", "")
+        if item in self.written:
+            return subprocess.CompletedProcess(argv, 0, self.written[item] + "\n", "")
         if item in SECRETS:
             return subprocess.CompletedProcess(argv, 0, SECRETS[item] + "\n", "")
         return subprocess.CompletedProcess(argv, 44, "", "The specified item could not be found in the keychain.\n")
+
+    def stdin(self, argv, stdin):
+        assert argv == ["security", "-i"], argv
+        words = stdin.strip().split()
+        assert words[0] == "add-generic-password" and "-U" in words, words
+        self.writes.append((list(argv), words[words.index("-s") + 1]))
+        self.written[words[words.index("-s") + 1]] = words[words.index("-w") + 1]
+        return subprocess.CompletedProcess(argv, 0, "", "")
 
 
 # --------------------------------------------------------------------------- a Show box
@@ -527,6 +544,7 @@ class FakeWorld:
 
     def deps(self, state_root: Path, out: io.StringIO) -> "ls.Deps":
         return ls.Deps(connect=self.connect, cloudflare_transport=self.cf, keychain_runner=self.security,
+                       keychain_stdin_runner=self.security.stdin,
                        https=self.https, resolve=self.resolve, prompt=self.prompt, state_root=state_root,
                        out=out, sleep=lambda s: None, app_wait_s=0.0, preflight_wait_s=0.0,
                        duo_transport=self.no_duo, cii_transport=self.cii,
@@ -744,6 +762,9 @@ def test_up_status_down() -> None:
         check("no secret in any argv (Keychain, box commands) or URL", not leaked, str(leaked))
         check("Keychain read by item name only", all(c[:2] == ["security", "find-generic-password"]
                                                       and c[-1] == "-w" for c in world.security.calls))
+        check("...and its one write is the Mac's cached CII token, on `security -i`'s stdin, never argv",
+              world.security.writes and all(argv == ["security", "-i"] and item == "pseudoco-lab5-cii-access-token"
+                                            for argv, item in world.security.writes), str(world.security.writes))
         stdin_with_token = [stdin for b in world.boxes.values() for cmd, sudo, stdin in b.commands
                             if stdin and b"TUNNEL_TOKEN" in stdin]
         check("the tunnel token reached the box only as stdin of a sudo file write",
@@ -1764,6 +1785,8 @@ def test_cii_token() -> None:
         check("...and says so, with its expiry", "CII: minted one access token for this run" in out
               and "2100-01-01 00:00 UTC" in out, out)
         check("...never printing it", CII_TOKEN not in out)
+        check("...and keeps it as the Mac's cached token, with its expiry, in the Keychain (never on the box only)",
+              world.security.written.get("pseudoco-lab5-cii-access-token") == f"4102444800={CII_TOKEN}")
         rc, out = run_cli(world, tmp, "up")
         check("a re-run keeps each box's token (more than 20 h left): no mint, no restart",
               rc == 0 and world.cii_mints == 1 and all(b.restarts == 1 for b in world.boxes.values())
@@ -1781,7 +1804,8 @@ def test_cii_token() -> None:
         check("...never printing the box's token", soon not in out)
         rc, out = run_cli(world, tmp, "cii-token")
         b1, b2 = world.boxes["01"], world.boxes["02"]
-        check("cii-token: one mint, for the box that needed it", rc == 0 and world.cii_mints == 2, out)
+        check("cii-token: no mint: the Mac's cached token (years left) goes to the box that needed one",
+              rc == 0 and world.cii_mints == 1, out)
         check("...box 02 gets the new token and restarts; box 01 keeps its token and does not restart",
               envfile.get(_box_env(b2), "CII_ACCESS_TOKEN") == CII_TOKEN and b2.restarts == 2
               and envfile.get(_box_env(b1), "CII_ACCESS_TOKEN") == CII_TOKEN and b1.restarts == 1, out)
@@ -1813,6 +1837,8 @@ def test_cii_token() -> None:
         _set_box_env(b1, CII_ACCESS_TOKEN=cii_jwt(time.time() + 3600))
         _set_box_env(b2, CII_ACCESS_TOKEN=cii_jwt(time.time() + 3600))
         before = {nn: b.files["/home/splunk/DemoBot/.env"][0] for nn, b in world.boxes.items()}
+        # The Mac's cached token runs out too, so the run has to mint, and CII refuses.
+        world.security.written["pseudoco-lab5-cii-access-token"] = f"{int(time.time()) + 3600}={cii_jwt(time.time() + 3600)}"
         world.cii_answer = (429, b'{"error":"too_many_requests"}')
         mints = world.cii_mints
         rc, out = run_cli(world, tmp, "cii-token")
@@ -1823,6 +1849,15 @@ def test_cii_token() -> None:
               all(b.files["/home/splunk/DemoBot/.env"][0] == before[nn] for nn, b in world.boxes.items()))
         world.cii_answer = None
         _set_box_env(b1, CII_ACCESS_TOKEN=CII_TOKEN)
+
+        # A cached token with less than a lab day left is replaced: the run mints a fresh one and keeps it.
+        _set_box_env(b2, CII_ACCESS_TOKEN=cii_jwt(time.time() + 3600))
+        mints = world.cii_mints
+        rc, out = run_cli(world, tmp, "cii-token", "--only", "2")
+        check("cii-token with the Mac's cached token near its end: one fresh mint, pushed and kept as the new cache",
+              rc == 0 and world.cii_mints == mints + 1
+              and envfile.get(_box_env(b2), "CII_ACCESS_TOKEN") == CII_TOKEN
+              and world.security.written.get("pseudoco-lab5-cii-access-token") == f"4102444800={CII_TOKEN}", out)
 
         # An older up left box 01 the API client next to its token: re-running up takes the client off.
         _set_box_env(b1, CII_CLIENT_ID=SECRETS["pseudoco-lab5-cii-client-id"],
