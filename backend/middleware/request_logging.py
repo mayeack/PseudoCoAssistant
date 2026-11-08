@@ -3,6 +3,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import time
 import logging
 import uuid
+from urllib.parse import quote
 from backend.logging.governance_logger import governance_logger
 
 logger = logging.getLogger(__name__)
@@ -16,14 +17,19 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
         # Add request ID to request state
         request.state.request_id = request_id
+        # The routed path, not request.url.path: request.url is rebuilt from the
+        # Host header, so a crafted Host would make the log name the wrong route.
+        # Logged percent-encoded: scope["path"] is already decoded, so an encoded
+        # CR/LF (%0D%0A) would otherwise start a forged line in the plain-text log.
+        path = quote(request.scope.get("path") or "/", safe="/:@!$&'()*+,;=")
 
         # Log request
         logger.info(
-            f"Request started: {request.method} {request.url.path}",
+            f"Request started: {request.method} {path}",
             extra={
                 "request_id": request_id,
                 "method": request.method,
-                "path": request.url.path,
+                "path": path,
                 "client": request.client.host if request.client else None
             }
         )
@@ -34,11 +40,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
             # Log response
             logger.info(
-                f"Request completed: {request.method} {request.url.path} - {response.status_code}",
+                f"Request completed: {request.method} {path} - {response.status_code}",
                 extra={
                     "request_id": request_id,
                     "method": request.method,
-                    "path": request.url.path,
+                    "path": path,
                     "status_code": response.status_code,
                     "duration": duration,
                     "client": request.client.host if request.client else None
@@ -55,11 +61,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
             # Log error
             logger.error(
-                f"Request failed: {request.method} {request.url.path} - {str(e)}",
+                f"Request failed: {request.method} {path} - {str(e)}",
                 extra={
                     "request_id": request_id,
                     "method": request.method,
-                    "path": request.url.path,
+                    "path": path,
                     "error": str(e),
                     "duration": duration,
                     "client": request.client.host if request.client else None

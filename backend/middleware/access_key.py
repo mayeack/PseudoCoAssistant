@@ -1,13 +1,14 @@
 import base64
 import binascii
 import hashlib
+import re
 import secrets
 import logging
 from urllib.parse import quote
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse, HTMLResponse
+from starlette.responses import JSONResponse, HTMLResponse, PlainTextResponse
 
 from backend.config import settings
 
@@ -19,6 +20,37 @@ COOKIE_NAME = "md_access"
 # Reachable without the key: the health check and the login page itself
 # (otherwise an unauthenticated user could never reach the form to log in).
 PUBLIC_PATHS = {"/health", "/login", "/favicon.ico"}
+
+# What a real client puts in Host: a DNS name, IPv4 or [IPv6] literal, optional
+# :port. Anything else ("box/health?x=", spaces, "@") is refused with a 400.
+_VALID_HOST = re.compile(r"^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)(?::[0-9]{1,5})?$")
+
+
+def routed_path(request: Request) -> str:
+    """The path the router will dispatch this request to.
+
+    Never decide access on ``request.url.path``: Starlette rebuilds
+    ``request.url`` from the Host header plus the path and re-parses it, so a
+    crafted Host can make ``request.url.path`` read ``/health`` while the
+    router serves a protected route. ``scope["path"]`` is what routing uses.
+    """
+    return request.scope.get("path") or "/"
+
+
+def _host_is_valid(request: Request) -> bool:
+    host = request.headers.get("host")
+    # RFC 9112 allows optional whitespace around a field value, and uvicorn's
+    # httptools parser keeps trailing spaces and tabs, so strip them first.
+    return host is None or bool(_VALID_HOST.match(host.strip(" \t")))
+
+
+def keys_match(presented: str, expected: str) -> bool:
+    """Constant-time comparison of two secrets, on their UTF-8 bytes.
+
+    ``secrets.compare_digest`` raises TypeError for a str holding non-ASCII
+    characters, which turned a wrong key such as "café" into a 500.
+    """
+    return secrets.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
 
 
 def session_token() -> str:
@@ -32,7 +64,7 @@ def session_token() -> str:
 
 def _has_valid_cookie(request: Request) -> bool:
     cookie = request.cookies.get(COOKIE_NAME, "")
-    return bool(cookie) and secrets.compare_digest(cookie, session_token())
+    return bool(cookie) and keys_match(cookie, session_token())
 
 
 def _has_valid_basic_auth(request: Request) -> bool:
@@ -44,7 +76,7 @@ def _has_valid_basic_auth(request: Request) -> bool:
     except (binascii.Error, UnicodeDecodeError, ValueError):
         return False
     _, _, password = decoded.partition(":")
-    return secrets.compare_digest(password, settings.access_key)
+    return keys_match(password, settings.access_key)
 
 
 # Header that carries the raw key, for API clients whose auth settings take a
@@ -55,9 +87,7 @@ ACCESS_KEY_HEADER = "X-Access-Key"
 
 def _has_valid_key_header(request: Request) -> bool:
     presented = request.headers.get(ACCESS_KEY_HEADER, "")
-    return bool(presented) and secrets.compare_digest(
-        presented.encode("utf-8"), settings.access_key.encode("utf-8")
-    )
+    return bool(presented) and keys_match(presented, settings.access_key)
 
 
 class AccessKeyMiddleware(BaseHTTPMiddleware):
@@ -67,10 +97,23 @@ class AccessKeyMiddleware(BaseHTTPMiddleware):
       * Browser  -> log in at /login, which sets an HttpOnly session cookie.
       * API/curl -> HTTP Basic Auth  (curl -u x:$ACCESS_KEY ...).
       * API      -> an ``X-Access-Key: $ACCESS_KEY`` header.
-    No-op when settings.access_key is empty (local development).
+    No-op when settings.access_key is empty (local development), apart from
+    refusing a malformed Host header.
     """
 
     async def dispatch(self, request: Request, call_next):
+        # A malformed Host header is never a real client, and it is the lever
+        # for confusing request.url with the routed path (see routed_path).
+        if not _host_is_valid(request):
+            logger.warning(
+                "Rejected request with malformed Host header",
+                extra={"path": routed_path(request),
+                       "client": request.client.host if request.client else None},
+            )
+            return PlainTextResponse("Bad Request", status_code=400)
+
+        path = routed_path(request)
+
         # CORS preflights pass through. This middleware is added last, so it
         # wraps CORSMiddleware and sees the request first; a preflight carries
         # neither cookie nor Authorization header, so gating OPTIONS 401'd every
@@ -78,7 +121,7 @@ class AccessKeyMiddleware(BaseHTTPMiddleware):
         # and authorizes nothing — the actual request behind it is still gated.
         if (not settings.access_key
                 or request.method == "OPTIONS"
-                or request.url.path in PUBLIC_PATHS
+                or path in PUBLIC_PATHS
                 or _has_valid_cookie(request)
                 or _has_valid_basic_auth(request)
                 or _has_valid_key_header(request)):
@@ -86,14 +129,14 @@ class AccessKeyMiddleware(BaseHTTPMiddleware):
 
         logger.warning(
             "Rejected unauthenticated request",
-            extra={"path": request.url.path,
+            extra={"path": path,
                    "client": request.client.host if request.client else None},
         )
 
         # Top-level browser navigation gets a friendly page that links to the
         # login form; API clients (fetch/curl) get JSON + a Basic Auth challenge.
         if "text/html" in request.headers.get("accept", ""):
-            login_url = "/login?next=" + quote(request.url.path, safe="")
+            login_url = "/login?next=" + quote(path, safe="")
             return HTMLResponse(
                 _UNAUTHORIZED_HTML.replace("__LOGIN_URL__", login_url),
                 status_code=401,
