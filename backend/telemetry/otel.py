@@ -241,6 +241,8 @@ def workflow_span(
     request_id: Optional[str] = None,
     trace_id: Optional[str] = None,
     blueprint: Optional[str] = None,
+    enduser_id: Optional[str] = None,
+    client_address: Optional[str] = None,
 ):
     """Root GenAI Workflow span for the whole graph invocation."""
     return _span(
@@ -255,6 +257,11 @@ def workflow_span(
             "session.id": session_id,
             "pseudoco-assistant.request_id": request_id,
             "pseudoco-assistant.trace_id": trace_id,
+            # Who the turn is for (the governance event's enduser_id: the
+            # verified username when signed in) and where it came from.
+            # Additive; unset values are skipped.
+            "enduser.id": enduser_id,
+            "client.address": client_address,
         },
     )
 

@@ -1,0 +1,95 @@
+# lab5-setup workshop file (deploy/lab5/README.md). Copy it per workshop:
+#   cp deploy/lab5/workshop.example.yaml ~/.pseudoco-lab5/acme-1105.yaml
+# It holds NO secrets: only names, addresses and Keychain item names.
+
+# Becomes each box's tunnel and hostname: l5-<workshop>-<nn>.pseudocoassistant.com.
+# Lowercase letters, digits and '-'. Use a new name per delivery (a date helps).
+workshop: acme-1105
+
+# `up` refuses a box whose /health reports less (no code upgrade, I5); the
+# Show template is re-baked on this release instead (plan 12.6).
+required_version: "4.23.0"
+zone: pseudocoassistant.com
+
+# The room's Splunk stack. `up` looks for the box's existing HEC destination
+# with this URL and merges only its `host`; it never adds or repoints one.
+stack:
+  hec_url: https://http-inputs-acme.splunkcloud.com:443/services/collector/event
+  # Optional Keychain item holding the room's HEC token. Used only to compare
+  # its last 4 characters with the destination's; it is never sent anywhere.
+  hec_token_item: pseudoco-lab5-hec-acme-1105
+
+room:
+  victim: avery.kim          # on every box's IDENTITY_ALLOWED_USERS
+  fallback: jordan.reyes     # untouched; to swap, set victim: jordan.reyes and re-run up
+  trusted: [marcus.bell, elena.sousa, grace.lin]
+
+# Participant accounts (plan 12.2): `up` creates Duo user l5-<workshop>-<nn> for
+# each box (CII Read-Only + group l5-<workshop>, one HOTP token, 10 passcodes on
+# the handout) and puts it on that box's IDENTITY_ALLOWED_USERS. `expire`
+# disables them at day 7 and deletes them at day 14. Each uses a Duo seat.
+participants:
+  enabled: true
+  # cii_url: https://...      # the Identity Intelligence sign-in link printed on the handout
+  # email_domain: pseudocoassistant.com   # defaults to `zone`
+
+# Persona bypass codes (plan 4.3): `up` puts one small batch per box on that
+# box's handout card, for room.victim and each room.trusted persona, so a team
+# can sign in as them (their HOTP tokens stay script-only). `lab5-setup
+# handouts` issues a fresh batch, e.g. on lab-day morning when `up` ran the day
+# before. Nothing deletes them early: they stop at valid_hours (Duo's
+# valid_secs), so cover lab day from the time they are issued. Needs
+# participants.enabled (the codes ride on its handout).
+bypass_codes:
+  enabled: true
+  count: 1                   # codes per persona per box, 1-10
+  reuse_count: 5             # sign-ins each code allows, 1-20
+  valid_hours: 12            # from the time they are issued, 1-72
+
+# personas_file: scripts/identity/personas.yaml   # the cast (default): expire never touches it, up only
+#                                                 # gives the room's personas their bypass codes
+
+# Optional 12.1 settings. Leave a key out to keep the app default. Checked
+# before anything connects: the app cannot start with a value like "12h".
+# identity:
+#   session_ttl_minutes: 720   # whole minutes, 1-10080
+#   status_ttl_seconds: 10     # whole seconds, 0-3600
+#   fail_open: true            # true or false
+
+# Keychain item (service) names. These are the defaults; list only the ones you
+# changed. Add an item with: security add-generic-password -s ITEM -a "$USER" -w
+# keychain:
+#   cloudflare: pseudoco-lab5-cloudflare
+#   DUO_CLIENT_ID: pseudoco-lab5-duo-websdk-client-id
+#   DUO_CLIENT_SECRET: pseudoco-lab5-duo-websdk-client-secret
+#   DUO_API_HOST: pseudoco-lab5-duo-websdk-api-host
+#   DUO_ADMIN_IKEY: pseudoco-lab5-duo-status-ikey
+#   DUO_ADMIN_SKEY: pseudoco-lab5-duo-status-skey
+#   CII_API_URL: pseudoco-lab5-cii-api-url
+# The CII API client (pseudoco-lab5-cii-client-id / -client-secret / -token-url)
+# stays on this Mac: up mints one access token from it and pushes that
+# (CII_ACCESS_TOKEN), because CII gives a client only 6 tokens an hour.
+# The participant accounts use the Admin API app PseudoCo Provisioner, whose keys
+# stay on this Mac (pseudoco-lab5-duo-provisioner-ikey / -skey, and the tenant's
+# API host in pseudoco-lab5-duo-api-host); they are not workshop settings.
+
+# cloudflare:
+#   account_id: ""          # found from the zone when empty
+#   zone_id: ""
+#   tunnel_protocol: auto   # http2 if the venue blocks UDP 7844 (quic)
+
+concurrency: 4               # boxes worked on at once
+
+# What every Show box has unless a row says otherwise.
+defaults:
+  port: 2222
+  user: splunk
+  checkout: /home/splunk/DemoBot
+  app_unit: demobot-app
+  app_port: 8001
+
+boxes:
+  - instance: 1
+    host: 203.0.113.10
+  - instance: 2
+    host: 203.0.113.11

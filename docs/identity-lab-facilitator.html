@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lab 5 facilitator runbook: Verify with Cisco Identity Intelligence</title>
+<style>
+:root{--bg:#ffffff;--fg:#1c1e21;--muted:#5c6370;--border:#d7dbe0;--accent:#0b6bcb;--code-bg:#f5f7f9;--th:#eef2f6;--warn:#8a5a00}
+@media (prefers-color-scheme: dark){:root{--bg:#14171a;--fg:#e6e8ea;--muted:#9aa3ad;--border:#2c3238;--accent:#63a9f0;--code-bg:#1c2126;--th:#1f252b;--warn:#e0b050}}
+*{box-sizing:border-box}
+body{margin:0;padding:2.5rem 1.5rem 5rem;background:var(--bg);color:var(--fg);
+ font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+ -webkit-font-smoothing:antialiased}
+main{max-width:60rem;margin:0 auto}
+h1{font-size:2rem;line-height:1.25;margin:0 0 .5rem;letter-spacing:-.02em}
+h2{font-size:1.4rem;margin:3rem 0 .75rem;padding-bottom:.4rem;border-bottom:1px solid var(--border);letter-spacing:-.01em}
+h3{font-size:1.1rem;margin:2rem 0 .5rem}
+h4{font-size:1rem;margin:1.5rem 0 .4rem;color:var(--muted)}
+p,li{margin:.6rem 0}
+a{color:var(--accent)}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.875em;
+ background:var(--code-bg);padding:.15em .4em;border-radius:4px;border:1px solid var(--border)}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:1rem;
+ overflow-x:auto;line-height:1.5}
+pre code{background:none;border:none;padding:0;font-size:.85rem}
+table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.9rem;display:block;overflow-x:auto}
+th,td{border:1px solid var(--border);padding:.5rem .7rem;text-align:left;vertical-align:top}
+th{background:var(--th);font-weight:600}
+tbody tr:nth-child(even){background:color-mix(in srgb,var(--th) 45%,transparent)}
+blockquote{margin:1.2rem 0;padding:.6rem 1rem;border-left:3px solid var(--warn);
+ background:color-mix(in srgb,var(--warn) 8%,transparent);color:var(--fg)}
+blockquote p{margin:.3rem 0}
+hr{border:none;border-top:1px solid var(--border);margin:2.5rem 0}
+strong{font-weight:650}
+ul,ol{padding-left:1.4rem}
+@media print{body{padding:0}pre,table{page-break-inside:avoid}}
+</style></head>
+<body><main>
+<h1>Lab 5 facilitator runbook: Verify with Cisco Identity Intelligence</h1>
+<p><strong>For:</strong> Splunk Show deliveries set up with <code>lab5-setup</code> from your Mac. <strong>Tools:</strong> <code>deploy/lab5/README.md</code>. <strong>Design:</strong> <code>docs/identity-intelligence-lab-plan.md</code>, a planning note kept outside the repository (a fresh clone does not have it). You do not need it: &quot;Terms used here&quot;, below, defines every spike, decision, plan section and date this runbook and the README rely on.</p>
+<p>Lab 5 makes four claims:</p>
+<ol>
+<li>Identity Intelligence (CII) catches a takeover of a PseudoCo employee account and drops its trust level.</li>
+<li>PseudoCo Assistant knows who is signed in and refuses a compromised identity before the model runs.</li>
+<li>Splunk joins CII's failed checks with Cisco AI Defense blocks for the same user.</li>
+<li>A response agent disables the account in Duo, and that ends its PseudoCo Assistant session.</li>
+</ol>
+<p>Everything here runs from your Mac. There is no broker and nothing in AWS. Secrets stay in your Keychain, and state lives in <code>~/.pseudoco-lab5/</code>. Commands below start at the repository root, and <code>py</code> stands for the tool's venv, <code>~/.pseudoco-lab5/venv/bin/python</code>.</p>
+<blockquote>
+<p><strong>Still open.</strong> S1, how the victim's failed checks reach a room stack that only exists from T-1, is still marked for discussion. This runbook does not pick a path. See &quot;The victim's takeover&quot; and &quot;Open questions&quot;.</p>
+</blockquote>
+<h2>Once, before the first delivery</h2>
+<p><strong>Duo console (you):</strong></p>
+<ul>
+<li>Licence and seats. You need a seat for your own account, each persona, and every participant account from the last 14 days. Disabled accounts still hold a seat until they are deleted.</li>
+<li>A second Owner, as break-glass.</li>
+<li><em>Identity Intelligence → SSO Access</em>: Duo Administrator SSO on, so you can open CII with full admin.</li>
+<li><em>Grant write resource</em> <strong>off</strong> in CII.</li>
+<li>Lockout <strong>auto-revert</strong> on (about 15 minutes), so one person's typos never lock an account for the day.</li>
+<li>The <strong>PseudoCo Lab: Sign-in</strong> policy (plan 4.4) allows <strong>bypass code + hardware token</strong> and no other method: tick <em>Bypass code</em> and <em>Hardware tokens</em> under its authentication methods. Each handout card carries both: the room personas' bypass codes and the participant's HOTP passcodes. Without hardware tokens Duo refuses every participant, and without bypass codes every persona sign-in. <code>deploy/lab5/README.md</code> (&quot;Duo applications&quot;) has the rest of the policy.</li>
+</ul>
+<p><strong>Your Mac:</strong></p>
+<ol>
+<li>
+<p>Create the tool's venv and add the Keychain items. <code>deploy/lab5/README.md</code> lists every item, including the Mac-only Provisioner and VPN keys.</p>
+</li>
+<li>
+<p>Once spike S1 says how Duo geolocates addresses, put real home and foreign addresses in <code>scripts/identity/personas.yaml</code>. Until then the scripts refuse to send any sign-in.</p>
+</li>
+<li>
+<p>Run <code>py scripts/identity/provision_personas.py</code> to create the cast: the PseudoCo Workforce group, the users and one HOTP token each. The trusted personas need CII exclusions from Impossible Travel, MFA Flood, <em>A Bypass Code Was Used To Successfully Sign In</em> and <em>Users Sharing Authenticators</em>, but CII cannot exclude a user from a check ahead of time. <em>Exclude a user</em> is a triage action on a failing row: open the check, find the persona among its failing users, and pick <em>Exclude</em> from the row's … menu, for the longest time frame offered. None of these four checks has a user list in its settings: Impossible Travel's ignore list holds network providers, and MFA Flood has only thresholds (5 failures in 2 minutes). So exclude each trusted persona from a check the first time it fails it. The likely first is <em>A Bypass Code Was Used</em>, after the first sign-ins with a persona's bypass code from a handout card. The daily self-check is the cue: it fails, with a notification, any trusted persona that fails a check. Run <em>Collect Now</em> on the Duo integration first if you want CII to see the sign-ins sooner. Whether that check lowers a trusted persona's trust level before the exclusion is for spikes S2/S5/S6 to show; the gate's own CII blocks are only MFA Flood, Impossible Travel and <code>UNTRUSTED</code>.</p>
+</li>
+<li>
+<p><strong>User access, in the Duo Admin Panel</strong> (<em>Applications</em>, the application, <em>User access</em>). The tools cannot set or check it. <code>deploy/lab5/README.md</code> (&quot;Duo applications&quot;) has the reasons.</p>
+<ul>
+<li><strong>PseudoCo Lab: Sign-in</strong>: <em>Enable only for permitted groups</em>, with <strong>PseudoCo Workforce</strong> and <strong>CII Read-Only</strong>. The personas are in the first group, and every participant account is in the second.</li>
+<li><strong>PseudoCo VPN</strong>: <em>Enable only for permitted groups</em>, with <strong>PseudoCo Workforce</strong> only. Only the persona scripts sign in through it.</li>
+</ul>
+<p>Plan section 4.2 limits every lab app to PseudoCo Workforce. That was written before the participant accounts: Sign-in limited that way refuses every participant, so no attendee can sign in to their own instance. Never add a participant account to PseudoCo Workforce to get around it.</p>
+</li>
+<li>
+<p>Run <code>deploy/launchd/install-lab5.sh</code> from the main checkout. It installs the daily <code>lab5-setup expire</code> (08:15) and the persona baseline plus self-check (09:20).</p>
+</li>
+<li>
+<p>After spikes S1, S2 and S7 pass, at least 4 weeks before the first delivery, set <code>baseline.enabled: true</code> in <code>personas.yaml</code>. From then on every persona signs in once a day. If anything is wrong, the self-check raises a macOS notification: a failed sign-in, a missing Keychain secret or counter, a disabled or locked-out persona, or a trusted persona failing a CII check. So does a run that crashes or cannot load <code>personas.yaml</code>, and the launchd wrapper (<code>deploy/launchd/run-lab5-job.sh</code>) notifies when the job cannot start at all, for example after a Python upgrade breaks the tool's venv: re-create it as <code>deploy/lab5/README.md</code> says.</p>
+</li>
+<li>
+<p><strong>T-18 gate:</strong> <code>py scripts/identity/persona_activity.py selfcheck --gate</code>. Every persona must be out of &quot;Unknown&quot;. If one is not, the delivery date moves.</p>
+</li>
+</ol>
+<p>Long trips with the Mac shut down stop the baseline. A few missed days are fine. A missed week before a delivery is not, and the self-check fails after three days without a sign-in. A shut-down Mac runs nothing and notifies nothing, so run <code>py scripts/identity/persona_activity.py selfcheck</code> by hand when you are back.</p>
+<h2>The victim's takeover</h2>
+<p>The scripted takeover is <code>py scripts/identity/persona_activity.py takeover --victim &lt;room victim&gt;</code>:</p>
+<ol>
+<li>a sign-in from the victim's home;</li>
+<li>5 to 9 wrong passcodes from the next foreign address within 2 minutes, under the lockout limit of 10;</li>
+<li>a success from that same address on a new device.</li>
+</ol>
+<p>Then click <em>Collect Now</em> on CII's Duo integration, because there is no API for it. The run's record under <code>~/.pseudoco-lab5/personas/takeovers/</code> is the takeover time. Every room gets its own victim. Keep the room's fallback untouched. A victim needs about 8 days before its next takeover, and the script refuses one sooner unless you pass <code>--force</code>.</p>
+<p><strong>When to run it depends on S1.</strong> The options in plan 12.4, in their order:</p>
+<ol>
+<li>at T-2, then CII's <em>Send notification</em> once the room stack's input exists;</li>
+<li>a Near Time takeover at T-1;</li>
+<li>a labelled backfill.</li>
+</ol>
+<p>Never put synthetic events in a room stack. If the victim's failures do not show up, move the room to its fallback (<code>room.fallback</code> in the workshop file, then re-run <code>lab5-setup up</code>) and take that one over.</p>
+<p>For the live replay, one victim has Duo Mobile on a facilitator phone (<code>replay_device: true</code>). <code>persona_activity.py replay --victim &lt;it&gt;</code> sends a short push flood, and you <strong>deny</strong> each push on stage. Never approve one, and never send it from an in-app button.</p>
+<h2>T-1: the Show boxes arrive</h2>
+<ol>
+<li>Copy <code>deploy/lab5/workshop.example.yaml</code> for this delivery and fill in:
+<ul>
+<li>a new <code>workshop</code> name (a date helps);</li>
+<li>the room stack's <code>stack.hec_url</code>;</li>
+<li><code>room.victim</code> and <code>room.fallback</code>;</li>
+<li>one <code>boxes</code> row per box;</li>
+<li><code>participants.cii_url</code>, the link printed on the handouts;</li>
+<li><code>bypass_codes.valid_hours</code> (default 12): the persona bypass codes that <code>up</code> puts on the cards stop working that many hours after <code>up</code> runs. If you run <code>up</code> the day before, raise it to reach the end of lab day.</li>
+</ul>
+</li>
+<li><code>deploy/lab5/lab5-setup check &lt;workshop.yaml&gt;</code>. Every box should say <strong>ready, nothing to upgrade</strong>, and every participant account and card <code>PLAN</code>. It changes nothing. A room persona that is missing in Duo, not active there (bypass status or disabled), in a Duo group whose status is Bypass or Disabled, or near Duo's 100 bypass codes fails every card here, and <code>up</code> would issue no persona codes. For a persona that is not active, run <code>py scripts/identity/provision_personas.py --reset --only &lt;persona&gt;</code>; for one in such a group, take it out of the group or set the group Active in the Admin Panel. Bypass status and bypass groups are never acceptable (plan 4.3): Duo then skips the second factor for that persona, so anyone with an instance's access key could sign in as it. A locked-out persona needs no reset: Duo unlocks it on its own in about 15 minutes, and meanwhile its cards are <code>PARTIAL</code> (the other personas' codes go on); retry <code>lab5-setup handouts &lt;workshop.yaml&gt; --only N</code> after that.</li>
+<li><code>deploy/lab5/lab5-setup up &lt;workshop.yaml&gt;</code>. The boxes get their Lab 5 keys, tunnel and DNS name, HEC host and restart. Their CII access is one 24 h token that <code>up</code> mints on your Mac (S16); the CII API client never leaves the Mac. Then every box that came up gets its participant account <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code>, its card gets the team's bypass codes for the room's victim and each trusted persona, and the handout is written.</li>
+<li><strong>Temporary passwords.</strong> <code>up</code> prints an Admin Panel link per account. Open each one, click <em>Create temporary password</em> (valid 30 days) and write it on that participant's card. The Admin API cannot set passwords. While you are in the Admin Panel, check that <strong>PseudoCo Lab: Sign-in</strong> still admits <strong>CII Read-Only</strong> (step 4 of &quot;Once, before the first delivery&quot;) and that its policy still allows bypass code + hardware token. <code>up</code> reminds you, because it cannot check either.</li>
+<li>Print <code>~/.pseudoco-lab5/workshops/&lt;workshop&gt;/handout.html</code> and cut the cards apart.</li>
+<li><code>deploy/lab5/lab5-setup status &lt;workshop.yaml&gt;</code>. Every box should be green. Participants show &quot;no password yet&quot; until they sign in to CII and set their own. Each room persona shows its Duo status, and each card's persona codes show how long they have left. Each box's <code>victim</code> row runs its own Identity Risk Gate on the room's victim: a <code>FAIL</code> there means the box cannot ask Duo or CII (a stale Status key, say), and must be fixed before lab day. A <code>WARN</code> is expected until the takeover's failures reach CII.</li>
+</ol>
+<p>A box that <code>up</code> refused is reported with the reason. Fix it, then re-run with <code>--only &lt;n&gt;</code>. A re-run keeps the accounts and their cards. A card whose persona codes failed (a Duo error, say) is named in the <code>RESULT</code> line, and a re-run of <code>up</code> finishes it. Passcodes are shown only once, so for a lost card use <code>up --only &lt;n&gt; --reissue-passcodes</code> (the old passcodes stop working), then <code>handouts --only &lt;n&gt; --revoke</code>. That puts fresh persona codes on the card and deletes the lost card's.</p>
+<h2>Lab day</h2>
+<p><strong>Before attendees sit down (T-0):</strong></p>
+<ul>
+<li><code>deploy/lab5/lab5-setup cii-token &lt;workshop.yaml&gt;</code>. The CII token <code>up</code> pushed the day before runs out during the lab (a token lasts 24 h). This pushes a fresh one to every box with less than 20 h left and restarts those boxes. It mints one token, of the API client's 6 an hour (S16).</li>
+<li><code>lab5-setup status</code> again. Every tunnel should be healthy, <code>duo_signin</code> not gated, every box's <code>CII token</code> row <code>OK</code>, and every box's <code>victim</code> row <code>OK</code>: its gate blocks the room's victim. If the cards' persona codes expire before the lab ends, run <code>deploy/lab5/lab5-setup handouts &lt;workshop.yaml&gt;</code> and print the cards again, with the temporary passwords copied over. The old codes stay valid until they expire, unless you add <code>--revoke</code>.</li>
+<li><code>persona_activity.py selfcheck</code>. The trusted personas should pass. The room's victim should fail MFA Flood and Impossible Travel in CII.</li>
+<li>In the Admin Panel, <em>Users → Clear all step-ups</em>.</li>
+<li>In each instance's Demo Controls, turn <strong>Trigger Demo Incident</strong> off. Its synthetic incident would crowd the room stack.</li>
+</ul>
+<p><strong>Handing out the cards.</strong> Each attendee gets one card: their instance URL and access key, their participant account, its passcodes and the temporary password. Say these out loud:</p>
+<ul>
+<li><strong>Get off VPN.</strong> Sign in from the venue network. A VPN exit far from the room makes your own sign-ins, and any shared persona's, look like Impossible Travel.</li>
+<li><strong>Use each passcode once, in order.</strong> Skipping ahead works, but the codes before it then stop working.</li>
+<li><strong>The persona codes are your team's.</strong> To sign in as the room's victim or a trusted persona, choose <em>Sign in with Duo</em> with that persona's username, then <em>Other options</em> and <em>Bypass Code</em> in Duo, and enter the code from the card. Each code allows a few sign-ins (5 by default) until the time printed on the card.</li>
+<li><strong>Privacy.</strong> Read-only users in Identity Intelligence see every identity in the tenant, with emails and sign-in IP addresses, including each other's. They cannot change anything.</li>
+</ul>
+<p><strong>5.1, the Identity Intelligence walkthrough.</strong> You drive it on screen through Administrator SSO. Attendees follow along with their own read-only sign-in: their email, the temporary password and a passcode, then a password of their own.</p>
+<ul>
+<li>Show the posture overview and the persona cast.</li>
+<li>Then open the victim's page: its trust level has dropped, and it fails MFA Flood and Impossible Travel. The times line up with the takeover record.</li>
+</ul>
+<p>Don't mention Trust Monitor: it left the Admin Panel in July 2026.</p>
+<p><strong>5.2, your instance.</strong> Tell attendees: &quot;Open your instance's https URL from the card, enter the access key and pick your industry.&quot; The https name is a new origin, and browser storage is per origin. The industry and the Demo Controls start from their defaults there, and <strong>Cisco AI Defense starts off</strong>, so turn on what the lab step asks for. Then <em>Sign in with Duo</em> with the participant account and a passcode, and the identity badge shows who is signed in. With the card's persona codes they can also sign in as a trusted persona or as the room's victim, whose turns the Identity Risk Gate refuses (claim 2).</p>
+<p><strong>The spray step.</strong> On the Prompt Injection Spray card:</p>
+<ul>
+<li>set <strong>Attacker identity</strong> to the room's victim;</li>
+<li>set <strong>Other actors</strong> to <strong>0</strong>.</li>
+</ul>
+<p>That way the AI Defense blocks in the room stack belong to the victim alone, and the Lab 5 join finds one user.</p>
+<p><strong>When to cue containment.</strong> Cue it only after the room has seen two things: the Identity Risk Gate refusing the victim (claim 2), and the Splunk finding that joins CII's failed checks with AI Defense blocks (claim 3). The detection fires while the latest block is under 5 minutes old, so wait until every team has its finding. Then the response agent disables the victim in Duo (claim 4), and the victim's PseudoCo Assistant sessions end within 10 to 20 seconds with a banner.</p>
+<ul>
+<li>The victim is shared by the whole room, so disable it once. From then on <code>lab5-setup status</code> shows the victim as contained, and <code>up</code> and <code>handouts</code> leave its codes off the cards while the trusted personas' codes go on as before. Keep it disabled through the debrief; <code>provision_personas.py --reset</code> re-enables it after the workshop.</li>
+<li><strong>Unblock me</strong> in the banner restores an attendee's session for the rest of the lab. It never re-enables the Duo account, so the evidence stays intact for the debrief.</li>
+</ul>
+<h2>After the workshop, in this order</h2>
+<ol>
+<li><code>deploy/lab5/lab5-setup down &lt;workshop.yaml&gt;</code>. On each reachable box it reverts the Lab 5 keys and the HEC host. Then it deletes the tunnels and DNS records. A box Show has already destroyed fails the run, which is expected: nothing is left on it. Then it deletes the persona bypass codes it recorded for each card. Codes whose ids it does not know (it could not tell them apart from another room's, or Duo's answer to their create was lost) stop at their <code>valid_secs</code>, and its last line says until when.</li>
+<li>Rotate the credentials the boxes held: the Web SDK secret and the read-only Status Admin API key (I1). The CII API client never left your Mac, and the boxes' CII token expires on its own within 24 h.</li>
+<li>The room stack: run its Lab 5 teardown on the TA side, and confirm CII's webhook target is gone before the stack is destroyed.</li>
+<li>Personas: <code>py scripts/identity/provision_personas.py --reset</code>. It re-enables and unlocks the contained victim and resyncs every HOTP token. Then <em>Clear all step-ups</em> and CII <em>Reset Feedback</em>. The trusted personas' exclusions stay.</li>
+<li>Participant accounts: nothing to do. <code>expire</code> disables them at day 7 and deletes them, with their tokens, at day 14. <code>deploy/lab5/lab5-setup expire --dry-run</code> shows the schedule. Delete the handout files now.</li>
+<li>The room's victim now waits about 8 days before it can be taken over again.</li>
+</ol>
+<h2>Open questions</h2>
+<ul>
+<li><strong>S1</strong> (marked for discussion): how the victim's <code>FAILED_CHECK</code> reaches a stack that only exists from T-1. It decides when the takeover runs.</li>
+<li><strong>A persona's bypass code in the Universal Prompt.</strong> Each persona also has a hardware token (script-only), which Duo may offer first. Attendees pick <em>Other options</em>, then <em>Bypass Code</em>. A code typed into the wrong method counts as a failed attempt toward the lockout. Check the flow in the dry run.</li>
+<li><strong>Spike S15</strong> has not run. It should prove three things: that API group membership grants CII Read-Only, that a password plus an HOTP passcode reaches CII, and what disabling does to a live CII session.</li>
+<li><strong>The room checks in <code>status</code></strong> (the victim's events in the stack) wait on the S1 decision. The per-box check that each box's gate blocks the victim is in <code>status</code> already.</li>
+</ul>
+<h2>Terms used here</h2>
+<p><strong>Dates.</strong> T is the first Lab 5 delivery, and T-<em>n</em> is <em>n</em> days before it. T-18 is the persona trust gate (every persona out of &quot;Unknown&quot;, or the date moves). T-2 is the earliest takeover (S1's first option). T-1 is when the Show boxes arrive and <code>lab5-setup up</code> runs. T-0 is lab day.</p>
+<p><strong>Spikes</strong> are one-off tests on the Duo tenant, with the spike persona <code>nina.osei</code>. The baseline starts only after S1, S2 and S7 pass.</p>
+<ul>
+<li><strong>S1, the spike:</strong> does the Auth API's <code>ipaddr</code> reach <code>access_device.ip</code> and its GeoIP in Duo's authentication log, and does CII use it? Until it answers, <code>personas.yaml</code> holds no real addresses and the scripts refuse to sign in.</li>
+<li><strong>S1, the decision:</strong> how the victim's failed checks reach a room stack that only exists from T-1. The options, tried in order: CII's <em>Send notification</em> after a T-2 takeover, a Near Time takeover at T-1, a labelled backfill. Still open.</li>
+<li><strong>S2:</strong> does Impossible Travel fire on Auth API sign-ins, does a new <code>hostname</code> count as a new device, and do two venue addresses trip it?</li>
+<li><strong>S5, S6:</strong> how a persona's trust moves over time, and the exact check names CII returns (they confirm the <code>getEndUser</code> query and the check IDs). On 2026-11-06, S5 captured CII's answer for a login it has no record of: an error (<code>getEndUser</code>, <code>errorType</code> <code>&quot;404&quot;</code>, <code>&quot;Not Found&quot;</code>, <code>data</code> null). Both copies of the rule and <code>tests/fixtures/cii_end_user_answers.json</code> now match it exactly, so a new participant account reads as &quot;not in CII yet&quot;. If a later spike sees a different answer, replace that exact answer in the table and both copies before the workshop, or every new participant account reads as &quot;status unavailable&quot;.</li>
+<li><strong>S7:</strong> how Duo encodes an API-created HOTP secret (hex or base32), and how far ahead of its counter it accepts a passcode.</li>
+<li><strong>S15:</strong> that group membership set through the API grants CII Read-Only, that a password plus an HOTP passcode reaches CII, and what disabling does to a live CII session.</li>
+<li><strong>S16</strong> (ran 2026-11-07): CII's token endpoint gives an API client 6 tokens a clock hour (HTTP 429, <code>x-ratelimit-limit: 6</code>, reset on the hour). A token lasts 24 h, and minting one does not end the earlier ones. So a box never mints: <code>lab5-setup</code> mints one token on your Mac and pushes it, and the gate uses it until it expires. Still open: whether the 6 are per API client or per tenant (a second API client would show it).</li>
+</ul>
+<p><strong>Decisions</strong> (2026-11-05):</p>
+<ul>
+<li><strong>A1:</strong> one participant account per instance, disabled after 7 days and deleted after 14.</li>
+<li><strong>A3:</strong> the Identity Risk Gate fails open: if Duo or CII cannot answer, the turn is allowed and the event says <code>identity_check=&quot;unavailable&quot;</code>.</li>
+<li><strong>A4:</strong> revocation is pulled from Duo by each instance, plus an <strong>Unblock me</strong> toggle in the banner.</li>
+<li><strong>I1:</strong> Duo only, no broker and no AWS. Each box holds the Duo Web SDK keys and a read-only Status Admin API key for the workshop, which are rotated afterwards, and a 24 h CII access token minted on your Mac (S16), which expires on its own.</li>
+<li><strong>I4:</strong> one setup command on your Mac, which never overwrites another lab's settings.</li>
+<li><strong>I5:</strong> no code upgrade at setup. The Show template is re-baked on the release instead (12.6).</li>
+</ul>
+<p><strong>Plan sections the tools cite:</strong></p>
+<ul>
+<li><strong>4.2:</strong> which groups each lab app admits (see &quot;Duo applications&quot; in <code>deploy/lab5/README.md</code>; Sign-in also admits CII Read-Only).</li>
+<li><strong>4.3:</strong> the persona cast. Every room gets its own victim and an untouched fallback, the handouts carry per-team bypass codes, and no persona ever gets bypass status or a bypass group.</li>
+<li><strong>4.4:</strong> the Sign-in policy (bypass code + hardware token) and the scripted policy, and lockout auto-revert, which unlocks an account after about 15 minutes.</li>
+<li><strong>4.5:</strong> the persona activity: the daily baseline sign-ins, the self-check, the T-18 gate, the takeover and the replay.</li>
+<li><strong>4.6:</strong> the per-delivery preflight and the ordered teardown, as in this runbook.</li>
+<li><strong>12.1</strong> to <strong>12.4:</strong> the app's configuration, the participant accounts, <code>lab5-setup</code>, and the research behind them, as <code>docs/identity.md</code> and <code>deploy/lab5/README.md</code> describe them.</li>
+<li><strong>12.5:</strong> the build order: one 4.23.0 release, tested on the dev copy (port 8011, <code>l5-dev.pseudocoassistant.com</code>), whose <code>.env</code> holds the Lab 5 keys (so the test suites isolate themselves from it).</li>
+<li><strong>12.6:</strong> the Show template checklist (&quot;Show template&quot; in <code>deploy/lab5/README.md</code>).</li>
+<li><strong>PR-1</strong> to <strong>PR-3:</strong> the plan's three app changes, shipped together as 4.23.0: the identity groundwork, the Duo sign-in, and the Identity Risk Gate with Duo-driven revocation.</li>
+</ul>
+<h2>Quick reference</h2>
+<table>
+<thead>
+<tr>
+<th>When</th>
+<th>Command</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>once</td>
+<td><code>py scripts/identity/provision_personas.py</code> (<code>--status</code>, <code>--dry-run</code>)</td>
+</tr>
+<tr>
+<td>once</td>
+<td>Admin Panel User access: Sign-in admits PseudoCo Workforce and CII Read-Only; VPN admits PseudoCo Workforce</td>
+</tr>
+<tr>
+<td>once</td>
+<td>Admin Panel: the PseudoCo Lab: Sign-in policy allows bypass code + hardware token</td>
+</tr>
+<tr>
+<td>once</td>
+<td><code>deploy/launchd/install-lab5.sh</code></td>
+</tr>
+<tr>
+<td>daily (launchd)</td>
+<td><code>persona_activity.py baseline</code>, then the self-check; <code>lab5-setup expire</code></td>
+</tr>
+<tr>
+<td>T-18</td>
+<td><code>py scripts/identity/persona_activity.py selfcheck --gate</code></td>
+</tr>
+<tr>
+<td>takeover (per S1)</td>
+<td><code>py scripts/identity/persona_activity.py takeover --victim &lt;victim&gt;</code>, then <em>Collect Now</em></td>
+</tr>
+<tr>
+<td>T-1</td>
+<td><code>lab5-setup check</code>, <code>up</code>, the temporary passwords, the handout, <code>status</code></td>
+</tr>
+<tr>
+<td>T-0</td>
+<td><code>lab5-setup cii-token</code>, <code>lab5-setup status</code>, <code>persona_activity.py selfcheck</code>, <em>Clear all step-ups</em>; <code>lab5-setup handouts</code> if the cards' persona codes run out before the lab ends</td>
+</tr>
+<tr>
+<td>lost card</td>
+<td><code>lab5-setup up --only &lt;n&gt; --reissue-passcodes</code>, then <code>lab5-setup handouts --only &lt;n&gt; --revoke</code></td>
+</tr>
+<tr>
+<td>after</td>
+<td><code>lab5-setup down</code> (it also deletes the recorded persona bypass codes); rotate the box credentials; <code>provision_personas.py --reset</code></td>
+</tr>
+</tbody>
+</table>
+</main></body></html>

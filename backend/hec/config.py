@@ -20,6 +20,19 @@ DEFAULT_SOURCETYPE = "gen_ai:json"
 DEFAULT_HOST = "medadvice"
 
 
+def effective_host(destination_host: str = "") -> str:
+    """The ``host`` stamped on an event sent to a destination.
+
+    ``HEC_HOST`` (settings.hec_host) wins when set: each lab instance stamps its
+    own name, so ES can tell instances apart even though every destination was
+    created with the same default. Empty keeps today's behaviour: the
+    destination's own ``host``, else ``DEFAULT_HOST``."""
+    from backend.config import settings
+
+    stamp = str(getattr(settings, "hec_host", "") or "").strip()
+    return stamp or str(destination_host or "").strip() or DEFAULT_HOST
+
+
 @dataclass
 class HECConfig:
     id: str = ""

@@ -25,8 +25,10 @@ from backend.services import attachments
 from backend.services.recommendation_engine import RecommendationEngine
 from backend.services.auto_prompter import auto_prompter
 from backend.services.enduser_pool import pick_enduser_id
+from backend.services.identity_store import IdentitySnapshot
 from backend.logging.governance_logger import governance_logger
 from backend.incident_mode import incident_mode
+from backend.middleware.identity import current_identity
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,54 @@ SSE_HEARTBEAT_S = 10.0
 # In-memory session store (in production, use Redis or similar).
 # Bounded — see _evict_stale_sessions.
 sessions: Dict[str, Dict[str, Any]] = {}
+
+# Lab 5: the signed-in username that owns a conversation, recorded in
+# Conversation.conversation_metadata (and mirrored as "owner" on the in-memory
+# session). Thread integrity, not confidentiality: the room shares one access
+# key, so this only stops one identity's turns landing in another's thread.
+# Enforced only while DUO_ENABLED is on (see _owner_conflict).
+OWNER_KEY = "identity_owner"
+OWNER_CONFLICT_DETAIL = ("This conversation belongs to another signed-in user. "
+                         "Start a new conversation.")
+# The 409 for a caller with no identity session: most often the owner, whose
+# session expired or who signed out, so "another signed-in user" would mislead.
+SIGNED_OUT_CONFLICT_DETAIL = ("This conversation belongs to a signed-in user. "
+                              "Sign in again to continue it, or start a new conversation.")
+
+
+def _owner_conflict(owner: Optional[str], identity: Optional[IdentitySnapshot]) -> Optional[str]:
+    """The 409 detail when the caller may not continue this conversation, else None.
+
+    Only while DUO_ENABLED is on. Off, there is no identity at all and Labs 0-4
+    behave exactly as before Lab 5: a conversation recorded with an owner (a
+    Lab 5 run, then ``lab5-setup down``) is an ordinary conversation again, and
+    the owner stays recorded for when Lab 5 is back on. On, an owned
+    conversation is refused to any other identity and to an anonymous caller,
+    each with its own message."""
+    if not owner or not getattr(settings, "duo_enabled", False):
+        return None
+    if identity is None:
+        return SIGNED_OUT_CONFLICT_DETAIL
+    if identity.username != owner:
+        return OWNER_CONFLICT_DETAIL
+    return None
+
+
+def _stored_owner(conversation: Optional[Conversation]) -> Optional[str]:
+    meta = conversation.conversation_metadata if conversation is not None else None
+    return (meta or {}).get(OWNER_KEY) if isinstance(meta, dict) else None
+
+
+def _claim(db: Session, session_id: str, session: Dict[str, Any], username: str) -> None:
+    """Record a signed-in user as the owner of an unowned conversation."""
+    session["owner"] = username
+    conversation = db.query(Conversation).filter(Conversation.session_id == session_id).first()
+    if conversation is not None:
+        # A new dict: the JSON column has no mutation tracking (see the
+        # list(...) copy in _prepare_session).
+        conversation.conversation_metadata = {**(conversation.conversation_metadata or {}),
+                                              OWNER_KEY: username}
+        db.commit()
 
 
 def _evict_stale_sessions() -> int:
@@ -148,19 +198,29 @@ def _prepare_session(
     client_host,
     db: Session,
     *,
+    identity: Optional[IdentitySnapshot] = None,
     typed: Optional[str] = None,
     attachment: Optional[Dict[str, Any]] = None,
     history: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Load or create the chat session and record the incoming user message.
 
-    Shared by the JSON and SSE message endpoints; raises 400 when a new session
-    hasn't accepted the disclaimer. ``typed`` overrides the stored text (see
+    Shared by every chat endpoint; raises 400 when a new session hasn't
+    accepted the disclaimer. ``typed`` overrides the stored text (see
     ``_typed_message``); a validated ``attachment`` is recorded on the message
     as metadata only -- never its bytes. ``history`` seeds the earlier turns
     of a brand-new session (``/completions``); an existing session ignores it.
+
+    ``identity`` is the request's verified identity (``request.state.identity``,
+    Lab 5), never anything from the body. Signed in, the session's
+    ``enduser_id`` is the username, new or resumed, and the user owns the
+    conversation (a new one, or an unowned one they resume). While
+    DUO_ENABLED is on, a conversation owned by someone else -- or by anyone,
+    for an anonymous caller -- is a 409 (``_owner_conflict``); off, ownership
+    is not enforced.
     """
     session_id = chat_request.session_id
+    username = identity.username if identity is not None else None
 
     # Check if session exists (in-memory or database)
     if session_id not in sessions:
@@ -168,6 +228,10 @@ def _prepare_session(
         existing_conversation = db.query(Conversation).filter(
             Conversation.session_id == session_id
         ).first()
+
+        conflict = _owner_conflict(_stored_owner(existing_conversation), identity)
+        if conflict:
+            raise HTTPException(status_code=409, detail=conflict)
 
         if existing_conversation:
             # Load existing session from database into memory.
@@ -182,7 +246,8 @@ def _prepare_session(
                 "messages": list(existing_conversation.messages or []),
                 "disclaimer_accepted": existing_conversation.disclaimer_accepted,
                 "escalated": existing_conversation.escalated,
-                "enduser_id": pick_enduser_id(),
+                "enduser_id": username or pick_enduser_id(),
+                "owner": _stored_owner(existing_conversation),
                 "last_activity": datetime.utcnow()
             }
         else:
@@ -201,7 +266,8 @@ def _prepare_session(
                 "messages": list(history or []),
                 "disclaimer_accepted": True,
                 "escalated": False,
-                "enduser_id": pick_enduser_id(),
+                "enduser_id": username or pick_enduser_id(),
+                "owner": username,
                 "last_activity": datetime.utcnow()
             }
 
@@ -209,7 +275,8 @@ def _prepare_session(
             conversation = Conversation(
                 session_id=session_id,
                 disclaimer_accepted=True,
-                messages=[]
+                messages=[],
+                conversation_metadata={OWNER_KEY: username} if username else {},
             )
             db.add(conversation)
             db.commit()
@@ -229,6 +296,13 @@ def _prepare_session(
             )
 
     session = sessions[session_id]
+    conflict = _owner_conflict(session.get("owner"), identity)
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
+    if username:
+        if not session.get("owner"):
+            _claim(db, session_id, session, username)
+        session["enduser_id"] = username
 
     # Add user message to session
     user_message = {
@@ -255,10 +329,15 @@ def _turn_kwargs(
     session: Dict[str, Any],
     client_host,
     *,
+    identity: Optional[IdentitySnapshot] = None,
     typed: Optional[str] = None,
     attachment: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Keyword arguments for one chat turn (run_turn / run_turn_stream / legacy)."""
+    """Keyword arguments for one chat turn (run_turn / run_turn_stream / legacy).
+
+    Every key must be a parameter of run_turn, _build_turn_state AND the
+    legacy process_message: a missing one is a TypeError, which silently drops
+    the turn to the legacy engine (tests/test_identity_sessions.py pins it)."""
     return dict(
         session_id=chat_request.session_id,
         user_message=chat_request.message if typed is None else typed,
@@ -285,6 +364,9 @@ def _turn_kwargs(
         # The validated attachment, bytes included, for this turn only: the
         # shared-chain attachment_intake node reads it and keeps metadata.
         attachment=attachment,
+        # The verified identity session (Lab 5) from the identity middleware;
+        # None on an anonymous turn. Never from the request body.
+        identity_session=identity.to_state() if identity is not None else None,
     )
 
 
@@ -338,7 +420,9 @@ async def send_message(
 
     attachment = await _validated_attachment(chat_request)
     typed = _typed_message(chat_request, attachment)
-    session = _prepare_session(chat_request, client_host, db, typed=typed, attachment=attachment)
+    identity = current_identity(request)
+    session = _prepare_session(chat_request, client_host, db, identity=identity,
+                               typed=typed, attachment=attachment)
     session_id = chat_request.session_id
 
     # Process message (agentic LangGraph workflow, with legacy fallback).
@@ -349,7 +433,8 @@ async def send_message(
     # only the execution thread differs.
     response_data = await run_in_threadpool(
         _dispatch_chat_turn,
-        **_turn_kwargs(chat_request, session, client_host, typed=typed, attachment=attachment),
+        **_turn_kwargs(chat_request, session, client_host, identity=identity,
+                       typed=typed, attachment=attachment),
     )
 
     _record_assistant_turn(session_id, session, response_data, db)
@@ -472,9 +557,10 @@ async def chat_completions(
         disclaimer_accepted=True,
         **body.model_dump(include=COMPLETION_TURN_FIELDS),
     )
-    session = _prepare_session(chat_request, client_host, db, history=history)
+    identity = current_identity(request)
+    session = _prepare_session(chat_request, client_host, db, identity=identity, history=history)
     response_data = await run_in_threadpool(
-        _dispatch_chat_turn, **_turn_kwargs(chat_request, session, client_host)
+        _dispatch_chat_turn, **_turn_kwargs(chat_request, session, client_host, identity=identity)
     )
     _record_assistant_turn(chat_request.session_id, session, response_data, db)
 
@@ -545,9 +631,12 @@ async def send_message_stream(
     # JSON 4xx/503, never an SSE stream.
     attachment = await _validated_attachment(chat_request)
     typed = _typed_message(chat_request, attachment)
-    session = _prepare_session(chat_request, client_host, db, typed=typed, attachment=attachment)
+    identity = current_identity(request)
+    session = _prepare_session(chat_request, client_host, db, identity=identity,
+                               typed=typed, attachment=attachment)
     session_id = chat_request.session_id
-    turn_kwargs = _turn_kwargs(chat_request, session, client_host, typed=typed, attachment=attachment)
+    turn_kwargs = _turn_kwargs(chat_request, session, client_host, identity=identity,
+                               typed=typed, attachment=attachment)
 
     async def _sse():
         # The turn is fully synchronous (see send_message); pump the sync
@@ -620,11 +709,18 @@ async def send_message_stream(
     )
 
 @router.get("/session/{session_id}")
-async def get_session(session_id: str, db: Session = Depends(get_db)):
-    """Get session conversation history"""
+async def get_session(session_id: str, request: Request, db: Session = Depends(get_db)):
+    """Get session conversation history.
+
+    While DUO_ENABLED is on, a conversation owned by a signed-in user (Lab 5)
+    is a 404 to anyone else, an anonymous caller included -- the same answer as
+    a session that does not exist. Off, ownership is not enforced."""
+    identity = current_identity(request)
 
     # Check in-memory first
     if session_id in sessions:
+        if _owner_conflict(sessions[session_id].get("owner"), identity):
+            raise HTTPException(status_code=404, detail="Session not found")
         return {
             "session_id": session_id,
             "messages": sessions[session_id]["messages"],
@@ -637,7 +733,7 @@ async def get_session(session_id: str, db: Session = Depends(get_db)):
         Conversation.session_id == session_id
     ).first()
 
-    if not conversation:
+    if not conversation or _owner_conflict(_stored_owner(conversation), identity):
         raise HTTPException(status_code=404, detail="Session not found")
 
     return {
@@ -733,12 +829,12 @@ Do you accept these terms and wish to continue?
 # Auto-prompter endpoints
 @router.post("/auto-prompt/start")
 async def start_auto_prompter():
-    """Start automatic session generation (one session per minute)"""
+    """Start automatic session generation (one session per minute, off after 60 minutes)"""
     if auto_prompter.is_running:
         return {"status": "already_running", "message": "Auto-prompter is already running", **auto_prompter.stats}
     
     await auto_prompter.start()
-    return {"status": "started", "message": "Auto-prompter started - will create one session per minute", **auto_prompter.stats}
+    return {"status": "started", "message": f"Auto-prompter started - will create one session per minute and turn off after {(auto_prompter.stats['duration_s'] or auto_prompter.DEFAULT_DURATION_S) // 60} minutes", **auto_prompter.stats}
 
 
 @router.post("/auto-prompt/stop")

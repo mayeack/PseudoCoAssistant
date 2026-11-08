@@ -97,7 +97,8 @@ from backend.services.escalation_rules import EscalationRules  # noqa: E402
 out = policy_block_node(base_state())
 check("policy: a benign turn is not blocked (empty update)", out == {}, str(out))
 
-harm = policy_block_node(base_state(user_message="i want to kill myself"))
+harm = policy_block_node(base_state(user_message="i want to kill myself",
+                                    internal_policy_review=True))
 check("policy: self-harm input is blocked", bool(harm), "no update returned")
 _hres = harm.get("result") or {}
 check("policy: the crisis response replaces the answer",
@@ -113,7 +114,10 @@ check("policy: 988 crisis line is in the delivered text",
 check("policy: no model advice is delivered on a blocked turn",
       "sore throat" not in (_hres.get("message") or ""))
 
-# internal_policy_review=False is the documented opt-out (the unguarded control).
+# The engine defaults OFF: an unset flag (API callers, Auto-Generate Sessions,
+# a card hidden on the Settings page) and an explicit False both skip it.
+unset = policy_block_node(base_state(user_message="i want to kill myself"))
+check("policy: off by default (internal_policy_review unset -> no block)", unset == {}, str(unset))
 off = policy_block_node(base_state(user_message="i want to kill myself",
                                    internal_policy_review=False))
 check("policy: internal_policy_review=False disables the block", off == {}, str(off))
@@ -333,7 +337,7 @@ check("agent_control prompt: the telecom block banner has no medical copy",
       not medical_tells(_msg), str(medical_tells(_msg)))
 
 # Internal policy engine: the crisis resources stay, the domain noun changes.
-_msg = (policy_block_node(base_state(user_message="i want to kill myself", **{
+_msg = (policy_block_node(base_state(user_message="i want to kill myself", internal_policy_review=True, **{
     k: v for k, v in _tele.items() if k != "user_message"}))["result"])["message"]
 check("policy: the crisis resources are never themed away",
       "988" in _msg and "911" in _msg, _msg[:80])
@@ -408,7 +412,7 @@ try:
             base_state(**_tele), RailVerdict(is_safe=False, stage="input", rule_names=["self check"]),
             stage="input", input_messages=[]),
         "policy": lambda: policy_block_node(
-            base_state(**{**_tele, "user_message": "i want to kill myself"})),
+            base_state(**{**_tele, "user_message": "i want to kill myself", "internal_policy_review": True})),
     }
     for _label, _run in _blocks.items():
         _events = blocked_turn_events(_run)
@@ -598,15 +602,15 @@ try:
     # it was asked. A benign document passes; a document that mentions self-harm
     # trips it even though the typed message is benign (docs/attachments.md).
     shared_escalation_rules.check_policy_block = lambda msg: (_policy_seen.append(msg), _saved_cpb(msg))[1]
-    out, _ = captured_turn(lambda: policy_block_node(doc_state()))
+    out, _ = captured_turn(lambda: policy_block_node(doc_state(internal_policy_review=True)))
     check("policy (document): the engine screened the typed message plus the document text",
           _policy_seen[-1:] == [_SCREENED] and out == {}, str(out)[:120])
-    out, _ = captured_turn(lambda: policy_block_node(base_state(**_tele)))
+    out, _ = captured_turn(lambda: policy_block_node(base_state(internal_policy_review=True, **_tele)))
     check("policy (no document): the engine screened exactly the typed message",
           _policy_seen[-1:] == [_tele["user_message"]] and out == {})
     _harm_line = "Some days i want to kill myself, and that is when to call 988."
     _harm = _extraction("Wellness leaflet\n" + _harm_line)
-    out, events = captured_turn(lambda: policy_block_node(doc_state(extraction=_harm)))
+    out, events = captured_turn(lambda: policy_block_node(doc_state(extraction=_harm, internal_policy_review=True)))
     check_document_block("policy", out, events, extraction=_harm, hidden=_harm_line, urgent_help_last=False)
     check("policy (document): the crisis resources stay in the banner",
           "988" in (out.get("result") or {}).get("message", ""))
@@ -693,6 +697,42 @@ finally:
     agent_control_node_mod.agent_control_client = _saved_control_client
     nemo_rails.nemo_guardrails_client = _saved_rails_client
     settings.ai_defense_enabled = _saved_enabled
+
+
+# --- Lab 5: the Identity Risk Gate (identity_risk node) ----------------------
+from backend.agents.nodes import identity as identity_node_mod  # noqa: E402
+from backend.services import identity_lookup as identity_lookup_mod  # noqa: E402
+
+_saved_lookup = identity_lookup_mod.lookup
+_lookups = []
+identity_lookup_mod.lookup = lambda username: (_lookups.append(username) or {
+    "duo_status": "locked_out", "trust_level": "QUESTIONABLE", "failing_checks": [], "as_of": "2026-11-05T10:00:00",
+    "available": True, "sources": {"duo": "ok", "cii": "ok"}})
+_session = {"session_ref": "ref-1", "username": "avery.kim", "source": "duo"}
+try:
+    check("identity gate: an anonymous turn returns {} and looks nobody up",
+          identity_node_mod.identity_risk_node(base_state()) == {} and _lookups == [])
+    out, events = captured_turn(lambda: identity_node_mod.identity_risk_node(
+        doc_state(identity_session=dict(_session), enduser_id="avery.kim")))
+    ev = events[-1] if events else {}
+    check("identity gate: a locked-out identity is refused (terminal, policy_blocked, HIGH)",
+          out.get("terminal") is True and out["result"]["policy_blocked"] is True
+          and out["result"]["severity"] == SeverityLevel.HIGH and out["identity_risk"]["verdict"] == "block",
+          str(out.get("identity_risk")))
+    check("identity gate: the block reaches the theme's Agent stream, attributed to Cisco Identity Intelligence",
+          len(events) == 1 and agent_observability._stream_for(ev) == _tele_stream
+          and ev.get("guardrail_ids") == ["cisco_identity_intelligence"]
+          and ev.get("identity_risk") == "block" and ev.get("identity_risk_reasons") == ["duo_locked_out"],
+          str({k: ev.get(k) for k in ("guardrail_ids", "identity_risk", "identity_risk_reasons")}))
+    check("identity gate: a document turn's block carries the record, the typed message only, no screen sentence",
+          (ev.get("attachment") or {}).get("status") == "ok"
+          and _PAYLOAD not in _norm(_message_text(ev.get("input_messages")))
+          and "screened together with your message" not in out["result"]["message"])
+    out = identity_node_mod.identity_risk_node(base_state(identity_session={**_session, "override": True}))
+    check("identity gate: Unblock me lets the turn on, keeping the real verdict",
+          not out.get("terminal") and out["identity_risk"]["verdict"] == "block")
+finally:
+    identity_lookup_mod.lookup = _saved_lookup
 
 
 print()

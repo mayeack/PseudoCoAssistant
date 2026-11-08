@@ -74,7 +74,15 @@ _BLOCK_GUARDRAILS = {
     "openclaw_tool_guard": ("OpenClaw tool guard", "blocked_tool_call"),
     "nemo_guardrails": ("NVIDIA NeMo Guardrails policy", "blocked_by_nemo_guardrails"),
     "nemoclaw_guardrails": ("NVIDIA NemoClaw guardrails", "blocked_tool_call"),
+    # Lab 5: the Identity Risk Gate (backend/agents/nodes/identity.py) refused a
+    # signed-in identity that Duo / Cisco Identity Intelligence report at risk.
+    # A fail-closed block (nothing known against the identity, it just could
+    # not be verified) is mapped by _identity_unverified() instead.
+    "cisco_identity_intelligence": ("Cisco Identity Intelligence identity risk", "blocked_compromised_identity"),
 }
+# The Identity Risk Gate's fail-closed block (IDENTITY_FAIL_OPEN off, Duo or CII
+# unreachable): neutral, never counted as a compromised identity.
+_IDENTITY_UNVERIFIED = ("Cisco Identity Intelligence identity verification", "blocked_identity_unverified")
 
 # PII types that are also Protected Health Information in a medical context.
 _PHI_PII_TYPES = {
@@ -138,10 +146,21 @@ def _policy_action(
     return "allow"
 
 
+def _identity_unverified(guardrail_ids: List[str], safety_categories: List[str]) -> bool:
+    """The Identity Risk Gate's fail-closed block: its only category is
+    ``identity_unverified`` (backend/agents/nodes/identity.py), so nothing is
+    known against the identity. It is not a compromised identity, and the
+    overlay never counts it as one."""
+    cats = {c.strip().lower() for c in safety_categories}
+    return ("cisco_identity_intelligence" in guardrail_ids and "identity_unverified" in cats
+            and "compromised_identity" not in cats)
+
+
 def _policy_name(guardrail_ids: List[str], safety_categories: List[str]) -> Optional[str]:
     names: List[str] = []
+    unverified = _identity_unverified(guardrail_ids, safety_categories)
     for gid in guardrail_ids:
-        mapped = _BLOCK_GUARDRAILS.get(gid)
+        mapped = _IDENTITY_UNVERIFIED if unverified and gid == "cisco_identity_intelligence" else _BLOCK_GUARDRAILS.get(gid)
         if mapped:
             names.append(mapped[0])
         elif gid == "escalation_rules":
@@ -157,12 +176,14 @@ def _policy_name(guardrail_ids: List[str], safety_categories: List[str]) -> Opti
 
 def _business_outcome(
     *, operation_name: str, policy_blocked: bool, guardrail_ids: List[str],
-    human_escalation: bool, finish_reasons: List[str],
+    human_escalation: bool, finish_reasons: List[str], safety_categories: Optional[List[str]] = None,
 ) -> str:
     if operation_name == "error":
         return "service_error"
     if "clarify" in finish_reasons or "clarifying_question" in finish_reasons:
         return "clarification_requested"
+    if policy_blocked and _identity_unverified(guardrail_ids, safety_categories or []):
+        return _IDENTITY_UNVERIFIED[1]
     for gid in guardrail_ids:
         mapped = _BLOCK_GUARDRAILS.get(gid)
         if mapped and policy_blocked:
@@ -186,6 +207,14 @@ def _prompt_category(
     # "tool_exploitation" regardless of what PHI/PII rode in its arguments.
     if operation_name == "tool_call":
         return "tool_exploitation"
+    # Lab 5: a turn the Identity Risk Gate refused is about WHO asked, not what
+    # was asked -- never self-harm, an emergency or prompt injection (Lab 4's
+    # correlation keys on those). A fail-closed block (the identity could not
+    # be verified) is its own, neutral category.
+    if _identity_unverified(guardrail_ids, safety_categories):
+        return "identity_unverified"
+    if "cisco_identity_intelligence" in guardrail_ids or "compromised_identity" in cats_text:
+        return "compromised_identity"
     if "policy_block" in guardrail_ids or "self-harm" in cats_text:
         return "self_harm_crisis"
     if (severity or "").upper() == "EMERGENCY" or "emergency" in cats_text:
@@ -335,6 +364,7 @@ def derive_executive_fields(log: Dict[str, Any]) -> Dict[str, Any]:
                 operation_name=log.get("operation_name", "chat"),
                 policy_blocked=policy_blocked, guardrail_ids=guardrail_ids,
                 human_escalation=human_escalation, finish_reasons=finish_reasons,
+                safety_categories=safety_categories,
             ),
             "audit_status": _audit_status(log),
             "input_modality": _input_modality(log),

@@ -288,10 +288,12 @@ The default theme is <code>medadvice</code>; an unknown theme is a 404.</li>
 <p>Both sample endpoints sit behind the access key like every other <code>/api</code> route.</p>
 <h2>Where it runs in the pipeline</h2>
 <p><code>attachment_intake</code> is the first node of the <strong>shared guardrail chain</strong>
-(<code>blueprints/guardrails.py</code>), so both blueprints get it by construction:</p>
-<pre><code>START -&gt; attachment_intake -&gt; policy -&gt; prompt_defense -&gt; agent_control_prompt
-      -&gt; nemo_input_rails -&gt; scheduling_intake -&gt; ehr_lookup -&gt; internal_docs
-      -&gt; mcp_thrash_launch -&gt; &lt;blueprint core&gt;
+(<code>PRE_NODES[0]</code> in <code>blueprints/guardrails.py</code>), so both blueprints get it by
+construction. The Identity Risk Gate, <code>identity_risk</code> (Lab 5,
+<code>docs/identity.md</code>), is <code>PRE_NODES[1]</code>, between it and <code>policy</code>:</p>
+<pre><code>START -&gt; attachment_intake -&gt; identity_risk -&gt; policy -&gt; prompt_defense
+      -&gt; agent_control_prompt -&gt; nemo_input_rails -&gt; scheduling_intake
+      -&gt; ehr_lookup -&gt; internal_docs -&gt; mcp_thrash_launch -&gt; &lt;blueprint core&gt;
       -&gt; safety -&gt; injection -&gt; scheduling -&gt; compliance -&gt; agent_control
       -&gt; nemo_output_rails -&gt; response_defense -&gt; mcp_thrash_join -&gt; governance
 </code></pre>
@@ -315,6 +317,15 @@ document…</em>.</p>
 <p>The node is first because every prompt screen must see the document: the free
 internal policy engine, Cisco AI Defense, the Agent Observability Controls
 prompt stage and the NeMo input rails all run after it.</p>
+<p><code>identity_risk</code> runs right after it, so it gets a turn whose document is
+already reduced to metadata. It reads neither the message nor the document: on
+a signed-in turn it decides from the identity alone (Duo account status, Cisco
+Identity Intelligence trust level and failing checks), and on an anonymous
+turn it does nothing at all. When it refuses a signed-in turn, that happens
+before any prompt screen or model runs. Its block event carries the typed
+message and the attachment's metadata (the <code>attachment</code> field), never the
+document text, and its banner never gets the &quot;screened together&quot; sentence
+(below), because the gate screened no text.</p>
 <h2>Who sees what</h2>
 <p>All four prompt screens and the answering agent get the <strong>same composed text</strong>
 (<code>attachments.compose_user_turn</code>, through <code>screened_prompt</code> and
@@ -342,6 +353,10 @@ defence.</p>
 </tr>
 </thead>
 <tbody>
+<tr>
+<td>Identity Risk Gate (<code>identity_risk</code>, Lab 5)</td>
+<td>Neither: it decides from the signed-in identity. Its block event records the typed message and the attachment's metadata only</td>
+</tr>
 <tr>
 <td>Internal policy engine (<code>policy</code>)</td>
 <td>The composed text</td>
@@ -392,8 +407,8 @@ real verdict, the banner adds one factual sentence: <em>Your attached document
 '<name>' was screened together with your message.</em> The sentence goes before the
 theme's closing urgent-help line, or after the crisis text for a policy block.
 It never says which part triggered the block. Fail-closed &quot;could not be
-reviewed&quot; banners and response-stage banners do not get it, because there it
-would not be true.</p>
+reviewed&quot; banners, response-stage banners and the Identity Risk Gate's banner
+do not get it, because there it would not be true.</p>
 <h2>What is logged where</h2>
 <p><strong>The bytes never leave the request.</strong> They are not stored in the database,
 written to a log or HEC, or put on a span or in Splunk Agent Observability. The
@@ -830,7 +845,7 @@ re-screened on every turn.</li>
 <code>screened_prompt</code>, <code>with_attachment</code>, <code>with_attachment_note</code>,
 <code>attachment_governance_fields</code>, <code>block_banner_suffix</code>.</li>
 <li><code>backend/agents/blueprints/guardrails.py</code>: wires the node in as
-<code>PRE_NODES[0]</code>.</li>
+<code>PRE_NODES[0]</code>, ahead of <code>identity_risk</code> (<code>PRE_NODES[1]</code>) and <code>policy</code>.</li>
 <li><code>backend/agents/nodes/policy.py</code>, <code>defense.py</code>, <code>agent_control.py</code>,
 <code>nemo_rails.py</code>: screen the composed text.</li>
 <li><code>backend/agents/nodes/synthesizer.py</code>: <code>with_attachment</code>.</li>

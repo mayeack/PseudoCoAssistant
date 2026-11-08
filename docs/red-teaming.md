@@ -72,7 +72,8 @@ is not carried over.
 | Another theme | `"theme": "retail"` (any theme key) |
 
 An unset flag means the server default. For API callers that is **off** for
-AI Defense review, so a template that leaves it out runs unprotected.
+AI Defense review and for the internal policy engine, so a template that
+leaves them out runs unprotected.
 
 ## Authentication
 
