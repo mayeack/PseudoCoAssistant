@@ -10,11 +10,25 @@ no identity broker: the app calls both services itself, read-only.
   signed by ``duo_sign``: Duo's HMAC-SHA512 request signing (signature version
   5, the default of the official ``duo_client``; tests/test_identity_gate.py
   pins known answers produced by ``duo_client`` 5.7.0).
-- **Cisco Identity Intelligence** (an API client's four "Copy all" values): an
-  OAuth client-credentials token from ``CII_TOKEN_URL`` (cached until shortly
-  before it expires, about 10 h), then ``CII_END_USER_QUERY`` against the
-  GraphQL API at ``CII_API_URL`` for the user's level of trust and current
-  failing checks. CII's login is the user's email, so the Duo answer's email
+- **Cisco Identity Intelligence**: ``CII_END_USER_QUERY`` against the GraphQL
+  API at ``CII_API_URL`` for the user's level of trust and current failing
+  checks, with a bearer token from one of two places:
+
+  - ``CII_ACCESS_TOKEN``, a token minted elsewhere. ``lab5-setup`` mints one
+    on the facilitator's Mac and pushes it to every box. The app then never
+    asks the token endpoint: CII's token endpoint gives each API client 6
+    tokens an hour (spike S16), which a room of boxes minting their own would
+    use up. The token is used until the expiry written in it (a JWT's
+    ``exp``; CII's last 24 h), then CII is ``unavailable``
+    (``token_expired``) until a new one is pushed. A 401 for it is
+    ``token_rejected``: nothing is minted in its place.
+  - Otherwise the API client's "Copy all" values: an OAuth client-credentials
+    token from ``CII_TOKEN_URL``, cached until shortly before it expires.
+    After a failed token request the endpoint is not asked again for a
+    minute, or for its ``Retry-After`` when that is longer (an hour at most):
+    asking on every lookup only keeps a used-up quota refusing.
+
+  CII's login is the user's email, so the Duo answer's email
   is the CII login (a username that is already an email is used as is).
   The last email Duo gave for each username is kept beyond the cache
   (``remembered_email``; it does not change), so CII is still asked while
@@ -31,9 +45,12 @@ Rules:
 - **Bounded:** 3 s to connect, 5 s per read, and callers run it off the event
   loop (the middleware uses ``run_in_threadpool``; chat turns already run in
   the threadpool; the routes that call it are plain ``def``).
-- **Cached** per username and source for ``IDENTITY_STATUS_TTL_SECONDS``
-  (10 s), failures included, so a down service costs one slow request per
-  user per window; concurrent callers share one fetch.
+- **Cached** per username and source, failures included, so a down service
+  costs one slow request per user per window; concurrent callers share one
+  fetch. Duo answers and every failure keep ``IDENTITY_STATUS_TTL_SECONDS``
+  (10 s): the revocation pull needs Duo fresh. CII's answers keep
+  ``IDENTITY_CII_TTL_SECONDS`` (300 s): CII changes when it collects from Duo,
+  not from one request to the next, and every signed-in browser polls.
 - **Inert unless configured:** with a source's keys empty nothing is sent to
   it (``state`` "not_configured"). Secrets go only over https.
 
@@ -53,9 +70,11 @@ carries.
 from __future__ import annotations
 
 import base64
+import binascii
 import email.utils
 import hashlib
 import hmac
+import json
 import logging
 import re
 import threading
@@ -100,8 +119,14 @@ CII_END_USER_QUERY = (
 )
 #: Refresh the CII token this long before the server says it expires.
 TOKEN_REFRESH_MARGIN_S = 300.0
-#: The token's life when the token endpoint does not say (CII documents 10 h).
+#: The token's life when the token endpoint does not say (CII's say 24 h).
 TOKEN_DEFAULT_LIFETIME_S = 10 * 3600.0
+#: After a failed token request, the token endpoint is not asked again for this
+#: long, or for its ``Retry-After`` when that is longer, up to the maximum. CII
+#: gives each API client 6 tokens an hour (spike S16, 2026-11-07); asking again
+#: on every lookup only keeps a used-up quota refusing.
+TOKEN_RETRY_MIN_S = 60.0
+TOKEN_RETRY_MAX_S = 3600.0
 
 _CACHE_MAX = 2048
 _FAILING_CHECKS_MAX = 32
@@ -177,19 +202,31 @@ def duo_configured() -> bool:
 
 
 def cii_configured() -> bool:
-    """DUO_ENABLED with the CII API client's four values (https URLs)."""
-    return bool(getattr(settings, "duo_enabled", False) and _s("cii_client_id")
-                and _s("cii_client_secret") and _https_url(_s("cii_token_url"))
-                and _https_url(_s("cii_api_url")))
+    """DUO_ENABLED with the CII API URL (https) and a way to a token: a pushed
+    ``CII_ACCESS_TOKEN``, or the API client's ID, secret and token URL."""
+    if not (getattr(settings, "duo_enabled", False) and _https_url(_s("cii_api_url"))):
+        return False
+    return bool(_s("cii_access_token") or (_s("cii_client_id") and _s("cii_client_secret")
+                                           and _https_url(_s("cii_token_url"))))
 
 
 def ttl_seconds() -> float:
-    """``IDENTITY_STATUS_TTL_SECONDS``, clamped to 1 s .. 5 min."""
+    """``IDENTITY_STATUS_TTL_SECONDS``, clamped to 1 s .. 5 min: Duo answers and
+    every failure."""
     try:
         value = float(getattr(settings, "identity_status_ttl_seconds", 10))
     except (TypeError, ValueError):
         value = 10.0
     return max(1.0, min(300.0, value))
+
+
+def cii_ttl_seconds() -> float:
+    """``IDENTITY_CII_TTL_SECONDS``, clamped to 1 s .. 1 h: CII's answers."""
+    try:
+        value = float(getattr(settings, "identity_cii_ttl_seconds", 300))
+    except (TypeError, ValueError):
+        value = 300.0
+    return max(1.0, min(3600.0, value))
 
 
 # --------------------------------------------------------------------------- HTTP client
@@ -235,20 +272,26 @@ def _error_code(exc: BaseException) -> str:
 # --------------------------------------------------------------------------- cache
 class _Cache:
     """A small TTL cache with one fetch in flight per key. ``clear`` bumps a
-    generation, so a fetch that started before it never stores its answer."""
+    generation, so a fetch that started before it never stores its answer.
+    ``ttl_of(answer)`` says how long each answer is kept, decided when it is
+    stored."""
 
-    def __init__(self) -> None:
+    def __init__(self, ttl_of: Callable[[Mapping[str, Any]], float]) -> None:
+        self._ttl_of = ttl_of
         self._lock = threading.Lock()
-        self._data: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        self._data: Dict[str, Tuple[float, Dict[str, Any], float]] = {}
         self._inflight: Dict[str, threading.Lock] = {}
         self._generation = 0
 
+    def _fresh(self, key: str) -> Optional[Dict[str, Any]]:
+        hit = self._data.get(key)
+        return hit[1] if hit is not None and time.monotonic() - hit[0] < hit[2] else None
+
     def get(self, key: str, fetch: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
-        ttl = ttl_seconds()
         with self._lock:
-            hit = self._data.get(key)
-            if hit is not None and time.monotonic() - hit[0] < ttl:
-                return hit[1]
+            hit = self._fresh(key)
+            if hit is not None:
+                return hit
             gate = self._inflight.setdefault(key, threading.Lock())
         # One fetch per key; the others wait for it (each fetch is bounded by
         # the HTTP timeouts, and so is this wait).
@@ -256,16 +299,17 @@ class _Cache:
             return _unavailable("busy")
         try:
             with self._lock:
-                hit = self._data.get(key)
-                if hit is not None and time.monotonic() - hit[0] < ttl:
-                    return hit[1]
+                hit = self._fresh(key)
+                if hit is not None:
+                    return hit
                 generation = self._generation
             value = fetch()
+            ttl = self._ttl_of(value)
             with self._lock:
                 if generation == self._generation:
                     if len(self._data) >= _CACHE_MAX:
                         self._data.clear()
-                    self._data[key] = (time.monotonic(), value)
+                    self._data[key] = (time.monotonic(), value, ttl)
             return value
         finally:
             gate.release()
@@ -279,10 +323,16 @@ class _Cache:
             self._generation += 1
 
 
-_duo_cache = _Cache()
-_cii_cache = _Cache()
+def _cii_answer_ttl(answer: Mapping[str, Any]) -> float:
+    """CII's answers keep the CII TTL; a failure keeps only the short one."""
+    return cii_ttl_seconds() if answer.get("state") in ANSWERED else ttl_seconds()
+
+
+_duo_cache = _Cache(lambda answer: ttl_seconds())
+_cii_cache = _Cache(_cii_answer_ttl)
 _token_lock = threading.Lock()
 _token: Optional[Tuple[str, float]] = None      # (access token, monotonic expiry)
+_token_retry: Optional[Tuple[float, str]] = None  # (monotonic time it may be asked again, the failure)
 
 # username -> the email of Duo's last successful answer about it: CII's login.
 # Not an answer cache (no TTL): an email does not change with the account's
@@ -295,12 +345,14 @@ _emails: Dict[str, str] = {}
 
 def clear_cache() -> None:
     """Forget every cached answer and the CII token (tests, configuration
-    change). The remembered emails stay (``forget_emails``)."""
-    global _token
+    change), and any wait before the next token request. The remembered
+    emails stay (``forget_emails``)."""
+    global _token, _token_retry
     _duo_cache.clear()
     _cii_cache.clear()
     with _token_lock:
         _token = None
+        _token_retry = None
 
 
 def forget_emails() -> None:
@@ -403,27 +455,79 @@ def duo_user(username: Any) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- Cisco Identity Intelligence
+def jwt_expiry(token: str) -> Optional[float]:
+    """The ``exp`` claim of a JWT, in seconds since the epoch, read without
+    checking the signature: only so a pushed token stops being sent once it
+    has expired (CII checks it either way). None for a token that is not a
+    JWT or carries no ``exp``."""
+    parts = str(token or "").split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, TypeError, binascii.Error):
+        return None
+    exp = claims.get("exp") if isinstance(claims, dict) else None
+    return float(exp) if isinstance(exp, (int, float)) and not isinstance(exp, bool) else None
+
+
+def _retry_after_s(response: httpx.Response) -> float:
+    """How long to leave the token endpoint alone after it refused: its
+    ``Retry-After`` (seconds or an HTTP date), clamped to the minimum and
+    maximum waits."""
+    raw = str(response.headers.get("retry-after") or "").strip()
+    wait = TOKEN_RETRY_MIN_S
+    if raw.isdigit():
+        wait = float(raw)
+    elif raw:
+        try:
+            wait = email.utils.parsedate_to_datetime(raw).timestamp() - time.time()
+        except (TypeError, ValueError, IndexError, OverflowError):
+            wait = TOKEN_RETRY_MIN_S
+    return max(TOKEN_RETRY_MIN_S, min(TOKEN_RETRY_MAX_S, wait))
+
+
+def _token_failed(error: str, wait: float = TOKEN_RETRY_MIN_S) -> Tuple[None, str]:
+    """Record a failed token request (caller holds ``_token_lock``)."""
+    global _token_retry
+    _token_retry = (time.monotonic() + wait, error)
+    return None, error
+
+
 def _cii_access_token(*, refresh: bool = False) -> Tuple[Optional[str], Optional[str]]:
-    """``(token, None)`` or ``(None, error)``. Cached until shortly before it expires."""
-    global _token
+    """``(token, None)`` or ``(None, error)``. A pushed ``CII_ACCESS_TOKEN`` is
+    used as is until it expires (``token_expired``). Otherwise the API
+    client's token, cached until shortly before it expires; after a failed
+    request the endpoint is left alone for a while (``_retry_after_s``) and
+    each lookup meanwhile gets that failure back without asking."""
+    global _token, _token_retry
+    pushed = _s("cii_access_token")
+    if pushed:
+        expires = jwt_expiry(pushed)
+        if expires is not None and time.time() >= expires:
+            return None, "token_expired"
+        return pushed, None
     with _token_lock:
         if not refresh and _token is not None and time.monotonic() < _token[1]:
             return _token[0], None
+        if _token_retry is not None and time.monotonic() < _token_retry[0]:
+            return None, _token_retry[1]
         body = {"client_id": _s("cii_client_id"), "client_secret": _s("cii_client_secret"),
                 "grant_type": "client_credentials"}
         try:
             response = _client().post(_s("cii_token_url"), json=body)
         except Exception as exc:  # noqa: BLE001
-            return None, "token_" + _error_code(exc)
+            return _token_failed("token_" + _error_code(exc))
         if response.status_code != 200:
-            return None, f"token_http_{response.status_code}"
+            return _token_failed(f"token_http_{response.status_code}", _retry_after_s(response))
         try:
             data = response.json()
         except ValueError:
-            return None, "token_bad_response"
+            return _token_failed("token_bad_response")
         token = data.get("access_token") if isinstance(data, dict) else None
         if not isinstance(token, str) or not token:
-            return None, "token_bad_response"
+            return _token_failed("token_bad_response")
+        _token_retry = None
         # A credential: never logged, and backend/logging/redaction.py drops it
         # by pattern where it travels (Authorization: Bearer, access_token, a JWT).
         try:
@@ -563,6 +667,10 @@ def _cii_fetch(login: str) -> Dict[str, Any]:
         return _unavailable(error or "token_error")
     response, error = _cii_query(login, token)
     if response is not None and response.status_code == 401:
+        if _s("cii_access_token"):
+            # A pushed token CII refuses: nothing is minted in its place (the
+            # box holds no API client), so lab5-setup has to push a new one.
+            return _unavailable("token_rejected")
         # The cached token was revoked or expired early: one fresh token, one retry.
         token, error = _cii_access_token(refresh=True)
         if token is None:

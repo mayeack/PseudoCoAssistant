@@ -223,8 +223,8 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   - Authorization, Cookie, Set-Cookie and X-Access-Key values, the app's own
     cookies, Bearer tokens and JWT-shaped strings;
   - the exact values of the configured secrets (`DUO_CLIENT_SECRET`,
-    `DUO_ADMIN_SKEY`, `CII_CLIENT_SECRET`, `ACCESS_KEY`), compiled once at
-    startup and again when the config changes.
+    `DUO_ADMIN_SKEY`, `CII_CLIENT_SECRET`, `CII_ACCESS_TOKEN`, `ACCESS_KEY`),
+    compiled once at startup and again when the config changes.
 
   Nothing a request sends is ever registered, so no input can blank a username
   out of the logs. A new credential goes on that configured-secrets list.
@@ -255,8 +255,19 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   log or lookup (the spray's actor has none, so AI Defense still sees it).
 - **`identity_gate.decide` is pure.** Lookups (`backend/services/identity_lookup.py`:
   Duo Admin API, signed HMAC-SHA512; CII token + GraphQL) never raise, are
-  bounded (3 s connect / 5 s read), cached 10 s, and go out only over https.
-  The CII query is the one constant `CII_END_USER_QUERY`.
+  bounded (3 s connect / 5 s read) and go out only over https. Duo answers
+  and every failure are cached 10 s (the revocation pull needs Duo fresh),
+  CII's answers `IDENTITY_CII_TTL_SECONDS` (300 s). The CII query is the one
+  constant `CII_END_USER_QUERY`.
+- **A box never mints CII tokens.** CII's token endpoint gives an API client
+  6 tokens a clock hour (spike S16), and a token lasts 24 h. `lab5-setup`
+  mints one on the Mac and pushes it as `CII_ACCESS_TOKEN`; the API client
+  stays in the Mac's Keychain. The gate uses a pushed token until the `exp`
+  in it, then reads CII as `unavailable` (`token_expired`), and never mints
+  in its place, not even on a 401 (`token_rejected`). With the API client
+  instead (a dev copy), a failed token request is not repeated for
+  `Retry-After`, at least a minute. Never add a code path that mints a
+  token per box, per request or per restart.
 - **Fail open (A3):** an unavailable lookup allows the turn with
   `identity_check="unavailable"`; a block resting on what WAS learned still
   blocks, an `UNTRUSTED` or failing check in a partial CII answer included

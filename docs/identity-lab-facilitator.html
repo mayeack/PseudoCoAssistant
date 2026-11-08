@@ -116,7 +116,7 @@ ul,ol{padding-left:1.4rem}
 </ul>
 </li>
 <li><code>deploy/lab5/lab5-setup check &lt;workshop.yaml&gt;</code>. Every box should say <strong>ready, nothing to upgrade</strong>, and every participant account and card <code>PLAN</code>. It changes nothing. A room persona that is missing in Duo, not active there (bypass status or disabled), in a Duo group whose status is Bypass or Disabled, or near Duo's 100 bypass codes fails every card here, and <code>up</code> would issue no persona codes. For a persona that is not active, run <code>py scripts/identity/provision_personas.py --reset --only &lt;persona&gt;</code>; for one in such a group, take it out of the group or set the group Active in the Admin Panel. Bypass status and bypass groups are never acceptable (plan 4.3): Duo then skips the second factor for that persona, so anyone with an instance's access key could sign in as it. A locked-out persona needs no reset: Duo unlocks it on its own in about 15 minutes, and meanwhile its cards are <code>PARTIAL</code> (the other personas' codes go on); retry <code>lab5-setup handouts &lt;workshop.yaml&gt; --only N</code> after that.</li>
-<li><code>deploy/lab5/lab5-setup up &lt;workshop.yaml&gt;</code>. The boxes get their Lab 5 keys, tunnel and DNS name, HEC host and restart. Then every box that came up gets its participant account <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code>, its card gets the team's bypass codes for the room's victim and each trusted persona, and the handout is written.</li>
+<li><code>deploy/lab5/lab5-setup up &lt;workshop.yaml&gt;</code>. The boxes get their Lab 5 keys, tunnel and DNS name, HEC host and restart. Their CII access is one 24 h token that <code>up</code> mints on your Mac (S16); the CII API client never leaves the Mac. Then every box that came up gets its participant account <code>l5-&lt;workshop&gt;-&lt;nn&gt;</code>, its card gets the team's bypass codes for the room's victim and each trusted persona, and the handout is written.</li>
 <li><strong>Temporary passwords.</strong> <code>up</code> prints an Admin Panel link per account. Open each one, click <em>Create temporary password</em> (valid 30 days) and write it on that participant's card. The Admin API cannot set passwords. While you are in the Admin Panel, check that <strong>PseudoCo Lab: Sign-in</strong> still admits <strong>CII Read-Only</strong> (step 4 of &quot;Once, before the first delivery&quot;) and that its policy still allows bypass code + hardware token. <code>up</code> reminds you, because it cannot check either.</li>
 <li>Print <code>~/.pseudoco-lab5/workshops/&lt;workshop&gt;/handout.html</code> and cut the cards apart.</li>
 <li><code>deploy/lab5/lab5-setup status &lt;workshop.yaml&gt;</code>. Every box should be green. Participants show &quot;no password yet&quot; until they sign in to CII and set their own. Each room persona shows its Duo status, and each card's persona codes show how long they have left. Each box's <code>victim</code> row runs its own Identity Risk Gate on the room's victim: a <code>FAIL</code> there means the box cannot ask Duo or CII (a stale Status key, say), and must be fixed before lab day. A <code>WARN</code> is expected until the takeover's failures reach CII.</li>
@@ -125,7 +125,8 @@ ul,ol{padding-left:1.4rem}
 <h2>Lab day</h2>
 <p><strong>Before attendees sit down (T-0):</strong></p>
 <ul>
-<li><code>lab5-setup status</code> again. Every tunnel should be healthy, <code>duo_signin</code> not gated, and every box's <code>victim</code> row <code>OK</code>: its gate blocks the room's victim. If the cards' persona codes expire before the lab ends, run <code>deploy/lab5/lab5-setup handouts &lt;workshop.yaml&gt;</code> and print the cards again, with the temporary passwords copied over. The old codes stay valid until they expire, unless you add <code>--revoke</code>.</li>
+<li><code>deploy/lab5/lab5-setup cii-token &lt;workshop.yaml&gt;</code>. The CII token <code>up</code> pushed the day before runs out during the lab (a token lasts 24 h). This pushes a fresh one to every box with less than 20 h left and restarts those boxes. It mints one token, of the API client's 6 an hour (S16).</li>
+<li><code>lab5-setup status</code> again. Every tunnel should be healthy, <code>duo_signin</code> not gated, every box's <code>CII token</code> row <code>OK</code>, and every box's <code>victim</code> row <code>OK</code>: its gate blocks the room's victim. If the cards' persona codes expire before the lab ends, run <code>deploy/lab5/lab5-setup handouts &lt;workshop.yaml&gt;</code> and print the cards again, with the temporary passwords copied over. The old codes stay valid until they expire, unless you add <code>--revoke</code>.</li>
 <li><code>persona_activity.py selfcheck</code>. The trusted personas should pass. The room's victim should fail MFA Flood and Impossible Travel in CII.</li>
 <li>In the Admin Panel, <em>Users → Clear all step-ups</em>.</li>
 <li>In each instance's Demo Controls, turn <strong>Trigger Demo Incident</strong> off. Its synthetic incident would crowd the room stack.</li>
@@ -158,7 +159,7 @@ ul,ol{padding-left:1.4rem}
 <h2>After the workshop, in this order</h2>
 <ol>
 <li><code>deploy/lab5/lab5-setup down &lt;workshop.yaml&gt;</code>. On each reachable box it reverts the Lab 5 keys and the HEC host. Then it deletes the tunnels and DNS records. A box Show has already destroyed fails the run, which is expected: nothing is left on it. Then it deletes the persona bypass codes it recorded for each card. Codes whose ids it does not know (it could not tell them apart from another room's, or Duo's answer to their create was lost) stop at their <code>valid_secs</code>, and its last line says until when.</li>
-<li>Rotate the credentials the boxes held: the Web SDK secret, the read-only Status Admin API key and the CII API client (I1).</li>
+<li>Rotate the credentials the boxes held: the Web SDK secret and the read-only Status Admin API key (I1). The CII API client never left your Mac, and the boxes' CII token expires on its own within 24 h.</li>
 <li>The room stack: run its Lab 5 teardown on the TA side, and confirm CII's webhook target is gone before the stack is destroyed.</li>
 <li>Personas: <code>py scripts/identity/provision_personas.py --reset</code>. It re-enables and unlocks the contained victim and resyncs every HOTP token. Then <em>Clear all step-ups</em> and CII <em>Reset Feedback</em>. The trusted personas' exclusions stay.</li>
 <li>Participant accounts: nothing to do. <code>expire</code> disables them at day 7 and deletes them, with their tokens, at day 14. <code>deploy/lab5/lab5-setup expire --dry-run</code> shows the schedule. Delete the handout files now.</li>
@@ -181,13 +182,14 @@ ul,ol{padding-left:1.4rem}
 <li><strong>S5, S6:</strong> how a persona's trust moves over time, and the exact check names CII returns (they confirm the <code>getEndUser</code> query and the check IDs). On 2026-11-06, S5 captured CII's answer for a login it has no record of: an error (<code>getEndUser</code>, <code>errorType</code> <code>&quot;404&quot;</code>, <code>&quot;Not Found&quot;</code>, <code>data</code> null). Both copies of the rule and <code>tests/fixtures/cii_end_user_answers.json</code> now match it exactly, so a new participant account reads as &quot;not in CII yet&quot;. If a later spike sees a different answer, replace that exact answer in the table and both copies before the workshop, or every new participant account reads as &quot;status unavailable&quot;.</li>
 <li><strong>S7:</strong> how Duo encodes an API-created HOTP secret (hex or base32), and how far ahead of its counter it accepts a passcode.</li>
 <li><strong>S15:</strong> that group membership set through the API grants CII Read-Only, that a password plus an HOTP passcode reaches CII, and what disabling does to a live CII session.</li>
+<li><strong>S16</strong> (ran 2026-11-07): CII's token endpoint gives an API client 6 tokens a clock hour (HTTP 429, <code>x-ratelimit-limit: 6</code>, reset on the hour). A token lasts 24 h, and minting one does not end the earlier ones. So a box never mints: <code>lab5-setup</code> mints one token on your Mac and pushes it, and the gate uses it until it expires. Still open: whether the 6 are per API client or per tenant (a second API client would show it).</li>
 </ul>
 <p><strong>Decisions</strong> (2026-11-05):</p>
 <ul>
 <li><strong>A1:</strong> one participant account per instance, disabled after 7 days and deleted after 14.</li>
 <li><strong>A3:</strong> the Identity Risk Gate fails open: if Duo or CII cannot answer, the turn is allowed and the event says <code>identity_check=&quot;unavailable&quot;</code>.</li>
 <li><strong>A4:</strong> revocation is pulled from Duo by each instance, plus an <strong>Unblock me</strong> toggle in the banner.</li>
-<li><strong>I1:</strong> Duo only, no broker and no AWS. Each box holds the Duo Web SDK keys, a read-only Status Admin API key and a read-only CII API client for the workshop, and they are rotated afterwards.</li>
+<li><strong>I1:</strong> Duo only, no broker and no AWS. Each box holds the Duo Web SDK keys and a read-only Status Admin API key for the workshop, which are rotated afterwards, and a 24 h CII access token minted on your Mac (S16), which expires on its own.</li>
 <li><strong>I4:</strong> one setup command on your Mac, which never overwrites another lab's settings.</li>
 <li><strong>I5:</strong> no code upgrade at setup. The Show template is re-baked on the release instead (12.6).</li>
 </ul>
@@ -246,7 +248,7 @@ ul,ol{padding-left:1.4rem}
 </tr>
 <tr>
 <td>T-0</td>
-<td><code>lab5-setup status</code>, <code>persona_activity.py selfcheck</code>, <em>Clear all step-ups</em>; <code>lab5-setup handouts</code> if the cards' persona codes run out before the lab ends</td>
+<td><code>lab5-setup cii-token</code>, <code>lab5-setup status</code>, <code>persona_activity.py selfcheck</code>, <em>Clear all step-ups</em>; <code>lab5-setup handouts</code> if the cards' persona codes run out before the lab ends</td>
 </tr>
 <tr>
 <td>lost card</td>

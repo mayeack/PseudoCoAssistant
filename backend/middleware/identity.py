@@ -35,7 +35,10 @@ Three identity API paths reach a tombstone too (``TOMBSTONE_PATHS``:
 ``GET /api/identity/me``, ``POST /api/identity/unblock`` and
 ``POST /api/identity/reblock``), again only as ``identity_revoked``: the chat
 page's banner learns whose session ended and why, and Unblock me can bring it
-back. Without that, a revoked session could never be unblocked.
+back. Without that, a revoked session could never be unblocked. Two page
+reads pass as if no one were signed in (``PAGE_READ_PATHS``, GET only:
+``/api/server-info`` and ``/api/settings/demo-controls``), so the page behind
+the banner still shows its host facts, gates and cards.
 
 The sign-in, sign-out and public paths are never refused (``REDIRECT_EXEMPT``),
 or an expired or revoked cookie would loop between the two gates. Static assets
@@ -91,6 +94,11 @@ REDIRECT_EXEMPT_PREFIXES: Tuple[str, ...] = ("/auth/duo/", "/static/")
 # Reached by a revoked session (as ``identity_revoked``, never as an identity):
 # the banner's status poll and the Unblock me toggle.
 TOMBSTONE_PATHS = frozenset({"/api/identity/me", "/api/identity/unblock", "/api/identity/reblock"})
+# Read (GET only) by the page behind a revoked session's banner, with no
+# identity at all: the footer's host facts and gates, and which Demo Controls
+# cards show. They name no user and change nothing; refused, the page shows
+# "Hostname: unavailable" and cannot grey out what the host cannot run.
+PAGE_READ_PATHS = frozenset({"/api/server-info", "/api/settings/demo-controls"})
 #: The revocation reason of a session Duo disabled.
 DUO_DISABLED_REASON = "duo_disabled"
 # Not even looked up: no identity is ever needed to serve these.
@@ -251,6 +259,12 @@ class IdentityMiddleware:
             if result.status == identity_store.REVOKED and result.identity is not None:
                 # Not an identity: the sign-in page's way out of the tombstone.
                 scope.setdefault("state", {})[STATE_REVOKED] = result.identity
+            await self.app(scope, receive, send)
+            return
+        if (result.status == identity_store.REVOKED and scope.get("method") == "GET"
+                and path in PAGE_READ_PATHS):
+            # The page's own reads, as if no one were signed in: no identity,
+            # no tombstone, and the cookie stays for the banner.
             await self.app(scope, receive, send)
             return
         if result.status == identity_store.REVOKED:

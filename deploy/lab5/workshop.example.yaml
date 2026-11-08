@@ -65,10 +65,10 @@ bypass_codes:
 #   DUO_API_HOST: pseudoco-lab5-duo-websdk-api-host
 #   DUO_ADMIN_IKEY: pseudoco-lab5-duo-status-ikey
 #   DUO_ADMIN_SKEY: pseudoco-lab5-duo-status-skey
-#   CII_CLIENT_ID: pseudoco-lab5-cii-client-id
-#   CII_CLIENT_SECRET: pseudoco-lab5-cii-client-secret
-#   CII_TOKEN_URL: pseudoco-lab5-cii-token-url
 #   CII_API_URL: pseudoco-lab5-cii-api-url
+# The CII API client (pseudoco-lab5-cii-client-id / -client-secret / -token-url)
+# stays on this Mac: up mints one access token from it and pushes that
+# (CII_ACCESS_TOKEN), because CII gives a client only 6 tokens an hour.
 # The participant accounts use the Admin API app PseudoCo Provisioner, whose keys
 # stay on this Mac (pseudoco-lab5-duo-provisioner-ikey / -skey, and the tenant's
 # API host in pseudoco-lab5-duo-api-host); they are not workshop settings.

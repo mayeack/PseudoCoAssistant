@@ -570,13 +570,22 @@ class Settings(BaseSettings):
     cii_client_secret: str = ""
     cii_token_url: str = ""
     cii_api_url: str = ""
+    # Or a CII access token minted elsewhere, which wins over the API client:
+    # lab5-setup mints one on the facilitator's Mac and pushes it to every box,
+    # because CII gives an API client only 6 tokens an hour. Used until the
+    # expiry written in it (CII's last 24 h); never refreshed by the app.
+    cii_access_token: str = ""
     # Comma list of the usernames this instance accepts (trusted personas, the
     # room's victim, this instance's participant account).
     identity_allowed_users: str = ""
     # Lifetime of an identity session (the cookie and its server-side row).
     identity_session_ttl_minutes: int = 720
-    # Cache for Duo / Identity Intelligence status lookups.
+    # Cache for Duo status lookups (the revocation pull reads it) and for any
+    # lookup that failed.
     identity_status_ttl_seconds: int = 10
+    # Cache for Identity Intelligence answers: CII changes when it collects
+    # from Duo, not per request, and every signed-in browser polls.
+    identity_cii_ttl_seconds: int = 300
     # When Duo or Identity Intelligence cannot be reached: True lets the turn
     # through and records identity_check="unavailable" on the event.
     identity_fail_open: bool = True

@@ -70,7 +70,7 @@ SUITES=(
 # (tests/identity_isolation.py also refuses any lookup a suite forgets to fake).
 export DUO_ENABLED=false PUBLIC_BASE_URL= IDENTITY_ALLOWED_USERS= \
        DUO_CLIENT_ID= DUO_CLIENT_SECRET= DUO_API_HOST= DUO_ADMIN_IKEY= DUO_ADMIN_SKEY= \
-       CII_CLIENT_ID= CII_CLIENT_SECRET= CII_TOKEN_URL= CII_API_URL=
+       CII_CLIENT_ID= CII_CLIENT_SECRET= CII_TOKEN_URL= CII_API_URL= CII_ACCESS_TOKEN=
 
 pass=0; fail=0; failed=()
 for s in "${SUITES[@]}"; do

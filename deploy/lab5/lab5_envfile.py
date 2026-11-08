@@ -25,7 +25,7 @@ LAB5_KEYS: Tuple[str, ...] = (
     "DUO_ENABLED",
     "DUO_CLIENT_ID", "DUO_CLIENT_SECRET", "DUO_API_HOST",
     "DUO_ADMIN_IKEY", "DUO_ADMIN_SKEY",
-    "CII_CLIENT_ID", "CII_CLIENT_SECRET", "CII_TOKEN_URL", "CII_API_URL",
+    "CII_CLIENT_ID", "CII_CLIENT_SECRET", "CII_TOKEN_URL", "CII_API_URL", "CII_ACCESS_TOKEN",
     "IDENTITY_ALLOWED_USERS",
     "IDENTITY_SESSION_TTL_MINUTES", "IDENTITY_STATUS_TTL_SECONDS", "IDENTITY_FAIL_OPEN",
     "HEC_HOST",
@@ -34,7 +34,7 @@ LAB5_KEYS: Tuple[str, ...] = (
 # never written to the Mac's state directory.
 MASKED_KEYS = frozenset({
     "DUO_CLIENT_ID", "DUO_CLIENT_SECRET", "DUO_ADMIN_IKEY", "DUO_ADMIN_SKEY",
-    "CII_CLIENT_ID", "CII_CLIENT_SECRET",
+    "CII_CLIENT_ID", "CII_CLIENT_SECRET", "CII_ACCESS_TOKEN",
 })
 
 ENCODING = "utf-8"
@@ -282,9 +282,10 @@ def _apply(text: str, targets: Dict[str, Target]) -> EnvPlan:
     return EnvPlan(old_text=text, new_text="".join(out), changes=changes, eol_added=eol_added, edits=edits)
 
 
-def plan_up(text: str, values: Dict[str, str]) -> EnvPlan:
-    """Set each Lab 5 key in ``values``; every other line stays as it is."""
-    return _apply(text, {k: ("set", v) for k, v in values.items()})
+def plan_up(text: str, values: Dict[str, Optional[str]]) -> EnvPlan:
+    """Set each Lab 5 key in ``values`` (``None`` removes it); every other line
+    stays as it is."""
+    return _apply(text, {k: ("absent", None) if v is None else ("set", v) for k, v in values.items()})
 
 
 def plan_revert(text: str, baseline: Optional[Dict[str, Dict[str, object]]],

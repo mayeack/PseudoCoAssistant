@@ -49,11 +49,11 @@ redacted in place, which is complete there because its format string is fixed
 and carries nothing.
 
 The configured secrets are the ``SECRET_SETTINGS``: ``DUO_CLIENT_SECRET``,
-``DUO_ADMIN_SKEY``, ``CII_CLIENT_SECRET`` and ``ACCESS_KEY``, each when set
+``DUO_ADMIN_SKEY``, ``CII_CLIENT_SECRET``, ``CII_ACCESS_TOKEN`` and ``ACCESS_KEY``, each when set
 and at least 8 characters long (a shorter value would match ordinary text),
 as written and URL-encoded. They are compiled into one pattern at
 ``install()`` (startup) and again only when one of those settings changes:
-each record compares the four values with the ones the pattern was built
+each record compares the five values with the ones the pattern was built
 from. That is the only cache, and it holds one pattern.
 
 Safe inside logging: the record factory takes no lock (a log call made while
@@ -114,7 +114,8 @@ REDACTED_LOGGERS: Tuple[str, ...] = (
     "backend.agents.nodes.identity",
 )
 #: ``settings`` attributes whose exact values no log record keeps (.env only).
-SECRET_SETTINGS: Tuple[str, ...] = ("duo_client_secret", "duo_admin_skey", "cii_client_secret", "access_key")
+SECRET_SETTINGS: Tuple[str, ...] = ("duo_client_secret", "duo_admin_skey", "cii_client_secret", "cii_access_token",
+                                    "access_key")
 #: Query parameters whose values are credentials, in every logger's records.
 SENSITIVE_PARAMS: Tuple[str, ...] = (
     "duo_code", "code", "state", "client_assertion", "assertion",

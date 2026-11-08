@@ -6,6 +6,9 @@
                                       tunnel + DNS, HEC host, restart, preflight;
                                       then the participant accounts and the handout
     lab5-setup status workshop.yaml   per-box preflight and Cloudflare state
+    lab5-setup cii-token workshop.yaml  a fresh CII access token on each box that
+                                      needs one (lab-day morning: a token lasts
+                                      24 h), then restart its app
     lab5-setup handouts workshop.yaml a fresh batch of persona bypass codes on
                                       each handout card (lab-day morning, a lost
                                       card); --revoke deletes the card's earlier ones
@@ -42,6 +45,7 @@ import re
 import secrets
 import socket
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -51,6 +55,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import lab5_bypass as bypass  # noqa: E402
+import lab5_cii as cii  # noqa: E402
 import lab5_envfile as envfile  # noqa: E402
 from lab5_cloudflare import CloudflareAPI, urllib_transport  # noqa: E402
 from lab5_common import (Keychain, Lab5Error, Redactor, Reporter, StateStore, desktop_notify,  # noqa: E402
@@ -71,16 +76,23 @@ DEFAULT_KEYCHAIN: Dict[str, str] = {
     "DUO_API_HOST": "pseudoco-lab5-duo-websdk-api-host",
     "DUO_ADMIN_IKEY": "pseudoco-lab5-duo-status-ikey",
     "DUO_ADMIN_SKEY": "pseudoco-lab5-duo-status-skey",
-    "CII_CLIENT_ID": "pseudoco-lab5-cii-client-id",
-    "CII_CLIENT_SECRET": "pseudoco-lab5-cii-client-secret",
-    "CII_TOKEN_URL": "pseudoco-lab5-cii-token-url",
     "CII_API_URL": "pseudoco-lab5-cii-api-url",
 }
+# The CII API client stays on this Mac (spike S16): CII gives a client only 6
+# tokens a clock hour, and every box minting its own would use them up. `up`
+# mints one token here and pushes it (CII_ACCESS_TOKEN); these keys are
+# removed from a box that still has them from an older `up`.
+CII_CLIENT_KEYS = ("CII_CLIENT_ID", "CII_CLIENT_SECRET", "CII_TOKEN_URL")
+# `up` and `cii-token` keep a box's token while it has this long left; a CII
+# token lasts 24 h, so one minted the day before runs out on lab day.
+TOKEN_KEEP_S = 20 * 3600.0
+# `status` warns below this: less than a lab day.
+TOKEN_WARN_S = 8 * 3600.0
 IDENTITY_KEYS = {"session_ttl_minutes": "IDENTITY_SESSION_TTL_MINUTES",
                  "status_ttl_seconds": "IDENTITY_STATUS_TTL_SECONDS",
                  "fail_open": "IDENTITY_FAIL_OPEN"}
 # Lab 5 credentials whose presence in a leftover backup is scrubbed by `down`.
-SECRET_KEYS = ("DUO_CLIENT_SECRET", "DUO_ADMIN_SKEY", "CII_CLIENT_SECRET")
+SECRET_KEYS = ("DUO_CLIENT_SECRET", "DUO_ADMIN_SKEY", "CII_CLIENT_SECRET", "CII_ACCESS_TOKEN")
 
 _WORKSHOP_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?$")
 _USER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -445,9 +457,10 @@ def revoke_codes(ctx: "Ctx", deps: "Deps", numbers: Sequence[str]) -> List[str]:
 
 
 # Runs on the box with its own venv, code and .env (the Status keys and the CII
-# API client `up` wrote there): the gate's own lookup and decision for one
-# username, as JSON. Read-only (a Duo Admin API GET, a CII token and query);
-# it prints fixed-vocabulary codes, never a key, URL or answer body.
+# access token `up` wrote there): the gate's own lookup and decision for one
+# username, as JSON. Read-only (a Duo Admin API GET and a CII query with the
+# pushed token: no token is minted); it prints fixed-vocabulary codes, never
+# a key, URL or answer body.
 VICTIM_CHECK_SCRIPT = b"""\
 import json, os, sys
 checkout, user = sys.argv[1], sys.argv[2]
@@ -465,7 +478,8 @@ print(json.dumps(answer))
 """
 # What to fix when a box's lookup cannot ask one source about the victim.
 _SOURCE_FIX = {"duo": "the Status app's keys (Keychain items pseudoco-lab5-duo-status-ikey / -skey, then re-run up)",
-               "cii": "the CII API client (Keychain items pseudoco-lab5-cii-*, then re-run up)"}
+               "cii": ("the box's CII access token (`cii-token` pushes a new one, minted from the API client in "
+                       "the Keychain items pseudoco-lab5-cii-*)")}
 # CII did answer: the box's API client got a token, so its ID and secret are
 # right and re-entering them fixes nothing. An error that stays in the answer
 # is what that client may read (its role or scopes in CII: every refusal of a
@@ -483,6 +497,11 @@ _CII_ANSWER_FIX = {
                       "Mac asks CII with the same API client and prints CII's own message)"),
     "bad_response": ("CII's answer, in a shape the gate cannot read (a passing upstream failure is gone by the next "
                      "status; one that stays means the query does not match the tenant: spikes S5/S6 pin it)"),
+    # The box's access token itself (spike S16): pushed by up / cii-token.
+    "token_expired": "the box's CII access token, which has expired: run `cii-token`",
+    "token_rejected": "the box's CII access token, which CII refuses: run `cii-token` to push a new one",
+    "token_http_429": ("the box's own CII token requests (an older up left it the API client): CII's tokens for the "
+                       "hour are used up; re-run up so the box gets a pushed token"),
 }
 
 
@@ -637,17 +656,104 @@ class Ctx:
     reissue: bool = False
     personas: List[Tuple[str, str]] = field(default_factory=list)   # 4.3: (victim|trusted, username) for the codes
     partial_cards: List[str] = field(default_factory=list)  # 4.3: cards without a locked-out persona's codes (4.4)
+    now: Callable[[], float] = time.time
+    cii_mint: Optional[Callable[[], Tuple[str, float]]] = None   # S16: mints the token up / cii-token push
+    cii_token: Optional[Tuple[str, float]] = None                # this run's token and its expiry
+    cii_error: Optional[Lab5Error] = None                        # this run's refused mint, never retried
+    cii_lock: Any = field(default_factory=threading.Lock)
+
+    def run_token(self) -> Tuple[str, float]:
+        """The CII access token this run pushes and its expiry: minted once, on
+        the first box that needs one (one of the API client's 6 an hour). A
+        refused mint is not tried again by the other boxes: each gets the same
+        refusal, so a run spends at most one token request."""
+        with self.cii_lock:
+            if self.cii_token is None:
+                if self.cii_error is not None:
+                    raise self.cii_error
+                if self.cii_mint is None:
+                    raise Lab5Error("internal error: this command does not mint CII tokens")
+                try:
+                    token, expires = self.cii_mint()
+                except Lab5Error as exc:
+                    self.cii_error = exc
+                    raise
+                self.redactor.add(token)
+                self.cii_token = (token, expires)
+            return self.cii_token
 
 
-def lab5_values(ws: Workshop, box: BoxSpec, creds: Dict[str, str]) -> Dict[str, str]:
-    """Every Lab 5 key `up` writes for this box (12.1)."""
+def lab5_values(ws: Workshop, box: BoxSpec, creds: Dict[str, str],
+                cii_token: Optional[str] = None) -> Dict[str, Optional[str]]:
+    """Every Lab 5 key `up` writes for this box (12.1); ``None`` removes one.
+    The CII API client never goes to a box (spike S16): CII_ACCESS_TOKEN does,
+    when given, and the client keys an older `up` wrote are removed."""
     host = ws.hostname(box)
-    values = {"PUBLIC_BASE_URL": f"https://{host}", "DUO_ENABLED": "true"}
+    values: Dict[str, Optional[str]] = {"PUBLIC_BASE_URL": f"https://{host}", "DUO_ENABLED": "true"}
     values.update({key: creds[key] for key in DEFAULT_KEYCHAIN})
+    values.update({key: None for key in CII_CLIENT_KEYS})
+    if cii_token is not None:
+        values["CII_ACCESS_TOKEN"] = cii_token
     values["IDENTITY_ALLOWED_USERS"] = ",".join(allowed_users(ws, box))
     values.update(ws.identity)
     values["HEC_HOST"] = host
     return values
+
+
+def box_cii_token(env_text: Optional[str]) -> Tuple[Optional[str], Optional[float]]:
+    """The CII access token in a box's .env, and when it expires (None when
+    the token says nothing about it)."""
+    token = envfile.get(envfile.split_lines(env_text or ""), "CII_ACCESS_TOKEN") or None
+    return token, (cii.jwt_expiry(token) if token else None)
+
+
+def token_left(expires: Optional[float], now: float) -> str:
+    if expires is None:
+        return "no expiry written in it"
+    when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(expires))
+    hours = (expires - now) / 3600.0
+    return f"expired {when}" if hours <= 0 else f"{hours:.1f} h left, until {when}"
+
+
+def token_for_box(ctx: "Ctx", env_text: Optional[str]) -> Tuple[str, str]:
+    """The CII access token `up` and `cii-token` write to a box, and what was
+    done: the box's own while it has TOKEN_KEEP_S left, else this run's."""
+    now = ctx.now()
+    current, expires = box_cii_token(env_text)
+    if current and expires is not None and expires - now >= TOKEN_KEEP_S:
+        ctx.redactor.add(current)
+        return current, f"kept the box's token ({token_left(expires, now)})"
+    token, new_expires = ctx.run_token()
+    why = "the box had none" if not current else f"the box's: {token_left(expires, now)}"
+    return token, f"pushed this run's token ({token_left(new_expires, now)}; {why})"
+
+
+def token_plan_row(ctx: "Ctx", current: Optional[str], expires: Optional[float]) -> Tuple[str, str, str]:
+    """`check`: what `up` would do with the box's CII access token."""
+    now = ctx.now()
+    if current and expires is not None and expires - now >= TOKEN_KEEP_S:
+        return "OK", "CII token", f"up keeps the box's token ({token_left(expires, now)})"
+    have = "the box has none" if not current else f"the box's: {token_left(expires, now)}"
+    return "PLAN", "CII token", (f"up pushes a CII access token ({have}); it mints one per run, of the API client's "
+                                 f"{cii.TOKENS_PER_HOUR} an hour")
+
+
+def token_status_row(ctx: "Ctx", env_text: Optional[str]) -> Tuple[str, str, str]:
+    """`status`: will the box's gate be able to ask CII through the lab?"""
+    now = ctx.now()
+    current, expires = box_cii_token(env_text)
+    if not current:
+        if envfile.get(envfile.split_lines(env_text or ""), "CII_CLIENT_SECRET"):
+            return "WARN", "CII token", (f"the box mints its own CII tokens (an older up): the room's boxes share the "
+                                         f"API client's {cii.TOKENS_PER_HOUR} an hour; re-run up to push one")
+        return "FAIL", "CII token", "the box has no CII access token, so its gate cannot ask CII: run cii-token"
+    if expires is None:
+        return "OK", "CII token", token_left(expires, now)
+    if expires <= now:
+        return "FAIL", "CII token", f"{token_left(expires, now)}: the gate cannot ask CII; run cii-token"
+    if expires - now < TOKEN_WARN_S:
+        return "WARN", "CII token", f"{token_left(expires, now)}: less than a lab day; run cii-token before the lab"
+    return "OK", "CII token", token_left(expires, now)
 
 
 def _code_version(config_py: Optional[bytes]) -> Optional[str]:
@@ -787,12 +893,14 @@ def check_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
             rep.add("OK", "host key", note)
         facts = inspect_box(ctx, rem, box, rep)
         if facts.env_text is not None:
-            plan = envfile.plan_up(facts.env_text, lab5_values(ws, box, ctx.creds))
+            current, expires = box_cii_token(facts.env_text)
+            plan = envfile.plan_up(facts.env_text, lab5_values(ws, box, ctx.creds, current))
             if plan.changed:
                 rep.add("PLAN", ".env", f"{len(plan.changes)} Lab 5 change(s) below; every other line stays byte-for-byte")
                 rep.extra.append(plan.diff(f"{box.checkout}/.env"))
             else:
                 rep.add("OK", ".env", "the Lab 5 keys already match workshop.yaml")
+            rep.add(*token_plan_row(ctx, current, expires))
         if facts.dest:
             old = facts.dest.get("host")
             if old == rep.hostname:
@@ -871,7 +979,9 @@ def apply_env(ctx: Ctx, rem: Any, box: BoxSpec, facts: Facts, record: Dict[str, 
     box's app may admit: victim_clashes reads it) gains this run's allowlist:
     until the app restarts on the new .env, it may admit either. up_box
     narrows it once the app runs the .env on disk."""
-    plan = envfile.plan_up(facts.env_text or "", lab5_values(ctx.ws, box, ctx.creds))
+    token, token_note = token_for_box(ctx, facts.env_text)     # may mint: before anything is written
+    plan = envfile.plan_up(facts.env_text or "", lab5_values(ctx.ws, box, ctx.creds, token))
+    rep.add("OK" if token_note.startswith("kept") else "CHANGED", "CII token", token_note)
     env_rec = record.get("env") or {}
     live = bool(env_rec.get("baseline")) and not env_rec.get("reverted")
     serves = env_rec.get("serves") if live else None
@@ -1116,6 +1226,55 @@ def up_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
     return rep
 
 
+# =========================================================================== cii-token
+def token_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
+    """`cii-token` (lab-day morning): a CII access token that lasts the lab on
+    this box, then a restart so the app reads it. Only CII_ACCESS_TOKEN
+    changes (and API client keys an older `up` left are removed); a box with
+    TOKEN_KEEP_S left keeps its token and is not restarted. A box `up` has not
+    set up is refused."""
+    ws = ctx.ws
+    rep = BoxReport(box, ws.hostname(box))
+    record = ctx.state.load_box(box.nn)
+    env_rec = record.get("env") or {}
+    if not env_rec.get("baseline") or env_rec.get("reverted"):
+        rep.add("FAIL", "cii-token", "this box has no Lab 5 keys from up: run up")
+        return rep
+    try:
+        rem = ctx.connect(box, ctx.passwords.get(box.nn, ""))
+    except Lab5Error as exc:
+        rep.add("FAIL", "ssh", str(exc))
+        return rep
+    try:
+        facts = inspect_box(ctx, rem, box, rep, full=False)
+        if facts.env_text is None or rep.blockers:
+            rep.add("FAIL", "cii-token", "refused: " + ("; ".join(rep.blockers) or "no .env on the box"))
+            return rep
+        token, note = token_for_box(ctx, facts.env_text)
+        values: Dict[str, Optional[str]] = {key: None for key in CII_CLIENT_KEYS}
+        values["CII_ACCESS_TOKEN"] = token
+        plan = envfile.plan_up(facts.env_text, values)
+        if not plan.changed:
+            rep.add("OK", "CII token", note)
+            return rep
+        backup = make_backup(ctx, rem, box, facts, rep)
+        record.setdefault("backups", []).append(backup)
+        ctx.state.save_box(box.nn, record)
+        _write_env(rem, box, facts, plan.new_text)
+        rep.add("CHANGED", "CII token", note)
+        try:
+            restart_app(ctx, rem, box, facts.app, rep)
+        except Lab5Error as exc:
+            roll_back_env(ctx, rem, box, facts, plan.new_text, backup, rep, str(exc))
+    except Lab5Error as exc:
+        rep.add("FAIL", "cii-token", str(exc))
+    finally:
+        rem.close()
+        record.setdefault("history", []).append({"at": utc_now(), "command": "cii-token", "ok": not rep.failed})
+        ctx.state.save_box(box.nn, record)
+    return rep
+
+
 # =========================================================================== status
 def status_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
     ws, cf = ctx.ws, ctx.cloudflare
@@ -1149,10 +1308,12 @@ def status_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
             facts = inspect_box(ctx, rem, box, rep, full=False)
             key = facts.access_key
             if facts.env_text is not None:
-                plan = envfile.plan_up(facts.env_text, lab5_values(ws, box, ctx.creds))
+                current, _expires = box_cii_token(facts.env_text)
+                plan = envfile.plan_up(facts.env_text, lab5_values(ws, box, ctx.creds, current))
                 rep.add("WARN" if plan.changed else "OK", ".env",
                         f"{len(plan.changes)} Lab 5 key(s) differ from workshop.yaml (re-run up)"
                         if plan.changed else "the Lab 5 keys match workshop.yaml")
+                rep.add(*token_status_row(ctx, facts.env_text))
             active = rem.run(["systemctl", "is-active", remote.UNIT_NAME]).out.strip()
             rep.add("OK" if active == "active" else "FAIL", "connector", f"{remote.UNIT_NAME}: {active or 'unknown'}")
             dests = facts.app.destinations() if facts.app and facts.health_version else []
@@ -1374,6 +1535,7 @@ class Deps:
     app_wait_s: float = 120.0
     preflight_wait_s: float = 150.0
     duo_transport: Callable[..., Any] = duo.duo_transport      # (kind, ikey, skey, host) -> client
+    cii_transport: Callable[..., Tuple[int, bytes]] = urllib_transport   # mints the token up / cii-token push
     now: Callable[[], float] = time.time
     notify: Callable[[str, str], None] = desktop_notify
 
@@ -1404,7 +1566,7 @@ def ask_passwords(boxes: Sequence[BoxSpec], prompt: Callable[[str], str], redact
 def load_creds(ctx: Ctx) -> None:
     for key, item in ctx.ws.keychain.items():
         ctx.creds[key] = ctx.keychain.require(item, key, secret=key in envfile.MASKED_KEYS)
-    shown = ", ".join(f"{key} {last4(ctx.creds[key])}" for key in sorted(envfile.MASKED_KEYS))
+    shown = ", ".join(f"{key} {last4(ctx.creds[key])}" for key in sorted(envfile.MASKED_KEYS) if key in ctx.creds)
     ctx.out.line(f"Keychain: {len(ctx.creds)} Lab 5 values read ({shown})")
 
 
@@ -1906,7 +2068,7 @@ def run_handouts(args: argparse.Namespace, deps: Deps) -> int:
         reporter.close()
 
 
-COMMANDS = {"check": check_box, "up": up_box, "status": status_box, "down": down_box}
+COMMANDS = {"check": check_box, "up": up_box, "status": status_box, "down": down_box, "cii-token": token_box}
 
 
 def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> int:
@@ -1958,7 +2120,10 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
                   box.host, box.port, box.user, pw, remote.KnownHosts(state.known_hosts), redactor)),
               https=deps.https or _https, resolve=deps.resolve or _resolve, sleep=deps.sleep,
               app_wait_s=deps.app_wait_s, preflight_wait_s=deps.preflight_wait_s, force_restart=args.restart,
-              reissue=args.reissue_passcodes)
+              reissue=args.reissue_passcodes, now=deps.now)
+    if args.command in ("up", "cii-token"):
+        # S16: one token for the run, minted on this Mac only when a box needs one.
+        ctx.cii_mint = lambda: cii.cii_client(ctx.keychain, deps.cii_transport).mint()
     with_participants = ws.participants_enabled and args.command in ("check", "up", "status")
     with_codes = with_participants and ws.bypass_codes.enabled      # 4.3: the room personas' handout codes
     try:
@@ -1974,7 +2139,8 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
             ctx.accounts = participant_env(ctx, deps)
         if with_codes:
             ctx.personas = bypass.room_personas(ws.victim, ws.trusted, ctx.accounts.cast)
-        connect_cloudflare(ctx, deps.cloudflare_transport)
+        if args.command != "cii-token":
+            connect_cloudflare(ctx, deps.cloudflare_transport)
         if with_participants and args.command in ("check", "up"):
             participants.preflight(ctx.accounts, create_missing=False)   # before any box changes
         ctx.passwords = ask_passwords(boxes, deps.prompt, redactor)
@@ -2023,6 +2189,9 @@ def main(argv: Optional[Sequence[str]] = None, deps: Optional[Deps] = None) -> i
             codes_note += (f"; persona bypass codes partial on {len(ctx.partial_cards)} card(s) (instance "
                            f"{', '.join(ctx.partial_cards)}): a room persona is locked out, retry handouts for them "
                            "once Duo unlocks it")
+        if ctx.cii_token is not None:
+            reporter.line(f"CII: minted one access token for this run ({token_left(ctx.cii_token[1], ctx.now())}), "
+                          f"one of the API client's {cii.TOKENS_PER_HOUR} an hour")
         reporter.line(f"RESULT: {args.command}: {len(reports) - len(failed)} ok, {len(failed)} failed"
                       + (f" (box {', '.join(failed)})" if failed else "")
                       + (f"; {bad_accounts} participant account(s) failed" if bad_accounts else "")

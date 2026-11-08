@@ -124,17 +124,46 @@ before any screen or model.</p>
 lookup.</li>
 <li><strong>Lookup</strong> (<code>identity_lookup.lookup</code>):
 <ul>
-<li><strong>Duo Admin API.</strong> <code>GET /admin/v1/users?username=</code> with the read-only
+<li>
+<p><strong>Duo Admin API.</strong> <code>GET /admin/v1/users?username=</code> with the read-only
 <strong>PseudoCo Lab: Status</strong> keys. Requests use Duo's HMAC-SHA512 signing
 (signature version 5, checked against known answers from <code>duo_client</code>
 5.7.0). It returns the account status (active, bypass, disabled,
-locked out, pending deletion) and the account's email.</li>
-<li><strong>CII.</strong> An OAuth client-credentials token from <code>CII_TOKEN_URL</code>, cached
-until five minutes before it expires. Then the one GraphQL query
-<code>CII_END_USER_QUERY</code> against <code>CII_API_URL</code>:
+locked out, pending deletion) and the account's email.</p>
+</li>
+<li>
+<p><strong>CII.</strong> The one GraphQL query <code>CII_END_USER_QUERY</code> against
+<code>CII_API_URL</code>:
 <code>getEndUser(login)</code> → <code>endUserDetails { failingChecks endUserTrustScore { levelOfTrust } }</code>.
-CII's login is the email, so the email Duo returned is the login.</li>
-<li><strong>CII is asked even while Duo can't answer.</strong> The last email Duo gave
+CII's login is the email, so the email Duo returned is the login.</p>
+</li>
+<li>
+<p><strong>The CII token.</strong> CII's token endpoint gives each API client only
+<strong>6 tokens a clock hour</strong> (spike S16, 2026-11-07: HTTP 429,
+<code>x-ratelimit-limit: 6</code>, reset on the hour). A token lasts 24 h, and
+minting a new one does not end the earlier ones. So a lab box never
+mints:</p>
+<ul>
+<li><code>lab5-setup</code> mints one token on the facilitator's Mac and pushes it
+to every box as <code>CII_ACCESS_TOKEN</code>. The API client stays in the Mac's
+Keychain.</li>
+<li>The gate sends that token until the <code>exp</code> written in it. After that,
+CII reads as <code>unavailable</code> (<code>token_expired</code>) until <code>lab5-setup cii-token</code> pushes a new one.</li>
+<li>On a 401 the gate reads CII as <code>token_rejected</code>. It never mints a
+token in place of one it was given.</li>
+<li>A box that minted its own (one per process start, and again after a
+refusal) would let a room of more than six boxes use up the hour
+between them, and every gate would then fail open.</li>
+</ul>
+<p>Without a pushed token (a dev copy), the gate mints with the API
+client's <code>CII_CLIENT_ID</code>, <code>CII_CLIENT_SECRET</code> and <code>CII_TOKEN_URL</code>,
+cached until five minutes before the token expires. After a failed
+token request it leaves the endpoint alone for the answer's
+<code>Retry-After</code>, between one minute and one hour. Each lookup meanwhile
+gets that failure back without asking.</p>
+</li>
+<li>
+<p><strong>CII is asked even while Duo can't answer.</strong> The last email Duo gave
 for each username is kept beyond the 10 s cache (an email doesn't change
 with the account's status), so once Duo has answered for a user, a Duo
 outage or throttle never hides that user's CII block. The email lives
@@ -145,13 +174,25 @@ cannot ask Duo or CII fails, unless its gate blocks the victim on a
 reason that holds anyway: a Duo account that is disabled (a contained
 victim) or pending deletion, or a CII block in what did answer. Its row is
 then OK and names what did not answer. A Duo lockout alone does not
-hold: Duo lifts it on its own in about 15 minutes.</li>
-<li><strong>Limits.</strong> Each call allows 3 s to connect and 5 s per read, and runs
-off the event loop. Each source's answer is cached per user for
-<code>IDENTITY_STATUS_TTL_SECONDS</code> (10 s), failures included.</li>
-<li><strong>Failures.</strong> Errors are reduced to fixed codes such as <code>timeout</code>,
+hold: Duo lifts it on its own in about 15 minutes.</p>
+</li>
+<li>
+<p><strong>Limits.</strong> Each call allows 3 s to connect and 5 s per read, and runs
+off the event loop. Answers are cached per user:</p>
+<ul>
+<li>Duo's answers for <code>IDENTITY_STATUS_TTL_SECONDS</code> (10 s), since the
+revocation pull needs Duo fresh;</li>
+<li>CII's answers for <code>IDENTITY_CII_TTL_SECONDS</code> (300 s), since CII
+changes when it collects from Duo, not from one request to the next,
+and every signed-in browser polls;</li>
+<li>a failure from either source for the short TTL only.</li>
+</ul>
+</li>
+<li>
+<p><strong>Failures.</strong> Errors are reduced to fixed codes such as <code>timeout</code>,
 <code>http_503</code> or <code>stat_40103</code>. They never include a URL, key, token or
-response body.</li>
+response body.</p>
+</li>
 </ul>
 </li>
 <li><strong>Decision</strong> (<code>identity_gate.decide</code>, pure). The gate <strong>allows</strong> the turn
@@ -438,8 +479,8 @@ the values of credential query parameters (<code>duo_code</code>, <code>code</co
 <code>client_assertion</code>, <code>assertion</code>, <code>access_token</code>, ...), <code>Authorization</code>,
 <code>Cookie</code>, <code>Set-Cookie</code> and <code>X-Access-Key</code> values, the app's own cookies,
 Bearer credentials, anything shaped like a JWT, and the exact values of
-<code>DUO_CLIENT_SECRET</code>, <code>DUO_ADMIN_SKEY</code>, <code>CII_CLIENT_SECRET</code> and
-<code>ACCESS_KEY</code>. urllib3, requests, httpx, httpcore, duo_universal and the
+<code>DUO_CLIENT_SECRET</code>, <code>DUO_ADMIN_SKEY</code>, <code>CII_CLIENT_SECRET</code>,
+<code>CII_ACCESS_TOKEN</code> and <code>ACCESS_KEY</code>. urllib3, requests, httpx, httpcore, duo_universal and the
 identity modules also lose every query value and token and secret pairs.
 Nothing is registered at run time, so no request can make a string (a
 username, say) vanish from later log lines. The configured secrets are
@@ -479,7 +520,7 @@ so it goes away as soon as the gate closes.</li>
 <tr>
 <td><strong>CII API client</strong> (CII → Integrations → Add API Client, &quot;Copy all&quot;)</td>
 <td>read-only use</td>
-<td><code>CII_CLIENT_ID</code>, <code>CII_CLIENT_SECRET</code>, <code>CII_TOKEN_URL</code>, <code>CII_API_URL</code></td>
+<td>on a lab box: <code>CII_API_URL</code> and <code>CII_ACCESS_TOKEN</code> (a 24 h token <code>lab5-setup</code> mints on the Mac); on a dev copy: <code>CII_CLIENT_ID</code>, <code>CII_CLIENT_SECRET</code>, <code>CII_TOKEN_URL</code>, <code>CII_API_URL</code></td>
 <td>the gate (trust level, failing checks)</td>
 </tr>
 <tr>
@@ -522,7 +563,12 @@ so it goes away as soon as the gate closes.</li>
 <tr>
 <td><code>IDENTITY_STATUS_TTL_SECONDS</code></td>
 <td><code>10</code></td>
-<td>lookup cache</td>
+<td>Duo status cache, and how long a failed lookup is kept</td>
+</tr>
+<tr>
+<td><code>IDENTITY_CII_TTL_SECONDS</code></td>
+<td><code>300</code></td>
+<td>cache for CII's answers</td>
 </tr>
 <tr>
 <td><code>IDENTITY_FAIL_OPEN</code></td>
@@ -538,7 +584,12 @@ with the room access key can rewrite those.</p>
 <li><code>tests/test_identity_gate.py</code> covers:
 <ul>
 <li>the signer, checked against known answers</li>
-<li>the lookup through fakes, including token refresh, caching and failures,
+<li>the lookup through fakes, including token refresh, caching and failures,</li>
+<li>the CII token budget (spike S16): a pushed <code>CII_ACCESS_TOKEN</code> is sent as is and never
+minted in place of, an expired one is <code>token_expired</code>, a refused one <code>token_rejected</code>;
+a refused token request waits out <code>Retry-After</code> (1 minute to 1 hour) with one request in
+all; CII's answers outlive Duo's, a failure does not; the gate and the Mac read a token's
+expiry alike,
 CII asked with the remembered email while Duo is down, and a user CII
 doesn't know</li>
 <li><code>decide()</code></li>

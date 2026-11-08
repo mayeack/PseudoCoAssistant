@@ -1,11 +1,16 @@
 """Read-only Cisco Identity Intelligence (CII) API client for the persona self-check.
 
-Uses the same CII API client the boxes use for the gate (Keychain items
-``pseudoco-lab5-cii-*``, the "Copy all" values): an OAuth client-credentials
-token (JSON body ``client_id``, ``client_secret``, ``grant_type``; it lasts
-about 10 h and is cached here for the run) and one GraphQL query,
+Uses the CII API client in the Mac's Keychain (items ``pseudoco-lab5-cii-*``,
+the "Copy all" values), which never leaves the Mac: an OAuth
+client-credentials token (JSON body ``client_id``, ``client_secret``,
+``grant_type``; it lasts 24 h and is cached here for the run) and one GraphQL
+query,
 ``getEndUser(login)``, whose ``levelOfTrust`` and current ``failingChecks``
 are all the self-check reads (plan 4.5, 12.4). CII's login is the email.
+CII gives each API client only ``TOKENS_PER_HOUR`` tokens a clock hour (spike
+S16), so the boxes never get the client: ``lab5-setup`` mints one token here
+(``CIIClient.mint``) and pushes it to every box as CII_ACCESS_TOKEN, and the
+gate on the box asks CII with it until it expires.
 
 The shape is the published schema's (docs.oort.io Public API), the same one
 the app's gate asks (``backend/services/identity_lookup.CII_END_USER_QUERY``;
@@ -29,6 +34,8 @@ string or as an object, and a failing check as a name or as an object.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -38,6 +45,10 @@ from lab5_common import Keychain, Lab5Error
 CII_ITEMS = {"client_id": "pseudoco-lab5-cii-client-id", "client_secret": "pseudoco-lab5-cii-client-secret",
              "token_url": "pseudoco-lab5-cii-token-url", "api_url": "pseudoco-lab5-cii-api-url"}
 
+# CII's token endpoint gives each API client this many tokens a clock hour
+# (spike S16, 2026-11-07: HTTP 429, x-ratelimit-limit 6, reset on the hour).
+# A token lasts 24 h, and minting one does not end the earlier ones.
+TOKENS_PER_HOUR = 6
 END_USER_QUERY = ("query Lab5EndUser($login: String!) { getEndUser(login: $login) "
                   "{ endUserDetails { login status failingChecks endUserTrustScore { levelOfTrust lastUpdated } } } }")
 
@@ -46,6 +57,22 @@ TRUST_LEVELS = ("TRUSTED", "FAVORABLE", "NEUTRAL", "QUESTIONABLE", "UNTRUSTED", 
 GOOD_TRUST = ("TRUSTED", "FAVORABLE", "NEUTRAL")
 
 Transport = Callable[[str, str, Dict[str, str], Optional[bytes], float], Tuple[int, bytes]]
+
+
+def jwt_expiry(token: Optional[str]) -> Optional[float]:
+    """The ``exp`` claim of a JWT, in seconds since the epoch, read without
+    checking the signature (the same reading as the app's
+    ``identity_lookup.jwt_expiry``). None for a token that is not a JWT or has
+    no ``exp``."""
+    parts = str(token or "").split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, TypeError, binascii.Error):
+        return None
+    exp = claims.get("exp") if isinstance(claims, dict) else None
+    return float(exp) if isinstance(exp, (int, float)) and not isinstance(exp, bool) else None
 
 
 def _trust(value: Any) -> str:
@@ -162,6 +189,9 @@ class CIIClient:
                                            body, 20.0)
         except Lab5Error as exc:
             raise Lab5Error(f"CII: cannot reach {url.split('/')[2]} ({exc})")
+        if status == 429 and url == self.token_url:
+            raise Lab5Error(f"CII: {url.split('/')[2]} answered HTTP 429: this API client's tokens for the hour are "
+                            f"used up (CII gives each client {TOKENS_PER_HOUR} an hour); they come back on the hour")
         if status != 200:
             raise Lab5Error(f"CII: {url.split('/')[2]} answered HTTP {status}")
         try:
@@ -169,16 +199,27 @@ class CIIClient:
         except ValueError:
             raise Lab5Error("CII: the answer was not JSON")
 
-    def token(self) -> str:
-        if self._token and self._clock() < self._expires:
-            return self._token
+    def mint(self) -> Tuple[str, float]:
+        """A new access token and when it expires (seconds since the epoch):
+        one of this API client's ``TOKENS_PER_HOUR``. ``lab5-setup`` pushes it
+        to the boxes (CII_ACCESS_TOKEN), so they never mint their own."""
         doc = self._post(self.token_url, {"client_id": self._id, "client_secret": self._secret,
                                           "grant_type": "client_credentials"}, {})
         token = str(doc.get("access_token") or "")
         if not token:
             raise Lab5Error("CII: the token endpoint returned no access_token")
+        try:
+            lifetime = float(doc.get("expires_in") or 36000)
+        except (TypeError, ValueError):
+            lifetime = 36000.0
+        return token, jwt_expiry(token) or (self._clock() + lifetime)
+
+    def token(self) -> str:
+        if self._token and self._clock() < self._expires:
+            return self._token
+        token, expires = self.mint()
         self._token = token
-        self._expires = self._clock() + max(60.0, float(doc.get("expires_in") or 36000) - 300.0)
+        self._expires = max(self._clock() + 60.0, expires - 300.0)
         return token
 
     def end_user(self, login: str) -> Dict[str, Any]:

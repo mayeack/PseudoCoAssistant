@@ -903,9 +903,21 @@ def test_sign_out() -> None:
     check("revoked: GET /api/identity/me (the 10 s poll) reaches the tombstone: whose session ended and why",
           r.status_code == 200 and r.json() == {"signed_in": False, "revoked": True, "username": "victim.user",
                                                 "revoked_reason": "duo_disabled", "can_unblock": True}, r.text)
-    r = c.get("/api/server-info", headers=H)
+    r = c.get("/api/hec/stats", headers=H)
     check("...while any other request answers 403 identity_session_revoked (the banner's trigger)",
           r.status_code == 403 and r.json() == {"detail": "identity_session_revoked"}, r.text)
+    r = c.get("/api/server-info", headers=H)
+    check("revoked: the page's own reads still answer, as if no one were signed in: GET /api/server-info "
+          "(the footer's host facts and gates), identity_session false",
+          r.status_code == 200 and r.json().get("identity_session") is False and "gated" in r.json(), r.text[:300])
+    r = c.get("/api/settings/demo-controls", headers=H)
+    check("...and GET /api/settings/demo-controls (which cards show)", r.status_code == 200, r.text[:300])
+    r = c.put("/api/settings/demo-controls", headers=H, json={})
+    check("...but never a write: PUT /api/settings/demo-controls answers 403 identity_session_revoked",
+          r.status_code == 403 and r.json() == {"detail": "identity_session_revoked"}, r.text)
+    r = c.get("/api/identity/me", headers=H)
+    check("...and the session is still revoked after those reads (the banner stays)",
+          r.status_code == 200 and r.json().get("revoked") is True, r.text)
     r = c.get("/app", headers=page_h, follow_redirects=False)
     check("revoked: loading the app (a reload, a new tab) goes to /login/duo?revoked=1",
           r.status_code == 303 and location(r) == "/login/duo?revoked=1", location(r))

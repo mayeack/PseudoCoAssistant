@@ -26,6 +26,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import urllib.parse
 import uuid
 from pathlib import Path
@@ -65,10 +66,17 @@ def _configure(on: bool = True) -> None:
     settings.cii_client_secret = CII_SECRET if on else ""
     settings.cii_token_url = CII_TOKEN_URL if on else ""
     settings.cii_api_url = CII_API_URL if on else ""
+    settings.cii_access_token = ""
     settings.identity_fail_open = True
     settings.identity_status_ttl_seconds = 10
+    settings.identity_cii_ttl_seconds = 300
 
 
+# The request that stands for "the next request" in the revocation tests: any
+# API path a revoked session is refused on. /api/server-info and
+# /api/settings/demo-controls are page reads it may still make
+# (identity middleware PAGE_READ_PATHS), so they are never the probe.
+PROBE = "/api/hec/stats"
 _configure(False)
 import cii_end_user_answers as cii_answers  # noqa: E402  (the shared table's coded errors, built as the Mac's are)
 import identity_isolation  # noqa: E402  (no real Duo / CII, whatever .env holds)
@@ -165,6 +173,7 @@ class FakeServices:
         self.cii_body = None   # a GraphQL answer to send (HTTP 200) instead of the user's record
         self.cii_http = None   # (status, body) the GraphQL endpoint sends instead (a dict goes as JSON)
         self.token_http = None  # (status, body) the token endpoint sends instead
+        self.token_headers = None  # headers that answer carries (Retry-After)
         self.raise_on = None   # ("token" | "graphql", exception class) to raise for that request
 
     def set_user(self, username, status="active", trust="TRUSTED", failing=()):
@@ -202,16 +211,16 @@ class FakeServices:
         return httpx.Response(200, json={"stat": "OK", "response": users})
 
     @staticmethod
-    def _send(status, body):
+    def _send(status, body, headers=None):
         if isinstance(body, (dict, list)):
-            return httpx.Response(status, json=body)
-        return httpx.Response(status, text=body or "")
+            return httpx.Response(status, json=body, headers=headers)
+        return httpx.Response(status, text=body or "", headers=headers)
 
     def _token(self, request):
         if self.raise_on and self.raise_on[0] == "token":
             raise self.raise_on[1]("injected", request=request)
         if self.token_http is not None:
-            return self._send(*self.token_http)
+            return self._send(*self.token_http, headers=self.token_headers)
         body = json.loads(request.content or b"{}")
         if body != {"client_id": "cii-client", "client_secret": CII_SECRET, "grant_type": "client_credentials"}:
             return httpx.Response(401, json={"error": "invalid_client"})
@@ -425,6 +434,138 @@ def _status(**over):
             "available": True, "sources": {"duo": "ok", "cii": "ok"}}
     base.update(over)
     return base
+
+
+def _jwt(exp) -> str:
+    """A token shaped as CII's (a JWT whose exp the gate reads; nothing verifies it)."""
+    enc = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")  # noqa: E731
+    return enc({"alg": "RS256", "typ": "JWT"}) + "." + enc({"exp": exp, "gty": "client-credentials"}) + ".c2ln"
+
+
+def test_cii_token_budget() -> None:
+    print("spike S16: CII gives an API client 6 tokens an hour: a pushed token, a wait after a refusal, a longer CII cache")
+    token_url_asks = lambda f: f.count(url=CII_TOKEN_URL)  # noqa: E731
+
+    # 1. A pushed token (lab5-setup's CII_ACCESS_TOKEN): used as is, never minted.
+    _configure(True)
+    fake = _fresh_fake()
+    fake.set_user("nina.osei", trust="QUESTIONABLE")
+    pushed = _jwt(int(time.time()) + 86400)
+    fake.valid_tokens.add(pushed)
+    settings.cii_client_id = settings.cii_client_secret = settings.cii_token_url = ""
+    check("without a pushed token or the API client, CII is not configured", not lookup.cii_configured())
+    settings.cii_access_token = pushed
+    check("a pushed token alone configures CII (the box holds no API client)", lookup.cii_configured())
+    lookup.clear_cache()
+    st = lookup.lookup("nina.osei")
+    gql = [r for r in fake.requests if str(r.url) == CII_API_URL]
+    check("the pushed token is sent as is, and the token endpoint is never asked",
+          st["sources"]["cii"] == "ok" and st["trust_level"] == "QUESTIONABLE" and token_url_asks(fake) == 0
+          and gql and gql[-1].headers.get("authorization") == f"Bearer {pushed}", str(st))
+    settings.cii_access_token = _jwt(int(time.time()) - 1)
+    lookup.clear_cache()
+    n = len(fake.requests)
+    st = lookup.lookup("nina.osei")
+    check("an expired pushed token: CII unavailable (token_expired); nothing is sent to CII and nothing minted",
+          st["sources"]["cii"] == "unavailable" and st["errors"].get("cii") == "token_expired"
+          and not any(r.url.host != DUO_HOST for r in fake.requests[n:]), str(st))
+    settings.cii_client_id, settings.cii_client_secret, settings.cii_token_url = "cii-client", CII_SECRET, CII_TOKEN_URL
+    settings.cii_access_token = _jwt(int(time.time()) + 3600)      # one CII does not know: it answers 401
+    lookup.clear_cache()
+    st = lookup.lookup("nina.osei")
+    check("a pushed token CII refuses (401): token_rejected, and nothing minted in its place, API client or not",
+          st["errors"].get("cii") == "token_rejected" and token_url_asks(fake) == 0, str(st))
+    settings.cii_access_token = "an-opaque-token"
+    fake.valid_tokens.add("an-opaque-token")
+    lookup.clear_cache()
+    st = lookup.lookup("nina.osei")
+    check("a pushed token with no expiry written in it is used until CII refuses it",
+          st["sources"]["cii"] == "ok" and token_url_asks(fake) == 0, str(st))
+    settings.cii_access_token = ""
+
+    # 2. The API client: one refused token request, then a wait, not a request per lookup.
+    _configure(True)
+    fake = _fresh_fake()
+    fake.set_user("nina.osei")
+    fake.token_http, fake.token_headers = (429, {"error": "too_many_requests"}), {"Retry-After": "1274"}
+    st = lookup.lookup("nina.osei")
+    retry = lookup._token_retry
+    check("a 429 from the token endpoint: CII unavailable (token_http_429)",
+          st["sources"]["cii"] == "unavailable" and st["errors"].get("cii") == "token_http_429", str(st))
+    check("...and the endpoint is left alone for its Retry-After (1274 s)",
+          retry is not None and 1270 <= retry[0] - time.monotonic() <= 1275, str(retry))
+    for _ in range(5):
+        lookup._cii_cache.clear()      # the answers expire; the wait does not
+        lookup._duo_cache.clear()
+        st = lookup.lookup("nina.osei")
+    check("five more lookups inside the wait: still one token request in all, each answer token_http_429",
+          token_url_asks(fake) == 1 and st["errors"].get("cii") == "token_http_429", str(token_url_asks(fake)))
+    fake.token_http = fake.token_headers = None
+    lookup._token_retry = (time.monotonic() - 1, "token_http_429")      # the wait is over
+    lookup._cii_cache.clear()
+    lookup._duo_cache.clear()
+    st = lookup.lookup("nina.osei")
+    check("once the wait is over, the next lookup asks again and gets a token (the wait is forgotten)",
+          st["sources"]["cii"] == "ok" and fake.tokens_issued == 1 and lookup._token_retry is None, str(st))
+    for header, low, high in ((None, 59, 61), ("999999", 3590, 3601), ("Wed, 21 Oct 2015 07:28:00 GMT", 59, 61),
+                              ("soon", 59, 61)):
+        lookup.clear_cache()
+        fake.token_http, fake.token_headers = (503, ""), ({"Retry-After": header} if header else None)
+        lookup.lookup("nina.osei")
+        wait = lookup._token_retry[0] - time.monotonic() if lookup._token_retry else None
+        check(f"Retry-After {header!r}: the wait is clamped to 1 minute .. 1 hour",
+              wait is not None and low <= wait <= high, str(wait))
+    fake.token_http = fake.token_headers = None
+    lookup.clear_cache()
+    fake.raise_on = ("token", httpx.ConnectError)
+    st = lookup.lookup("nina.osei")
+    retry = lookup._token_retry
+    check("a token request that cannot connect waits a minute too (token_connect_error)",
+          st["errors"].get("cii") == "token_connect_error" and retry is not None
+          and 59 <= retry[0] - time.monotonic() <= 61, str(st))
+    fake.raise_on = None
+
+    # 3. CII's answers live longer than Duo's; a failure keeps only the short TTL.
+    _configure(True)
+    fake = _fresh_fake()
+    fake.set_user("nina.osei", trust="QUESTIONABLE")
+    real_ttl = lookup.ttl_seconds
+    lookup.ttl_seconds = lambda: 0.0      # Duo's answers and every failure, stored from here on, expire at once
+    try:
+        lookup.lookup("nina.osei")
+        duo_n, cii_n = fake.count(host=DUO_HOST), fake.count(url=CII_API_URL)
+        lookup.lookup("nina.osei")
+        check("a stale Duo answer is asked again while CII's (IDENTITY_CII_TTL_SECONDS) is still fresh",
+              fake.count(host=DUO_HOST) == duo_n + 1 and fake.count(url=CII_API_URL) == cii_n)
+        lookup.clear_cache()
+        fake.cii_http = (500, "")
+        lookup.lookup("nina.osei")
+        fake.cii_http = None
+        st = lookup.lookup("nina.osei")
+        check("a CII failure is kept only for the short TTL, never for CII's: the next lookup asks again",
+              st["sources"]["cii"] == "ok", str(st))
+    finally:
+        lookup.ttl_seconds = real_ttl
+    check("IDENTITY_CII_TTL_SECONDS defaults to 300 s", type(settings).model_fields["identity_cii_ttl_seconds"].default == 300
+          and lookup.cii_ttl_seconds() == 300.0)
+    clamps = []
+    for value, want in ((0, 1.0), (99999, 3600.0), ("x", 300.0)):
+        settings.identity_cii_ttl_seconds = value
+        clamps.append(lookup.cii_ttl_seconds() == want)
+    settings.identity_cii_ttl_seconds = 300
+    check("...clamped to 1 s .. 1 h, and an unreadable value is the default", all(clamps), str(clamps))
+
+    # 4. The Mac's copy reads a token's expiry the same way (lab5-setup decides what to push with it).
+    sys.path.insert(0, str(ROOT / "deploy" / "lab5"))
+    import lab5_cii  # noqa: E402
+    enc = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")  # noqa: E731
+    cases = [_jwt(1794106467), _jwt(1794106467.5), _jwt("1794106467"), _jwt(True), _jwt(None),
+             enc({"alg": "none"}) + "." + enc({"sub": "x"}) + ".s", enc({"alg": "none"}) + "." + enc([1, 2]) + ".s",
+             "a.b.c", "a.b", "a.b.c.d", "", "opaque", "x." + "!!!" + ".y"]
+    pairs = [(lookup.jwt_expiry(t), lab5_cii.jwt_expiry(t)) for t in cases]
+    check("jwt_expiry: the gate and the Mac read every token alike (exp only when it is a number)",
+          all(a == b for a, b in pairs) and pairs[0][0] == 1794106467.0 and pairs[1][0] == 1794106467.5
+          and all(a is None for a, _ in pairs[2:]), str(pairs))
 
 
 def test_cii_not_found_is_an_answer_only_by_its_shape() -> None:
@@ -642,8 +783,8 @@ def test_no_cii_failure_is_no_such_user() -> None:
 
         # The cache never answers for a lookup that failed: once an answer is
         # stale, a failed refetch is the failure, never the last answer.
-        real_ttl = lookup.ttl_seconds
-        lookup.ttl_seconds = lambda: 0.0  # every cached answer is stale at once
+        real_ttl, real_cii_ttl = lookup.ttl_seconds, lookup.cii_ttl_seconds
+        lookup.ttl_seconds = lookup.cii_ttl_seconds = lambda: 0.0  # every cached answer is stale at once
         try:
             wrong = []
             for before, body, state in (("CII's no-record answer", no_record, "not_found"),
@@ -664,7 +805,7 @@ def test_no_cii_failure_is_no_such_user() -> None:
             check("a cached answer gone stale, then a failed refetch (after CII's no-record answer and after the "
                   "user's record): the failure, never the last answer", not wrong, "; ".join(wrong)[:2000])
         finally:
-            lookup.ttl_seconds = real_ttl
+            lookup.ttl_seconds, lookup.cii_ttl_seconds = real_ttl, real_cii_ttl
 
         # The box's victim row: every kind of failure is FAIL (cannot
         # verify), never WARN "no record in CII".
@@ -1093,7 +1234,7 @@ def test_app(c: TestClient) -> None:
     # A4: Duo disables the account -> the next request revokes the session.
     fake.duo["victim.user"]["status"] = "disabled"
     lookup.clear_cache()
-    r = c.get("/api/server-info", headers=ck(token))
+    r = c.get(PROBE, headers=ck(token))
     check("Duo disabled: the next request answers 403 identity_session_revoked",
           r.status_code == 403 and r.json() == {"detail": "identity_session_revoked"}, r.text)
     rev = _revoked("victim.user")
@@ -1124,7 +1265,7 @@ def test_app(c: TestClient) -> None:
           len(ub) == 1 and ub[0].get("user") == "victim.user"
           and ub[0].get("details") == {"reason": "unblock_me", "cleared": "duo_disabled"}, str(ub)[:300])
     lookup.clear_cache()
-    r = c.get("/api/server-info", headers=ck(token))
+    r = c.get(PROBE, headers=ck(token))
     check("Duo still says disabled, but an unblocked session is not revoked again",
           r.status_code == 200 and len(_revoked("victim.user")) == 1 and fake.duo["victim.user"]["status"] == "disabled")
     sid = str(uuid.uuid4())
@@ -1146,7 +1287,7 @@ def test_app(c: TestClient) -> None:
     check("POST /api/identity/reblock: override off, identity_reblocked written",
           r.status_code == 200 and r.json().get("override") is False and len(rb) == 1
           and rb[0].get("details") == {"reason": "reblock"}, r.text)
-    r = c.get("/api/server-info", headers=ck(token))
+    r = c.get(PROBE, headers=ck(token))
     check("...and Duo still disabled revokes the session again on the next request",
           r.status_code == 403 and len(_revoked("victim.user")) == 2)
     r = c.post("/api/identity/reblock", headers=ck(token))
@@ -1174,7 +1315,7 @@ def test_app(c: TestClient) -> None:
     t2, _ = store.create("locked.user")
     lookup.clear_cache()
     before = len(_audits("identity_session_revoked"))
-    r = c.get("/api/server-info", headers=ck(t2))
+    r = c.get(PROBE, headers=ck(t2))
     check("locked out: requests go on, the session is not revoked",
           r.status_code == 200 and store.lookup(t2).status == store.VALID
           and len(_audits("identity_session_revoked")) == before)
@@ -1182,12 +1323,12 @@ def test_app(c: TestClient) -> None:
     lookup.clear_cache()
     n = fake.count(host=DUO_HOST)
     for _ in range(4):
-        c.get("/api/server-info", headers=ck(t2))
+        c.get(PROBE, headers=ck(t2))
     check("the revocation pull is cached (10 s): four requests, one Duo call", fake.count(host=DUO_HOST) - n == 1)
     # Duo down: no revocation, no failure.
     lookup.clear_cache()
     fake.fail = "duo_connect"
-    r = c.get("/api/server-info", headers=ck(t2))
+    r = c.get(PROBE, headers=ck(t2))
     check("Duo unreachable: the request goes on, nothing revoked", r.status_code == 200
           and store.lookup(t2).status == store.VALID)
     fake.fail = None
@@ -1222,7 +1363,7 @@ def test_override_and_pull(c: TestClient) -> None:
     # 2. The response agent disables the account in Duo: the session ends anyway.
     fake.duo["gate.victim"]["status"] = "disabled"
     lookup.clear_cache()
-    r = c.get("/api/server-info", headers=ck(token))
+    r = c.get(PROBE, headers=ck(token))
     rev = _revoked("gate.victim")
     check("Duo disables the account: the overridden session is revoked on its next request",
           r.status_code == 403 and r.json() == {"detail": "identity_session_revoked"}
@@ -1241,7 +1382,7 @@ def test_override_and_pull(c: TestClient) -> None:
           r.status_code == 200 and store.lookup(token).status == store.VALID and len(ub) == 2
           and ub[1].get("details") == {"reason": "unblock_me", "cleared": "duo_disabled"}, str(ub)[-1:])
     lookup.clear_cache()
-    r = c.get("/api/server-info", headers=ck(token))
+    r = c.get(PROBE, headers=ck(token))
     sid = str(uuid.uuid4())
     r2 = _chat(c, token, sid)
     evs = _events("governance", session_id=sid)
@@ -1252,19 +1393,19 @@ def test_override_and_pull(c: TestClient) -> None:
     # 4. Duo enables the account again: a new disable ends the session again.
     fake.duo["gate.victim"]["status"] = "active"
     lookup.clear_cache()
-    r = c.get("/api/server-info", headers=ck(token))
+    r = c.get(PROBE, headers=ck(token))
     check("Duo enables the account again: the revocation Unblock me cleared is forgotten, the override stays",
           r.status_code == 200 and store.get(snap.session_ref).unblock_cleared is None
           and store.get(snap.session_ref).overridden)
     fake.duo["gate.victim"]["status"] = "disabled"
     lookup.clear_cache()
-    r = c.get("/api/server-info", headers=ck(token))
+    r = c.get(PROBE, headers=ck(token))
     check("...so a second Duo disable ends the session again", r.status_code == 403
           and len(_revoked("gate.victim")) == 2)
     lookup.clear_cache()
     fake.fail = "duo_connect"
     c.post("/api/identity/unblock", headers=ck(token))
-    r = c.get("/api/server-info", headers=ck(token))
+    r = c.get(PROBE, headers=ck(token))
     check("Duo unreachable: a held-open session stays, and nothing is forgotten",
           r.status_code == 200 and store.get(snap.session_ref).unblock_cleared == "duo_disabled")
     fake.fail = None
@@ -1275,7 +1416,7 @@ def test_override_and_pull(c: TestClient) -> None:
     r = c.post("/api/identity/unblock", headers=ck(t2))
     fake.duo["early.user"]["status"] = "disabled"
     lookup.clear_cache()
-    r2 = c.get("/api/server-info", headers=ck(t2))
+    r2 = c.get(PROBE, headers=ck(t2))
     check("a pre-emptive Unblock me (verdict allow) does not stop a Duo disable from ending the session",
           me.get("verdict") == "allow" and r.status_code == 200 and r2.status_code == 403
           and len(_revoked("early.user")) == 1, f"{me.get('verdict')} {r.status_code} {r2.status_code}")
@@ -1454,6 +1595,7 @@ def main() -> int:
     try:
         test_signer()
         test_lookup()
+        test_cii_token_budget()
         test_cii_not_found_is_an_answer_only_by_its_shape()
         test_no_cii_failure_is_no_such_user()
         test_victim_self_check_on_a_partial_answer()

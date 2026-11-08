@@ -12,6 +12,7 @@ The same Mac runs the persona scripts (`scripts/identity/`, below) and two daily
 deploy/lab5/lab5-setup check  workshop.yaml   # read-only: what up would change
 deploy/lab5/lab5-setup up     workshop.yaml   # make every box a Lab 5 instance
 deploy/lab5/lab5-setup status workshop.yaml   # per-box preflight + Cloudflare state
+deploy/lab5/lab5-setup cii-token workshop.yaml  # lab-day morning: a fresh CII token on each box that needs one
 deploy/lab5/lab5-setup handouts workshop.yaml # a fresh batch of persona bypass codes on every card
 deploy/lab5/lab5-setup down   workshop.yaml   # delete tunnels + DNS + recorded bypass codes, revert the keys
 deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at day 7, delete at day 14
@@ -23,7 +24,8 @@ deploy/lab5/lab5-setup expire [workshop.yaml] # participant accounts: disable at
 |---|---|
 | `check` | Connects to each box and reads its version, `.env` and HEC destinations. Prints the exact `.env` diff, the HEC host change, the tunnel and DNS plan, and a verdict per box. A box that `up` would accept says **ready, nothing to upgrade**. It also says what `up` would do for each participant account and for the persona bypass codes on its card, and fails each card whose codes `up` would refuse. It changes nothing on the boxes, in Cloudflare or in Duo. |
 | `up` | Runs each box in parallel, in this order: version check, backup, Lab 5 `.env` keys, tunnel and DNS, HEC host, restart, preflight. Any refusal happens before the first change. Then it creates a participant account for each box that came up, puts the room personas' bypass codes on its card, and writes the handout. |
-| `status` | Checks each box's tunnel health, DNS record, connector unit and `.env` drift, whether the box's own Identity Risk Gate blocks the room's victim (see below), then runs the preflight. It also lists `l5-<workshop>-*` tunnels and DNS records that no box record owns, each participant account's state and age, each room persona's Duo status, and how long each card's persona bypass codes have left. |
+| `status` | Checks each box's tunnel health, DNS record, connector unit, `.env` drift and CII token (how long it has left), whether the box's own Identity Risk Gate blocks the room's victim (see below), then runs the preflight. It also lists `l5-<workshop>-*` tunnels and DNS records that no box record owns, each participant account's state and age, each room persona's Duo status, and how long each card's persona bypass codes have left. |
+| `cii-token` | Lab-day morning. Gives each box a CII access token that lasts the lab, and restarts its app so it reads it (see "The CII token"). A box whose token has 20 h left keeps it and is not restarted. Only `CII_ACCESS_TOKEN` changes, and API client keys an older `up` left are removed. A box `up` never set up is refused. |
 | `handouts` | Puts a fresh batch of persona bypass codes on each handout card (or `--only` some), for lab-day morning or a lost card. It touches no box, tunnel or participant account, and asks for no SSH password. The codes it replaces stay valid until they expire, unless `--revoke` deletes them. |
 | `down` | Removes the connector, reverts the Lab 5 keys and the HEC host on every reachable box, then deletes the DNS records and tunnels that `up` recorded. A box it cannot reach or cannot finish fails the run, and the last line says how to re-run it. Running it twice is safe: the second run changes nothing. Then it deletes the persona bypass codes recorded for each card, and its last line says until when any code it could not delete stays valid. |
 | `expire` | Day 7: disables each participant account. Day 14: deletes it and its HOTP token, which frees the Duo seat. Without a workshop file it covers every workshop, which is how the daily launchd job runs it. It is idempotent and never touches a persona or a bypass code. |
@@ -53,9 +55,9 @@ Exit codes: `0` means every box, participant account and card is fine. `1` means
 | `pseudoco-lab5-duo-websdk-api-host` | `DUO_API_HOST` | same app |
 | `pseudoco-lab5-duo-status-ikey` | `DUO_ADMIN_IKEY` | Admin API app **PseudoCo Lab: Status (read-only)** |
 | `pseudoco-lab5-duo-status-skey` | `DUO_ADMIN_SKEY` | same app |
-| `pseudoco-lab5-cii-client-id` | `CII_CLIENT_ID` | the CII API client's "Copy all" |
-| `pseudoco-lab5-cii-client-secret` | `CII_CLIENT_SECRET` | same |
-| `pseudoco-lab5-cii-token-url` | `CII_TOKEN_URL` | same |
+| `pseudoco-lab5-cii-client-id` | (none, Mac only) | the CII API client's "Copy all". `up` and `cii-token` mint the boxes' token (`CII_ACCESS_TOKEN`) from it; the client never leaves the Mac (see "The CII token"). |
+| `pseudoco-lab5-cii-client-secret` | (none, Mac only) | same |
+| `pseudoco-lab5-cii-token-url` | (none, Mac only) | same |
 | `pseudoco-lab5-cii-api-url` | `CII_API_URL` | same |
 | your choice, per room | (none) | the room stack's HEC token. Optional: only its last 4 characters are compared with the box's destination. |
 | `pseudoco-lab5-duo-provisioner-ikey` | (none, Mac only) | Admin API app **PseudoCo Provisioner** (Grant resource read + write): participant accounts and the persona cast. It never leaves the Mac. |
@@ -101,7 +103,7 @@ Copy `deploy/lab5/workshop.example.yaml`, one per delivery. It holds no secrets:
 
 1. **Version check.** The box's `/health` must report at least `required_version` (default 4.23.0). There is no code upgrade (I5). A box below that is refused with "the Show template needs that release (12.6)". It also checks `sudo -n`, `cloudflared` and the app unit, and that exactly one HEC destination sends to the room stack.
 2. **Backup.** `.env` (byte for byte) and `medadvice.db` (SQLite online backup, safe while the app writes) go to `~/.pseudoco-lab5/backups/<workshop>-<UTC stamp>-<random>/` on the box, mode 0600 in a 0700 directory. Each run gets a new directory.
-3. **Lab 5 keys.** Only the keys of the 12.1 table change, `PUBLIC_BASE_URL` and `HEC_HOST` included. The first live line of a key is replaced in place, and a missing key is appended. Every other line keeps its bytes, comments, quoting and line endings. The file is written atomically, with its mode kept. If the file changed since it was read, nothing is written.
+3. **Lab 5 keys.** Only the keys of the 12.1 table change, `PUBLIC_BASE_URL` and `HEC_HOST` included. The CII key is `CII_ACCESS_TOKEN`, a token minted on the Mac (see "The CII token"); `CII_CLIENT_ID`, `CII_CLIENT_SECRET` and `CII_TOKEN_URL` are removed if an older `up` left them. The first live line of a key is replaced in place, and a missing key is appended. Every other line keeps its bytes, comments, quoting and line endings. The file is written atomically, with its mode kept. If the file changed since it was read, nothing is written.
 4. **Tunnel and DNS.** These are created through the Cloudflare API:
    - a remotely managed tunnel `l5-<workshop>-<nn>`, with ingress `<host> -> http://localhost:8001`;
    - a proxied CNAME `<host> -> <tunnel-id>.cfargotunnel.com`.
@@ -134,9 +136,9 @@ After the boxes, `up` creates a **participant account** for each box that came u
   - if Show has already destroyed the box, the failure is expected: nothing is left on it to revert.
   - an SSH session lost partway (paramiko's `SSHException`, an `EOFError`) is the same: the box fails, its revert stays pending, and its DNS record and tunnel are still deleted.
 
-**The victim check (`status`).** On each box, `status` runs the gate's own lookup and decision for `room.victim` with the box's venv, code and `.env` (`<checkout>/venv/bin/python -I -`, the script on stdin): the Duo Status keys and the CII API client that `up` wrote there. It is read-only (a Duo Admin API GET, a CII token and query) and prints only fixed codes. `FAIL` when the box cannot ask Duo or CII about the victim (for example a stale `pseudoco-lab5-duo-status-skey`: Duo answers 401, no email is known, and CII is not asked), because with `IDENTITY_FAIL_OPEN` on the gate would then let the victim chat and nothing else would say so; `FAIL` too when Duo has no such user or the release has no gate. `WARN` while the gate would let the victim chat (before the takeover, CII does not show it failing yet). `OK` when the gate blocks it: a contained victim (disabled in Duo) too, and a block on what a partial answer did say (CII still rating the victim `UNTRUSTED`, with an error elsewhere in its answer), whose row also names what did not answer in full. A Duo lockout alone is never `OK`: Duo unlocks the account on its own in about 15 minutes and the gate then decides without it, so a victim blocked only by a lockout is `WARN`, or `FAIL` when the box cannot ask Duo or CII. A `cii graphql_error` means CII gave the box's API client a token and then answered with an error, so the client's ID and secret are right; the row carries only the code. One that stays is the API client's role or scopes in CII (it must be able to read end users: a refused permission, scope or role is an error, never "no such user"), or a query the tenant rejects (spikes S5/S6 pin the query). CII's own answer for a login it has no record of is an error too, but the gate reads it, matched exactly, as "no such user", so it never shows here as one. `persona_activity.py selfcheck` on the Mac asks CII with the same API client and prints CII's own message. A `cii bad_response` is an answer in a shape the gate cannot read: one that stays means the query does not match the tenant (spikes S5/S6). By lab day (T-0) the row must be `OK`.
+**The victim check (`status`).** On each box, `status` runs the gate's own lookup and decision for `room.victim` with the box's venv, code and `.env` (`<checkout>/venv/bin/python -I -`, the script on stdin): the Duo Status keys and the CII access token that `up` wrote there. It is read-only (a Duo Admin API GET and a CII query with the pushed token; no token is minted) and prints only fixed codes. `FAIL` when the box cannot ask Duo or CII about the victim (for example a stale `pseudoco-lab5-duo-status-skey`: Duo answers 401, no email is known, and CII is not asked), because with `IDENTITY_FAIL_OPEN` on the gate would then let the victim chat and nothing else would say so; `FAIL` too when Duo has no such user or the release has no gate. `WARN` while the gate would let the victim chat (before the takeover, CII does not show it failing yet). `OK` when the gate blocks it: a contained victim (disabled in Duo) too, and a block on what a partial answer did say (CII still rating the victim `UNTRUSTED`, with an error elsewhere in its answer), whose row also names what did not answer in full. A Duo lockout alone is never `OK`: Duo unlocks the account on its own in about 15 minutes and the gate then decides without it, so a victim blocked only by a lockout is `WARN`, or `FAIL` when the box cannot ask Duo or CII. A `cii token_expired` or `cii token_rejected` means the box's token has run out or CII refuses it: run `cii-token`. A `cii graphql_error` means CII accepted the box's token and then answered with an error, so the token is fine; the row carries only the code. One that stays is the API client's role or scopes in CII (it must be able to read end users: a refused permission, scope or role is an error, never "no such user"), or a query the tenant rejects (spikes S5/S6 pin the query). CII's own answer for a login it has no record of is an error too, but the gate reads it, matched exactly, as "no such user", so it never shows here as one. `persona_activity.py selfcheck` on the Mac asks CII with the same API client and prints CII's own message. A `cii bad_response` is an answer in a shape the gate cannot read: one that stays means the query does not match the tenant (spikes S5/S6). By lab day (T-0) the row must be `OK`.
 
-Participant accounts stay until `expire` disables them at day 7 and deletes them at day 14. `down` also deletes the persona bypass codes it recorded for each card (see "Persona bypass codes"). Any it could not tell apart from another room's stop at their `valid_secs`, and the last line of `down` says when. Rotate the Duo and CII credentials after the workshop (I1).
+Participant accounts stay until `expire` disables them at day 7 and deletes them at day 14. `down` also deletes the persona bypass codes it recorded for each card (see "Persona bypass codes"). Any it could not tell apart from another room's stop at their `valid_secs`, and the last line of `down` says when. Rotate the Duo credentials after the workshop (I1). The CII API client never left the Mac, and the boxes' CII token expires on its own within 24 h.
 
 ## Participant accounts (plan 12.2)
 
@@ -241,10 +243,24 @@ Both run through `run-lab5-job.sh`, with `LAB5_PYTHON` (default `~/.pseudoco-lab
 
 Use `--only expire|baseline` to install one, `--uninstall` to remove them and `--print` to see the rendered plists. A run missed while the Mac sleeps happens when it wakes. Nothing runs while the Mac is shut down, so a week away before a delivery shows up as a self-check failure. Logs go to `logs/launchd-lab5-*.log` and to the run logs under `~/.pseudoco-lab5/`. Install from the main checkout, not a worktree.
 
+## The CII token (spike S16)
+
+CII's token endpoint gives each API client **6 tokens a clock hour**. It answers HTTP 429 after that, and the count comes back on the hour. A token lasts 24 h, and minting one does not end the earlier ones. A box that minted its own token at every start would let a room of more than six boxes use up the hour between them, and every gate would then read CII as unavailable and fail open. So boxes never mint:
+
+- **The token stays on the Mac until pushed.** `up` and `cii-token` mint one token on the Mac, at most one per run, and only when some box needs one. They push it as `CII_ACCESS_TOKEN`. A box keeps its own token while it has 20 h left.
+- **The gate uses it until it expires.** It sends the token until the `exp` written in it, and never mints a token in its place.
+- **`status` reports how long it has left:**
+  - `OK` with the hours left;
+  - `WARN` under 8 h (less than a lab day) or when an older `up` left the box minting its own;
+  - `FAIL` when it has expired or is missing.
+- **Refresh it on lab-day morning.** A token `up` minted the day before runs out during the lab, so run `cii-token`, then `status`.
+- **A refused mint changes nothing.** If CII answers 429 when the Mac mints, the box fails before anything is written, and the message says the hour's tokens are used up. Wait for the top of the hour. `persona_activity.py selfcheck` mints from the same API client, at most once a run.
+
 ## Secrets
 
 - SSH passwords are asked once per box per run with `getpass`. Pressing Enter reuses the previous box's password. They are never stored.
 - Keychain values reach a box only as file content: `.env` over SFTP, and the tunnel token on the stdin of a `sudo` file write. They never appear in a command line, a URL, the output or the run log.
+- The CII API client never leaves the Mac. A box gets a 24 h CII access token, which the output shows by its last 4 characters at most.
 - Output shows credentials by their last 4 characters only. All output, mirrored to `~/.pseudoco-lab5/workshops/<workshop>/runs/*.log`, passes through a redactor that holds every secret the run read.
 - `~/.pseudoco-lab5/workshops/<workshop>/` holds the per-box records (`boxes/<nn>.json`: tunnel and DNS ids, the non-secret baseline, backup paths, and the usernames the box's app may admit, which the victim check across workshops reads) and `known_hosts`. Directories are 0700 and files 0600.
 - Host keys are trusted on first use, per workshop. Show reuses IP addresses, so `~/.ssh/known_hosts` is not consulted. A box that later presents a different key is refused.
@@ -261,6 +277,8 @@ A box from the template must pass `lab5-setup check` with **ready, nothing to up
 An `APP_VERSION` line left in the template's `.env` overrides what `/health` reports. Keep it equal to the tag, or remove it. `check` names it when it explains a version refusal.
 
 ## Tests
+
+`tests/test_lab5_setup.py` covers the box side, and pins the CII token (`test_cii_token`): `up` mints one token per run whatever the number of boxes, a re-run keeps a box's token with 20 h left, `status` warns under 8 h and fails an expired one, `cii-token` refreshes only the boxes that need it and removes an older `up`'s API client, a 429 on the mint fails the box with nothing written, and the API client's secret never reaches a box.
 
 `tests/test_lab5_participants.py` and `tests/test_identity_personas.py` cover the participant accounts, `expire`, the persona scripts and the launchd templates. They run against an in-memory Duo, CII and Keychain (`tests/lab5_fakes.py`), and pin the following:
 

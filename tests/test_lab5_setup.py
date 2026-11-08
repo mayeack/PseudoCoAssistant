@@ -20,6 +20,7 @@ Run:  .venv/bin/python tests/test_lab5_setup.py
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -29,6 +30,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -67,6 +69,18 @@ SECRETS = {
     "pseudoco-lab5-hec-acme": "11111111-2222-3333-4444-roomhectoken9",
 }
 SSH_PASSWORD = "Sh0w-workshop-pw!"
+
+
+def cii_jwt(exp: float) -> str:
+    """A CII access token shaped as CII's are (a JWT whose ``exp`` the tools
+    read; nothing verifies it here)."""
+    enc = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")  # noqa: E731
+    return enc({"alg": "RS256", "typ": "JWT"}) + "." + enc({"exp": int(exp), "gty": "client-credentials"}) + ".c2lnbmF0dXJl"
+
+
+# The token this suite's CII mints (spike S16: the Mac mints, the boxes get it):
+# valid until 2100, so `up` and `cii-token` keep it on a re-run.
+CII_TOKEN = cii_jwt(4102444800)
 ACCESS_KEYS = {"01": "box1-access-key-7c1d9e", "02": "box2-access-key-4b2f0a"}
 NON_SECRET_ITEMS = {"pseudoco-lab5-duo-websdk-api-host", "pseudoco-lab5-cii-token-url",
                     "pseudoco-lab5-cii-api-url"}
@@ -75,7 +89,7 @@ OTHER_LAB_SECRETS = ["aid-key-OTHERLAB-5555", "ao-token-OTHERLAB-6666", "showhec
 
 def all_secrets(world: "FakeWorld") -> List[str]:
     vals = [v for k, v in SECRETS.items() if k not in NON_SECRET_ITEMS]
-    vals += [SSH_PASSWORD, *ACCESS_KEYS.values(), *OTHER_LAB_SECRETS]
+    vals += [SSH_PASSWORD, *ACCESS_KEYS.values(), *OTHER_LAB_SECRETS, CII_TOKEN]
     vals += [t["token"] for t in world.cf.tunnels.values()]
     vals += [t["secret"] for t in world.cf.tunnels.values()]
     return vals
@@ -234,8 +248,10 @@ class FakeBox:
             on = envfile.get(lines, "DUO_ENABLED") == "true"
             answer = {"duo_configured": on and all(envfile.get(lines, k) for k in ("DUO_ADMIN_IKEY", "DUO_ADMIN_SKEY",
                                                                                   "DUO_API_HOST")),
-                      "cii_configured": all(envfile.get(lines, k) for k in ("CII_CLIENT_ID", "CII_CLIENT_SECRET",
-                                                                             "CII_TOKEN_URL", "CII_API_URL"))}
+                      # the app's cii_configured: the API URL and a pushed token, or the API client
+                      "cii_configured": bool(envfile.get(lines, "CII_API_URL") and (
+                          envfile.get(lines, "CII_ACCESS_TOKEN")
+                          or all(envfile.get(lines, k) for k in ("CII_CLIENT_ID", "CII_CLIENT_SECRET", "CII_TOKEN_URL"))))}
             if answer["duo_configured"] and answer["cii_configured"]:
                 answer.update(self.victim_answer)
             return R(0, json.dumps(answer) + "\n")
@@ -438,6 +454,8 @@ class FakeWorld:
         self.https_log: List[Tuple[str, str, Dict[str, str]]] = []
         self.notes: List[Tuple[str, str]] = []       # desktop notifications the tool raised
         self.duo_transports: List[Tuple[str, str]] = []
+        self.cii_mints = 0                          # token requests the Mac sent CII (spike S16)
+        self.cii_answer: Optional[Tuple[int, bytes]] = None   # what the token endpoint sends instead
 
     def connector_for(self, tunnel_id: str) -> Optional[FakeBox]:
         t = self.cf.tunnels.get(tunnel_id)
@@ -483,6 +501,21 @@ class FakeWorld:
         status, payload = box.app(method, parts.path, headers, None)
         return status, json.dumps(payload).encode()
 
+    def cii(self, method: str, url: str, headers: Dict[str, str], body: Optional[bytes],
+            timeout: float) -> Tuple[int, bytes]:
+        """This suite's CII: its token endpoint only, which the Mac asks to mint
+        the boxes' token. The boxes' own CII queries are their fake gate's."""
+        if url != SECRETS["pseudoco-lab5-cii-token-url"]:
+            raise Lab5Error(f"no CII at {url} in tests/test_lab5_setup.py")
+        self.cii_mints += 1
+        if self.cii_answer is not None:
+            return self.cii_answer
+        doc = json.loads(body or b"{}")
+        if doc != {"client_id": SECRETS["pseudoco-lab5-cii-client-id"],
+                   "client_secret": SECRETS["pseudoco-lab5-cii-client-secret"], "grant_type": "client_credentials"}:
+            return 401, b'{"error":"invalid_client"}'
+        return 200, json.dumps({"access_token": CII_TOKEN, "expires_in": 86400, "token_type": "Bearer"}).encode()
+
     def prompt(self, text: str) -> str:
         self.prompts.append(text)
         return SSH_PASSWORD if len(self.prompts) == 1 else ""   # Enter = same as previous
@@ -496,7 +529,8 @@ class FakeWorld:
         return ls.Deps(connect=self.connect, cloudflare_transport=self.cf, keychain_runner=self.security,
                        https=self.https, resolve=self.resolve, prompt=self.prompt, state_root=state_root,
                        out=out, sleep=lambda s: None, app_wait_s=0.0, preflight_wait_s=0.0,
-                       duo_transport=self.no_duo, notify=lambda title, msg: self.notes.append((title, msg)))
+                       duo_transport=self.no_duo, cii_transport=self.cii,
+                       notify=lambda title, msg: self.notes.append((title, msg)))
 
 
 WORKSHOP_YAML = """
@@ -606,7 +640,12 @@ def test_up_status_down() -> None:
                   and envfile.get(lines, "PUBLIC_BASE_URL") == f"https://{host}"
                   and envfile.get(lines, "HEC_HOST") == host
                   and envfile.get(lines, "DUO_ADMIN_SKEY") == SECRETS["pseudoco-lab5-duo-status-skey"]
+                  and envfile.get(lines, "CII_ACCESS_TOKEN") == CII_TOKEN
+                  and envfile.get(lines, "CII_API_URL") == SECRETS["pseudoco-lab5-cii-api-url"]
                   and envfile.get(lines, "IDENTITY_ALLOWED_USERS") == "marcus.bell,elena.sousa,grace.lin,avery.kim")
+            check(f"[{nn}] the CII API client never reaches the box (S16: a pushed token instead)",
+                  not any(envfile.get(lines, k) for k in ls.CII_CLIENT_KEYS)
+                  and SECRETS["pseudoco-lab5-cii-client-secret"] not in new_env)
             check(f"[{nn}] .env keeps 0600", box.files["/home/splunk/DemoBot/.env"][1] == 0o600)
             room_before = next(d for d in before[nn]["dests"] if d["id"] == "show-stack")
             room_after = next(d for d in box.destinations if d["id"] == "show-stack")
@@ -1704,8 +1743,114 @@ def test_lost_session_is_a_lab5_error() -> None:
         check("...and status shows the pending revert", "an earlier down could not revert this box" in out, out)
 
 
+def _set_box_env(box: "FakeBox", **keys: Optional[str]) -> None:
+    """Edit the box's .env as if by hand (None removes the key)."""
+    path = "/home/splunk/DemoBot/.env"
+    text, mode = envfile.decode(box.files[path][0]), box.files[path][1]
+    box.files[path] = (envfile.encode(envfile.plan_up(text, dict(keys)).new_text), mode)
+
+
+def _box_env(box: "FakeBox") -> List[str]:
+    return envfile.split_lines(envfile.decode(box.files["/home/splunk/DemoBot/.env"][0]))
+
+
+def test_cii_token() -> None:
+    print("== spike S16: the Mac mints one CII token per run and pushes it; boxes never mint ==")
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        rc, out = run_cli(world, tmp, "up")
+        check("up on two boxes mints one token, however many boxes need it", rc == 0 and world.cii_mints == 1, out)
+        check("...and says so, with its expiry", "CII: minted one access token for this run" in out
+              and "2100-01-01 00:00 UTC" in out, out)
+        check("...never printing it", CII_TOKEN not in out)
+        rc, out = run_cli(world, tmp, "up")
+        check("a re-run keeps each box's token (more than 20 h left): no mint, no restart",
+              rc == 0 and world.cii_mints == 1 and all(b.restarts == 1 for b in world.boxes.values())
+              and "kept the box's token" in out, out)
+        rc, out = run_cli(world, tmp, "status")
+        check("status: the token row says how long it lasts", "CII token" in out and "h left, until 2100-01-01" in out,
+              out)
+
+        # Box 02's token runs out within the day; box 01's has years left.
+        soon = cii_jwt(time.time() + 2 * 3600)
+        _set_box_env(world.boxes["02"], CII_ACCESS_TOKEN=soon)
+        rc, out = run_cli(world, tmp, "status")
+        check("status: a token with less than a lab day left is WARN, with what to run",
+              re.search(r"WARN\s+CII token\s+\d\.\d h left.*less than a lab day; run cii-token", out) is not None, out)
+        check("...never printing the box's token", soon not in out)
+        rc, out = run_cli(world, tmp, "cii-token")
+        b1, b2 = world.boxes["01"], world.boxes["02"]
+        check("cii-token: one mint, for the box that needed it", rc == 0 and world.cii_mints == 2, out)
+        check("...box 02 gets the new token and restarts; box 01 keeps its token and does not restart",
+              envfile.get(_box_env(b2), "CII_ACCESS_TOKEN") == CII_TOKEN and b2.restarts == 2
+              and envfile.get(_box_env(b1), "CII_ACCESS_TOKEN") == CII_TOKEN and b1.restarts == 1, out)
+        check("...touching no other .env line", envfile.get(_box_env(b2), "DUO_ENABLED") == "true"
+              and envfile.get(_box_env(b2), "HEC_HOST") == "l5-acme-02.pseudocoassistant.com")
+
+        # An expired token: the box's gate cannot ask CII.
+        _set_box_env(b2, CII_ACCESS_TOKEN=cii_jwt(time.time() - 60))
+        rc, out = run_cli(world, tmp, "status", "--only", "2")
+        check("status: an expired token is FAIL", re.search(r"FAIL\s+CII token\s+expired", out) is not None, out)
+
+        # An older up left box 01 the API client: status warns, cii-token removes it.
+        _set_box_env(b1, CII_ACCESS_TOKEN=None, CII_CLIENT_ID=SECRETS["pseudoco-lab5-cii-client-id"],
+                     CII_CLIENT_SECRET=SECRETS["pseudoco-lab5-cii-client-secret"],
+                     CII_TOKEN_URL=SECRETS["pseudoco-lab5-cii-token-url"])
+        rc, out = run_cli(world, tmp, "status", "--only", "1")
+        check("status: a box that mints its own tokens is WARN (the room shares 6 an hour)",
+              re.search(r"WARN\s+CII token\s+the box mints its own CII tokens", out) is not None, out)
+        rc, out = run_cli(world, tmp, "cii-token", "--only", "1")
+        lines = _box_env(b1)
+        check("cii-token: the API client leaves the box and the pushed token takes its place",
+              rc == 0 and envfile.get(lines, "CII_ACCESS_TOKEN") == CII_TOKEN
+              and not any(envfile.get(lines, k) for k in ls.CII_CLIENT_KEYS)
+              and SECRETS["pseudoco-lab5-cii-client-secret"] not in envfile.decode(b1.files["/home/splunk/DemoBot/.env"][0]),
+              out)
+
+        # CII refuses the mint: both boxes need a token, each is FAIL, nothing on them changes,
+        # and the run asked CII once (a refusal is not retried box after box).
+        _set_box_env(b1, CII_ACCESS_TOKEN=cii_jwt(time.time() + 3600))
+        _set_box_env(b2, CII_ACCESS_TOKEN=cii_jwt(time.time() + 3600))
+        before = {nn: b.files["/home/splunk/DemoBot/.env"][0] for nn, b in world.boxes.items()}
+        world.cii_answer = (429, b'{"error":"too_many_requests"}')
+        mints = world.cii_mints
+        rc, out = run_cli(world, tmp, "cii-token")
+        check("CII's 429 on the mint: cii-token FAILs each box that needed a token, saying the hour's tokens are "
+              "used up", rc == 1 and out.count("tokens for the hour are used up") == 2, out)
+        check("...asking CII once in all, not once per box", world.cii_mints == mints + 1, str(world.cii_mints - mints))
+        check("...and leaving both .env files as they were",
+              all(b.files["/home/splunk/DemoBot/.env"][0] == before[nn] for nn, b in world.boxes.items()))
+        world.cii_answer = None
+        _set_box_env(b1, CII_ACCESS_TOKEN=CII_TOKEN)
+
+        # An older up left box 01 the API client next to its token: re-running up takes the client off.
+        _set_box_env(b1, CII_CLIENT_ID=SECRETS["pseudoco-lab5-cii-client-id"],
+                     CII_CLIENT_SECRET=SECRETS["pseudoco-lab5-cii-client-secret"],
+                     CII_TOKEN_URL=SECRETS["pseudoco-lab5-cii-token-url"])
+        rc, out = run_cli(world, tmp, "check", "--only", "1")
+        check("check: an older up's CII API client on the box is a planned change",
+              rc == 0 and "CII_CLIENT_SECRET" in out and SECRETS["pseudoco-lab5-cii-client-secret"] not in out, out)
+        rc, out = run_cli(world, tmp, "up", "--only", "1")
+        lines = _box_env(b1)
+        check("a re-run of up takes the API client off the box and keeps its token",
+              rc == 0 and not any(envfile.get(lines, k) for k in ls.CII_CLIENT_KEYS)
+              and envfile.get(lines, "CII_ACCESS_TOKEN") == CII_TOKEN
+              and SECRETS["pseudoco-lab5-cii-client-secret"] not in envfile.decode(b1.files["/home/splunk/DemoBot/.env"][0]),
+              out)
+
+    print("== cii-token refuses a box up never set up ==")
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        rc, out = run_cli(world, tmp, "cii-token")
+        check("cii-token before up: every box FAIL (run up), nothing minted, nothing written",
+              rc == 1 and out.count("no Lab 5 keys from up: run up") == 2 and world.cii_mints == 0
+              and all(not b.mutations for b in world.boxes.values()), out)
+
+
 def main() -> int:
-    for test in (test_envfile, test_check_is_read_only, test_up_status_down, test_refusals,
+    for test in (test_envfile, test_check_is_read_only, test_up_status_down, test_refusals, test_cii_token,
                  test_down_without_record, test_preflight_gate_and_unreachable, test_failed_up_resumes,
                  test_wrong_password_and_cli, test_down_failures_are_failures, test_identity_values_and_rollback,
                  test_diff_on_long_env,
