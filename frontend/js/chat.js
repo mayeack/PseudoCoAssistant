@@ -13,6 +13,30 @@ let autoPromptEnabled = false;
 let autoPromptStatusInterval = null;
 let currentTheme = 'medadvice';
 
+// ---- Lab 5 identity: ONE fetch wrapper for every request this page makes ----
+// Once a Duo identity session is revoked, the identity middleware answers 403
+// identity_session_revoked to every request (401 identity_session_expired once
+// it expires), and several pollers below swallow their errors. So the check
+// lives here, once, around window.fetch itself: whichever request sees it first
+// raises #identityBanner. Only a clone of a JSON 401/403 is read; the response
+// itself (SSE streams included) reaches its caller untouched.
+const _pageFetch = window.fetch.bind(window);
+window.fetch = async function (input, init) {
+    const response = await _pageFetch(input, init);
+    if (response.status === 401 || response.status === 403) noteIdentityRefusal(response);
+    return response;
+};
+
+function noteIdentityRefusal(response) {
+    const type = response.headers.get('content-type') || '';
+    if (!type.includes('application/json')) return;
+    response.clone().json().then((data) => {
+        const detail = data && data.detail;
+        if (detail === 'identity_session_revoked') showIdentityBanner('revoked');
+        else if (detail === 'identity_session_expired') showIdentityBanner('expired');
+    }).catch(() => { /* not JSON after all */ });
+}
+
 const THEMES = {
     medadvice: {
         key: 'medadvice',
@@ -441,6 +465,10 @@ function updateColorSchemeButtons(mode) {
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
+    // Back from a Duo sign-in (/auth/duo/callback -> /app?signin=ok): forget the
+    // conversations this browser started before, under another identity or none.
+    consumeSigninRedirect();
+
     // Restore saved theme
     const savedTheme = localStorage.getItem('medadvice_theme') || 'medadvice';
     currentTheme = savedTheme;
@@ -599,7 +627,7 @@ function showMainApp() {
 // disabled option with the reason as its tooltip, plus the neutral pill by the
 // Model select. Polled with the provider indicators so a NIM that comes up
 // (or a Colima start) is reflected without a reload.
-let _hostGate = { gated: {}, capabilities: {} };
+let _hostGate = { gated: {}, capabilities: {}, identity_session: false };
 
 function gateFor(key) { return (_hostGate.gated || {})[key] || null; }
 
@@ -616,9 +644,16 @@ async function refreshServerInfo() {
         const data = await res.json();
         if (el) el.textContent = data.hostname || 'unknown';
         if (ver) ver.textContent = data.version ? `v${data.version}` : '—';
-        _hostGate = { gated: data.gated || {}, capabilities: data.capabilities || {} };
+        _hostGate = { gated: data.gated || {}, capabilities: data.capabilities || {},
+                      identity_session: data.identity_session === true };
+        // Once GET /api/identity/me has answered, server-info's
+        // identity_session is as current an answer (it is asked first).
+        if (_identityAnswer !== null) _identityAnswer = _hostGate.identity_session ? 'signed_in' : 'signed_out';
         _attachmentConfig = data.attachments || null;
         applyAttachmentGate();
+        // Every poll, not only when /api/identity/me is asked: once the gate
+        // closes nothing asks it any more, and the link must still go.
+        renderSigninLink();
     } catch (e) {
         unavailable();
     }
@@ -871,7 +906,12 @@ async function applyDemoControlVisibility() {
 
 function refreshIndicators() {
     // Capabilities first: the provider/model gating in refreshActiveProvider reads them.
-    refreshServerInfo().then(refreshActiveProvider);
+    refreshServerInfo().then(() => {
+        refreshActiveProvider();
+        // After server-info (which already re-evaluated the Sign-in link from
+        // gated.duo_signin): with Lab 5 off nothing asks for /api/identity/me.
+        if (identityPollWanted()) refreshIdentity();
+    });
     refreshActiveBlueprint();
     refreshStaticEmission();
     applyDemoControlVisibility();   // a Settings-page change shows within the poll interval
@@ -882,6 +922,259 @@ function startProviderPolling() {
     if (providerPollInterval) clearInterval(providerPollInterval);
     // Poll so an external model switch (e.g. the legacy eval runner) reflects here.
     providerPollInterval = setInterval(refreshIndicators, 10000);
+}
+
+// ---- Lab 5 identity: badge, banner, sign-in redirect ----
+// Identity comes only from the server's verified session (GET /api/identity/me,
+// polled with the indicators above while identityPollWanted() says Lab 5 is in
+// use); nothing here is ever sent as identity.
+// The badge shows the persona in neutral colours; the trust pill shows only
+// state, and only when the server reports one. Hidden unless signed in.
+// The banner follows the same answer: a revoked session (SESSION ENDED), an
+// identity the Identity Risk Gate refuses (IDENTITY AT RISK) or one the user
+// has unblocked (UNBLOCKED), each with the Unblock me toggle.
+let _identity = null;
+// What the server last said about this browser's session: 'signed_in',
+// 'signed_out', or null while that is not known (the first GET
+// /api/identity/me still pending, or the last one failed with anything but a
+// 401/403). Only 'signed_out' shows the "Sign in with Duo" link.
+let _identityAnswer = null;
+
+// Lab 5 is inert unless the server says otherwise. GET /api/identity/me is
+// polled only while the duo_signin gate is open, the server reports an
+// identity session on this browser (server-info identity_session), or the page
+// already shows one (the badge, or a banner such as SESSION ENDED). With
+// DUO_ENABLED off none of these holds, so Labs 0-4 send no request for it.
+function identityPollWanted() {
+    const g = gateFor('duo_signin');
+    if (g && g.enabled) return true;
+    if (_hostGate.identity_session || _identity) return true;
+    const banner = document.getElementById('identityBanner');
+    return !!(banner && !banner.classList.contains('hidden'));
+}
+
+async function refreshIdentity() {
+    try {
+        const res = await fetch('/api/identity/me');
+        // 401/403: not signed in any more (the fetch wrapper raised the banner).
+        if (res.status === 401 || res.status === 403) {
+            _identityAnswer = 'signed_out';
+            renderIdentity(null);
+            return;
+        }
+        // Anything else that is not OK (a tunnel blip) keeps the last badge,
+        // but says nothing about the session: no Sign in link until one does.
+        if (!res.ok) { _identityAnswer = null; renderSigninLink(); return; }
+        const data = await res.json();
+        _identityAnswer = data && data.signed_in ? 'signed_in' : 'signed_out';
+        if (data && data.revoked) { showIdentityBanner('revoked', data); return; }
+        renderIdentity(data && data.signed_in ? data : null);
+    } catch (e) {
+        // Best-effort: the badge keeps its last state; the link waits for an answer.
+        _identityAnswer = null;
+        renderSigninLink();
+    }
+}
+
+// "Sign in with Duo": shown only while gated.duo_signin is open AND the server
+// last said this browser is signed out (GET /api/identity/me, or server-info's
+// identity_session once /me has answered). So it never flashes for a
+// signed-in user: hidden while the first /me is pending, and after a /me
+// that failed with anything but a 401/403. Re-evaluated on every server-info
+// poll (refreshServerInfo) and whenever the identity changes
+// (renderIdentity), so it goes away as soon as the gate closes, and comes
+// back when it reopens. The gate only governs starting a sign-in; one
+// already at Duo still finishes.
+function renderSigninLink() {
+    const signin = document.getElementById('identitySignin');
+    if (!signin) return;
+    const g = gateFor('duo_signin');
+    signin.classList.toggle('hidden', !(g && g.enabled) || _identityAnswer !== 'signed_out' || !!_identity);
+}
+
+function renderIdentity(identity) {
+    _identity = identity;
+    renderSigninLink();
+    const badge = document.getElementById('identityBadge');
+    if (!badge) return;
+    if (!identity) {
+        badge.classList.add('hidden');
+        return;
+    }
+    const user = document.getElementById('identityUser');
+    if (user) user.textContent = identity.username || '';
+    badge.title = identity.expires_at
+        ? 'Verified with Duo until ' + parseServerTime(identity.expires_at).toLocaleString()
+        : 'Verified with Duo';
+    badge.classList.remove('hidden');
+    renderTrustPill(identity);
+    // The banner follows the server's answer: Unblock me on, the gate refusing
+    // this identity, or nothing (a stale revoked / expired banner goes).
+    if (identity.override) showIdentityBanner('override', identity);
+    else if (identity.verdict === 'block') showIdentityBanner(unverifiedOnly(identity) ? 'unverified' : 'blocked', identity);
+    else hideIdentityBanner();
+}
+
+// A fail-closed block (IDENTITY_FAIL_OPEN off): Duo or Cisco Identity
+// Intelligence could not answer, and nothing is known against the identity
+// (identity_gate.unverified_only). Its banner is neutral, never "at risk".
+function unverifiedOnly(identity) {
+    const reasons = Array.isArray(identity && identity.reasons) ? identity.reasons : [];
+    return reasons.length === 1 && reasons[0] === 'identity_unavailable';
+}
+
+// Trust pill: colour is state. Duo status (locked out / disabled) wins over the
+// trust level; a lookup that could not answer shows a neutral note; nothing is
+// shown until the server reports any of these. Its tooltip never contradicts
+// the banner: a lookup that did not answer in full lets messages through when
+// the gate fails open, and refuses them when it does not (the banner says why).
+const TRUST_PILL_COLORS = {
+    trusted: ['bg-green-100', 'text-green-700'],
+    favorable: ['bg-green-100', 'text-green-700'],
+    neutral: ['bg-gray-100', 'text-gray-600'],
+    unknown: ['bg-gray-100', 'text-gray-600'],
+    unavailable: ['bg-gray-100', 'text-gray-600'],
+    questionable: ['bg-amber-100', 'text-amber-800'],
+    untrusted: ['bg-red-100', 'text-red-700'],
+    locked_out: ['bg-red-100', 'text-red-700'],
+    disabled: ['bg-red-100', 'text-red-700'],
+};
+
+function renderTrustPill(identity) {
+    const pill = document.getElementById('identityTrust');
+    if (!pill) return;
+    const status = String(identity.duo_status || '').toLowerCase().replace(/\s+/g, '_');
+    const level = String(identity.trust_level || '').toLowerCase().replace(/\s+/g, '_');
+    let key = (status === 'locked_out' || status === 'disabled') ? status : level;
+    if (!TRUST_PILL_COLORS[key] && identity.identity_check === 'unavailable') key = 'unavailable';
+    const all = [].concat(...Object.values(TRUST_PILL_COLORS));
+    pill.classList.remove(...all);
+    if (!key || !TRUST_PILL_COLORS[key]) {
+        pill.textContent = '';
+        pill.classList.add('hidden', 'bg-gray-100', 'text-gray-600');
+        return;
+    }
+    pill.textContent = key === 'unavailable' ? 'STATUS UNAVAILABLE' : key.replace('_', ' ').toUpperCase();
+    const refused = identity.verdict === 'block' && !identity.override;
+    if (key === 'unavailable') {
+        pill.title = refused
+            ? 'Duo or Cisco Identity Intelligence did not answer in full, and your messages are refused (the banner says why)'
+            : 'Duo or Cisco Identity Intelligence could not be reached; your messages are not held up by it';
+    } else {
+        pill.title = (key === status ? 'Duo account status' : 'Cisco Identity Intelligence trust level')
+            + (refused && identity.identity_check === 'unavailable'
+                ? ' (Duo or Cisco Identity Intelligence did not answer in full; your messages are refused: the banner says why)'
+                : '');
+    }
+    pill.classList.add(...TRUST_PILL_COLORS[key]);
+    pill.classList.remove('hidden');
+}
+
+const IDENTITY_BANNERS = {
+    revoked: {
+        title: 'SESSION ENDED',
+        text: (info) => 'Your verified session' + (info && info.username ? ' as ' + info.username : '')
+            + ' was ended' + (info && info.revoked_reason === 'duo_disabled' ? ' because Duo disabled the account' : '')
+            + '. Sign in again, sign out to continue without one, or turn on Unblock me to restore this '
+            + 'session here (your Duo account is not changed).',
+        signin: true, signout: true, dismiss: false, unblock: true,
+    },
+    expired: {
+        title: 'SIGN-IN EXPIRED',
+        text: () => 'Your Duo sign-in expired, so you are no longer a verified user. '
+            + 'Sign in again to continue with your identity.',
+        signin: true, signout: false, dismiss: true, unblock: false,
+    },
+    blocked: {
+        title: 'IDENTITY AT RISK',
+        text: (info) => 'Cisco Identity Intelligence reports a risk on your signed-in identity'
+            + (info && info.reasons_text ? ' (' + info.reasons_text + ')' : '')
+            + ', so your messages are refused before they reach the assistant. Turn on Unblock me to '
+            + 'continue anyway: every event will record the override.',
+        signin: false, signout: true, dismiss: false, unblock: true,
+    },
+    unverified: {
+        title: 'IDENTITY NOT VERIFIED',
+        text: () => 'Your signed-in identity could not be verified right now: Duo or Cisco Identity '
+            + 'Intelligence did not answer, so your messages are refused before they reach the assistant. '
+            + 'Nothing is known against your identity; try again in a moment, or turn on Unblock me to '
+            + 'continue anyway: every event will record the override.',
+        signin: false, signout: true, dismiss: false, unblock: true,
+    },
+    override: {
+        title: 'UNBLOCKED',
+        text: () => 'Unblock me is on: your messages go through the Identity Risk Gate, and every event '
+            + 'records the real verdict with the override. Your Duo account is not changed. '
+            + 'Turn it off to be gated again.',
+        signin: false, signout: true, dismiss: false, unblock: true,
+    },
+};
+
+function showIdentityBanner(kind, info) {
+    const spec = IDENTITY_BANNERS[kind];
+    const banner = document.getElementById('identityBanner');
+    if (!spec || !banner) return;
+    // Another refused request (no details): the banner already says more.
+    if (!info && banner.dataset.kind === kind && !banner.classList.contains('hidden')) return;
+    document.getElementById('identityBannerTitle').textContent = spec.title;
+    document.getElementById('identityBannerText').textContent = spec.text(info);
+    document.getElementById('identityBannerSignin').classList.toggle('hidden', !spec.signin);
+    document.getElementById('identityBannerSignout').classList.toggle('hidden', !spec.signout);
+    document.getElementById('identityBannerDismiss').classList.toggle('hidden', !spec.dismiss);
+    const unblock = document.getElementById('identityBannerUnblock');
+    if (unblock) unblock.classList.toggle('hidden', !spec.unblock);
+    const toggle = document.getElementById('identityUnblockToggle');
+    if (toggle) toggle.checked = kind === 'override';
+    const first = banner.dataset.kind !== kind || banner.classList.contains('hidden');
+    banner.dataset.kind = kind;
+    banner.classList.remove('hidden');
+    if (kind === 'revoked' || kind === 'expired') {
+        renderIdentity(null);
+        // Raised by the fetch wrapper (no details yet): the status poll reaches
+        // a revoked session and says whose it was and why.
+        if (kind === 'revoked' && !info && first) refreshIdentity();
+    }
+}
+
+function hideIdentityBanner() {
+    const banner = document.getElementById('identityBanner');
+    if (banner) banner.classList.add('hidden');
+}
+
+// Unblock me (plan 12.1): restores this PseudoCo Assistant session and lets its
+// turns through the Identity Risk Gate; never touches Duo or Cisco Identity
+// Intelligence. Off again, the next turn is gated. Per identity session, so
+// signing out or a new sign-in ends it. Not a Demo Controls card, and never a
+// chat request field: the server holds it.
+async function toggleIdentityOverride(on) {
+    const toggle = document.getElementById('identityUnblockToggle');
+    if (toggle) toggle.disabled = true;
+    try {
+        const res = await fetch(on ? '/api/identity/unblock' : '/api/identity/reblock', { method: 'POST' });
+        if (!res.ok && toggle) toggle.checked = !on;
+    } catch (e) {
+        if (toggle) toggle.checked = !on;
+    } finally {
+        if (toggle) toggle.disabled = false;
+        refreshIdentity();
+    }
+}
+
+// /auth/duo/callback lands on /app?signin=ok. The conversations this browser
+// started before belong to whoever was signed in then (or to nobody), so the
+// saved session id and the Show Recent list are dropped, then the flag is
+// removed from the address bar so a reload or bookmark does not repeat it.
+function consumeSigninRedirect() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('signin') !== 'ok') return false;
+    try {
+        localStorage.removeItem('medadvice_session_id');
+        localStorage.removeItem(RECENT_SESSIONS_KEY);
+    } catch (e) { /* storage blocked */ }
+    params.delete('signin');
+    const rest = params.toString();
+    history.replaceState(null, '', window.location.pathname + (rest ? '?' + rest : '') + window.location.hash);
+    return true;
 }
 
 async function createNewSession() {
@@ -921,6 +1214,7 @@ function handleKeyPress(event) {
 const STAGE_LABELS = {
     router: 'Routing to the right care team…',
     attachment_intake: 'Reading your document…',
+    identity_risk: 'Verifying your identity (Cisco Identity Intelligence)…',
     policy: 'Policy screening…',
     prompt_defense: 'Screening your message (AI Defense)…',
     agent_control_prompt: 'Screening your message (Agent Observability Controls)…',
@@ -1305,6 +1599,11 @@ async function sendMessageViaStream(payload) {
                 if (event.node === 'attachment_intake' && !payload.attachment) {
                     continue;
                 }
+                // identity_risk reports on every turn too; it only verifies a
+                // signed-in identity (Lab 5).
+                if (event.node === 'identity_risk' && !_identity) {
+                    continue;
+                }
                 setLoadingStatus(STAGE_LABELS[event.node]);
             }
         }
@@ -1389,6 +1688,9 @@ async function sendMessage(presetText = null, schedulingAction = null) {
         if (data.escalated) {
             showEscalationWarning();
         }
+        // A signed-in turn may have been refused by the Identity Risk Gate:
+        // the badge and banner follow the server's answer at once.
+        if (_identity) refreshIdentity();
 
     } catch (error) {
         console.error('Error sending message:', error);

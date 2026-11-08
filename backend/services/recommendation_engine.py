@@ -2337,6 +2337,11 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
         # engine neither shows the document to the model nor screens it, so it
         # opens no unscreened path.
         attachment: Optional[Dict[str, Any]] = None,
+        # The turn's VERIFIED identity session (Lab 5), from the identity
+        # middleware via the chat router; never a request field. It names the
+        # end user and adds identity_verified / identity_source to every
+        # governance event of the turn, exactly as on the agentic path.
+        identity_session: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Process user message and generate response
@@ -2344,6 +2349,12 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
         Returns:
             Dict containing response, type, severity, and escalation status
         """
+        # Lazy: the agentic package imports this module.
+        from backend.agents.state import identity_governance_fields, verified_identity
+        verified = verified_identity(identity_session)
+        if verified:
+            enduser_id = verified["username"]
+        identity_fields = identity_governance_fields(verified)
         request_id = str(uuid.uuid4())
         # The OTel trace id when a span is current (the FastAPI request span),
         # like the agentic path — see backend/telemetry/otel.py turn_trace_id.
@@ -2367,10 +2378,34 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
             client_address=client_address,
             system_instructions=active_prompt,
             user_prompt=user_message,
-            enduser_id=enduser_id
+            enduser_id=enduser_id,
+            **identity_fields,
         )
 
         try:
+            # Identity Risk Gate (Lab 5), before the policy check as on the
+            # agentic path (PRE_NODES[1]): the SAME function the identity_risk
+            # node runs, imported lazily (the agentic package imports this
+            # module). Nothing happens on an anonymous turn; once it ran, every
+            # later event of the turn carries its verdict.
+            if verified:
+                from backend.agents.nodes.identity import identity_gate_turn
+                identity_verdict, identity_block = identity_gate_turn(
+                    identity_session=verified,
+                    session_id=session_id,
+                    request_id=request_id,
+                    trace_id=trace_id,
+                    user_message=user_message,
+                    start_time=start_time,
+                    theme=theme,
+                    client_address=client_address,
+                    enduser_id=enduser_id,
+                    governance_fields=dict(identity_fields),
+                )
+                identity_fields = identity_governance_fields(verified, identity_verdict)
+                if identity_block is not None:
+                    return identity_block
+
             # Internal policy engine (built-in, separate from Cisco AI Defense).
             # Defaults to off: runs only when the caller explicitly enables it
             # (same default as the agentic chain, nodes/policy.py).
@@ -2417,6 +2452,7 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                     trace_id=trace_id,
                     client_address=client_address,
                     enduser_id=enduser_id,
+                    **identity_fields,
                 )
 
                 governance_logger.log_escalation(
@@ -2433,6 +2469,7 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                     ),
                     user_demographics=self.clarifying_service.extract_user_info(conversation_history),
                     enduser_id=enduser_id,
+                    **identity_fields,
                 )
 
                 return {
@@ -2464,6 +2501,7 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                         start_time=start_time,
                         client_address=client_address,
                         enduser_id=enduser_id,
+                        governance_overrides=identity_fields or None,
                         theme=theme,
                     )
 
@@ -2484,7 +2522,8 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                         decision_type="clarifying_question",
                         decision_value=next_question["category"],
                         rationale=f"Missing {next_question['category']} information",
-                        enduser_id=enduser_id
+                        enduser_id=enduser_id,
+                        **identity_fields,
                     )
 
                     return {
@@ -2508,7 +2547,8 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                 force_boundary_injection=force_boundary_injection,
                 ai_defense_review=ai_defense_review,
                 agent_control_review=agent_control_review,
-                enduser_id=enduser_id
+                enduser_id=enduser_id,
+                governance_overrides=identity_fields or None,
             )
 
             return response_data
@@ -2521,7 +2561,8 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                 error_type=type(e).__name__,
                 error_message=str(e),
                 stack_trace=None,
-                enduser_id=enduser_id
+                enduser_id=enduser_id,
+                **identity_fields,
             )
 
             return {
@@ -2548,9 +2589,13 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
         force_boundary_injection: Optional[bool] = None,
         ai_defense_review: Optional[bool] = None,
         agent_control_review: Optional[bool] = None,
-        enduser_id: Optional[str] = None
+        enduser_id: Optional[str] = None,
+        governance_overrides: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Generate recommendation using Claude with the active theme's system prompt"""
+        """Generate recommendation using Claude with the active theme's system prompt.
+
+        ``governance_overrides`` (the turn's identity_verified / identity_source)
+        rides on every governance event this logs, blocked ones included."""
 
         # Build message history for Claude
         # Note: conversation_history already includes the current user_message
@@ -2739,6 +2784,7 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                         "usage_total_tokens": response.input_tokens
                         + response.output_tokens,
                     },
+                    governance_overrides=governance_overrides,
                     theme=theme,
                 )
 
@@ -2763,6 +2809,7 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                     start_time=start_time,
                     client_address=client_address,
                     enduser_id=enduser_id,
+                    governance_overrides=governance_overrides,
                     theme=theme,
                 )
 
@@ -2797,7 +2844,8 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
             evaluation_score_label="high" if confidence > 0.7 else "medium" if confidence > 0.5 else "low",
             trace_id=trace_id,
             client_address=client_address,
-            enduser_id=enduser_id
+            enduser_id=enduser_id,
+            **(governance_overrides or {}),
         )
 
         # Log escalation if needed
@@ -2818,7 +2866,8 @@ Use EMERGENCY for situations like an injury, a fire, a chemical release, or some
                 ],
                 symptoms=symptoms,
                 user_demographics=user_info,
-                enduser_id=enduser_id
+                enduser_id=enduser_id,
+                **(governance_overrides or {}),
             )
 
         return {

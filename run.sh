@@ -160,6 +160,14 @@ if grep -q '^OTEL_EXPORTER_OTLP_ENDPOINT=.' .env 2>/dev/null; then
     # so disable the auto langchain instrumentor to avoid duplicate/unknown-model
     # emission. FastAPI instrumentation stays on for APM/HTTP traces.
     export OTEL_PYTHON_DISABLED_INSTRUMENTATIONS=langchain
+    # Lab 5: keep Duo's one-time sign-in code (the /auth/duo/callback query) out
+    # of every span: no request span is recorded for that path. Appended to
+    # whatever .env set. A FastAPI-specific list, when .env sets one, overrides
+    # the generic one, so it gets the path too (tests/test_duo_signin.py).
+    export OTEL_PYTHON_EXCLUDED_URLS="${OTEL_PYTHON_EXCLUDED_URLS:+$OTEL_PYTHON_EXCLUDED_URLS,}auth/duo/callback"
+    if [ -n "${OTEL_PYTHON_FASTAPI_EXCLUDED_URLS:-}" ]; then
+        export OTEL_PYTHON_FASTAPI_EXCLUDED_URLS="$OTEL_PYTHON_FASTAPI_EXCLUDED_URLS,auth/duo/callback"
+    fi
     echo "📡 Telemetry ON -> OTLP $OTEL_EXPORTER_OTLP_ENDPOINT (service=$OTEL_SERVICE_NAME)"
     exec opentelemetry-instrument python -m backend.main
 else

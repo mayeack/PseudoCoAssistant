@@ -18,8 +18,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from backend.hec.client import HECClient, HECSendResult
-from backend.hec.config import (DEFAULT_HOST, DEFAULT_INDEX, DEFAULT_SOURCE,
-                                DEFAULT_SOURCETYPE, HECConfig)
+from backend.hec.config import (DEFAULT_INDEX, DEFAULT_SOURCE, DEFAULT_SOURCETYPE,
+                                HECConfig, effective_host)
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +38,10 @@ logger = logging.getLogger(__name__)
 #
 # Nothing actually used the tstats path, so the body copy wins and these are no
 # longer promoted. Do NOT put a key here that also exists in the event body;
-# add genuinely forwarder-owned metadata (like log_type) instead.
-_BODY_OWNED_KEYS = ("session_id", "request_id", "trace_id", "enduser_id")
+# add genuinely forwarder-owned metadata (like log_type) instead. ``user`` (the
+# CIM copy of enduser_id, and the signed-in username on identity events) is the
+# same actor and must stay body-only for the same reason.
+_BODY_OWNED_KEYS = ("session_id", "request_id", "trace_id", "enduser_id", "user")
 
 
 def _epoch_from(log_data: Dict[str, Any]) -> Optional[float]:
@@ -172,7 +174,8 @@ class HECForwarder:
         epoch = _epoch_from(log_data) or time.time()
         event: Dict[str, Any] = {
             "time": round(epoch, 3),
-            "host": self._cfg.host or DEFAULT_HOST,
+            # HEC_HOST, else the destination's host, else "medadvice".
+            "host": effective_host(self._cfg.host),
             "source": self._cfg.source or DEFAULT_SOURCE,
             "sourcetype": sourcetype,
             "index": self._cfg.index or DEFAULT_INDEX,

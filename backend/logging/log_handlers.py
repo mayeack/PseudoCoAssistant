@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import threading
 from pathlib import Path
 from typing import Dict, Any
@@ -132,15 +133,66 @@ class GovernanceFileHandler:
             except Exception as e:
                 logging.error(f"Failed to clean old log file {log_file}: {e}")
 
+# --------------------------------------------------------------------------- access-log redaction
+# Lab 5: Duo redirects the browser to /auth/duo/callback?duo_code=...&state=...
+# The code is single use and short-lived, but it is still a credential until it
+# is exchanged, so it must not land in a log. uvicorn's access logger formats the
+# path WITH its query string; this filter rewrites the query of that one path to
+# "[redacted]" before any handler sees the record. (Spans: run.sh appends the
+# path to OTEL_PYTHON_EXCLUDED_URLS, so the FastAPI instrumentation records none.)
+DUO_CALLBACK_PATH = "/auth/duo/callback"
+_CALLBACK_QUERY = re.compile(r"(/auth/duo/callback)\?[^\s\"']*")
+
+
+def redact_callback_query(text: str) -> str:
+    """``.../auth/duo/callback?<anything>`` -> ``.../auth/duo/callback?[redacted]``."""
+    return _CALLBACK_QUERY.sub(r"\1?[redacted]", text)
+
+
+class DuoCallbackRedactionFilter(logging.Filter):
+    """Redacts the query string of the Duo callback path in a log record, whether
+    it sits in ``record.args`` (uvicorn's access log) or in ``record.msg``."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and any(isinstance(a, str) and DUO_CALLBACK_PATH in a for a in args):
+            record.args = tuple(redact_callback_query(a) if isinstance(a, str) else a for a in args)
+        if isinstance(record.msg, str) and DUO_CALLBACK_PATH in record.msg:
+            record.msg = redact_callback_query(record.msg)
+        return True
+
+
+def install_access_log_redaction() -> None:
+    """Attach the redaction filter to uvicorn's access logger (idempotent).
+
+    A logger-level filter runs before every handler. It survives uvicorn's
+    logging dictConfig, which replaces handlers but never filters, and this runs
+    at app import, after uvicorn has configured logging anyway."""
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, DuoCallbackRedactionFilter) for f in access.filters):
+        access.addFilter(DuoCallbackRedactionFilter())
+
+
 def setup_logging():
     """Setup application logging"""
     log_level = getattr(logging, settings.log_level.upper())
+
+    # Before anything can log: every record from the HTTP clients, the Duo SDK
+    # and the identity modules is redacted as it is created, at every level
+    # (Duo's code, the client_assertion JWT, cookies, tokens, the identity
+    # secrets; backend/logging/redaction.py).
+    from backend.logging import redaction
+
+    redaction.install()
 
     # Configure root logger
     logging.basicConfig(
         level=log_level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
+
+    # Keep the Duo callback's one-time code out of uvicorn's access log.
+    install_access_log_redaction()
 
     # Create governance logger.
     # Governance JSON events are written directly to dedicated files

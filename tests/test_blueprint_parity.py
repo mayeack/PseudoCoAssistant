@@ -15,11 +15,16 @@ core differs. This suite is the detector:
     and response blocks, NeMo input/output blocks, Agent Control deny and steer,
     forced PII/toxic/hallucination/authority injection, generation error, Multi-Agent
     Mode accepted, a PDF attachment hiding a prompt injection screened by AI
-    Defense and unscreened) is run through run_turn and run_turn_stream for EVERY
+    Defense and unscreened, a signed-in turn allowed, blocked, asked a
+    clarifying question, escalated and policy-blocked, and the Identity Risk
+    Gate: anonymous, allowed, blocked, blocked on a document turn, unavailable
+    (fail open), the spray's actor, and unblocked) is run through
+    run_turn and run_turn_stream for EVERY
     blueprint, and the normalized outcome — result type/severity/escalated/
-    policy_blocked, the terminal governance event's guardrail fields, the core
-    state contract, and the guardrail stage frames — must be identical across
-    blueprints. Allowed differences: agent names, core stage names,
+    policy_blocked, the terminal governance event's guardrail fields, the kinds
+    of governance event logged (decisions and built escalations included), the
+    core state contract, and the guardrail stage frames — must be identical
+    across blueprints. Allowed differences: agent names, core stage names,
     workflow_name / blueprint attribution, and the answer text itself.
 
 Add a scenario here in the same change that adds a toggle or guardrail.
@@ -51,6 +56,9 @@ settings.toxic_injection_rate = 0.0
 settings.hallucination_injection_rate = 0.0
 settings.authority_injection_rate = 0.0
 settings.ai_provider = "anthropic"          # censored-provider directive path (permission preamble)
+import identity_isolation  # noqa: E402  (no real Duo / CII, whatever .env holds)
+
+identity_isolation.isolate(settings)
 if hasattr(settings, "blueprint_routing"):
     settings.blueprint_routing = "json"     # tool-less routing so the stubbed LLM serves every core
 
@@ -89,6 +97,10 @@ def test_static_chain() -> None:
             check(f"[{bp.key}/{theme_key}] PRE chain in order", pre_ok)
             check(f"[{bp.key}/{theme_key}] POST chain in order (Cisco last, governance terminal)",
                   post_ok and ("governance", "__end__") in edges)
+            check(f"[{bp.key}/{theme_key}] identity_risk runs after attachment_intake and before policy",
+                  PRE_NODES[:3] == ["attachment_intake", "identity_risk", "policy"]
+                  and ("attachment_intake", "identity_risk") in edges and ("identity_risk", "policy") in edges
+                  and ("identity_risk", "__end__") in edges, str(PRE_NODES[:3]))
             check(f"[{bp.key}/{theme_key}] last PRE node feeds the core, core feeds safety",
                   any((PRE_NODES[-1], n) in edges for n in bp.core_nodes)
                   and any((n, "safety") in edges for n in bp.core_nodes))
@@ -208,11 +220,12 @@ def _restore(saved) -> None:
 @contextmanager
 def _governance_capture():
     from backend.logging import governance_logger as gl
+    from backend.logging.log_schemas import create_escalation_log
 
     events: List[Dict[str, Any]] = []
     g = gl.governance_logger
     orig = {n: getattr(g, n) for n in ("log_response", "log_request", "log_escalation", "log_error", "log_decision",
-                                       "log_tool_call")}
+                                       "log_tool_call", "log_audit")}
     try:
         g.log_response = lambda **kw: events.append(dict(kw, _kind="response"))
         # A generation error logs an ERROR event (no response event) — record it
@@ -220,8 +233,18 @@ def _governance_capture():
         g.log_error = lambda **kw: events.append(dict(kw, _kind="error"))
         # A booking logs a tool_call event BEFORE the turn's response event.
         g.log_tool_call = lambda **kw: events.append(dict(kw, _kind="tool_call"))
-        for n in ("log_request", "log_escalation", "log_decision"):
-            setattr(g, n, lambda **kw: None)
+        # A clarifying question ends the turn at the intake node (shared by both
+        # cores) with a DECISION event, its only event.
+        g.log_decision = lambda **kw: events.append(dict(kw, _kind="decision"))
+        # An escalation follows the turn's response event. Recorded BUILT:
+        # create_escalation_log keeps only the keys it names, so the kwargs alone
+        # would not show what reaches Splunk. Never the turn's terminal event.
+        g.log_escalation = lambda **kw: events.append(
+            dict(create_escalation_log(escalation_id="parity-escalation", **kw), _kind="escalation"))
+        g.log_request = lambda **kw: None
+        # Audit events (Lab 5: identity_session_revoked and friends): the chain
+        # must write none -- the Identity Risk Gate has no side effects.
+        g.log_audit = lambda **kw: events.append(dict(kw, _kind="audit"))
         yield events
     finally:
         for n, fn in orig.items():
@@ -407,6 +430,74 @@ def _scenario(kind: str):
                 kwargs["ai_defense_review"] = True
             else:
                 kwargs["multi_agent_mode"] = True
+        elif kind in _IDENTITY_SCENARIOS:
+            # Lab 5: a turn of a VERIFIED identity session (what the chat router
+            # passes from request.state.identity). The session names the end
+            # user whatever enduser_id says, and identity_verified /
+            # identity_source ride on every event -- the blocked one included,
+            # through the shared block handler.
+            kwargs.update(identity_session=dict(_IDENTITY_SESSION), enduser_id="t.nguyen")
+            if kind == "identity_signed_in_blocked":
+                saved["adc"] = def_mod.ai_defense_client
+                bad = InspectionResult(is_safe=False, severity="HIGH", rule_names=["Prompt Injection"],
+                                       event_id="evt-id")
+                def_mod.ai_defense_client = _Stub(is_configured=True, inspect_prompt=lambda *a, **k: bad,
+                                                  inspect_response=lambda *a, **k: InspectionResult(is_safe=True))
+                kwargs["ai_defense_review"] = True
+            elif kind == "identity_signed_in_clarify":
+                # MedAdvice's intake node asks a clarifying question: the turn's
+                # only event is the DECISION event. (Telecom is conversational,
+                # so it answers, and the safety rules escalate the "baby".)
+                kwargs["user_message"] = "my baby has a fever"
+            elif kind == "identity_signed_in_escalated":
+                # The safety rules escalate the answer (pregnancy): the governance
+                # node logs the response, then the ESCALATION event.
+                kwargs["user_message"] = "I have a mild sore throat and want advice, I am pregnant"
+            elif kind == "identity_signed_in_policy_block":
+                # The internal policy block logs the block, then an ESCALATION.
+                saved["cpb"] = escalation_rules.check_policy_block
+                escalation_rules.check_policy_block = lambda msg: (True, ["self-harm"])
+        elif kind in _GATE_SCENARIOS:
+            # Lab 5, the Identity Risk Gate (identity_risk, PRE_NODES[1]): a fake
+            # Duo / Identity Intelligence lookup that records who it was asked
+            # about, and an AI Defense stub that records what it screened (it
+            # blocks only for the spray's actor, whose turn has no session).
+            from backend.services import identity_lookup as lookup_mod
+
+            saved["lookup"] = lookup_mod.lookup
+            saved["adc"] = def_mod.ai_defense_client
+            saved["fail_open"] = settings.identity_fail_open
+            settings.identity_fail_open = True
+            status = _GATE_STATUS[_GATE_STATUS_FOR.get(kind, "blocked")]
+            probe["lookups"], probe["screened"] = [], []
+
+            def _lookup(username, _status=status):
+                probe["lookups"].append(username)
+                return dict(_status)
+
+            lookup_mod.lookup = _lookup
+            spray = kind == "identity_spray_actor"
+            ok = InspectionResult(is_safe=True)
+            bad = InspectionResult(is_safe=False, severity="HIGH", rule_names=["Prompt Injection"], event_id="evt-spray")
+
+            def _inspect_prompt(text, **_k):
+                probe["screened"].append(text)
+                return bad if spray else ok
+
+            def_mod.ai_defense_client = _Stub(is_configured=True, inspect_prompt=_inspect_prompt,
+                                              inspect_response=lambda *a, **k: ok)
+            kwargs["ai_defense_review"] = True
+            if spray:
+                # The spray aims at the victim by name (enduser_id) with no
+                # identity session: the gate never runs, AI Defense still blocks.
+                kwargs["enduser_id"] = _VICTIM
+            elif kind != "identity_anonymous":
+                session = dict(_IDENTITY_SESSION)
+                if kind == "identity_unblocked":
+                    session["override"] = True
+                kwargs.update(identity_session=session, enduser_id="t.nguyen")
+            if kind == "identity_document_blocked":
+                kwargs.update(user_message=_DOC["prompt"], attachment=_DOC["attachment"])
         elif kind == "generation_error":
             fail_agents = ("*",)
         elif kind == "multi_agent":
@@ -440,6 +531,11 @@ def _scenario(kind: str):
                 kwargs.update(user_message="what's on my schedule?")
         yield kwargs, fail_agents, probe
     finally:
+        if "lookup" in saved:
+            from backend.services import identity_lookup as lookup_mod
+            lookup_mod.lookup = saved["lookup"]
+        if "fail_open" in saved:
+            settings.identity_fail_open = saved["fail_open"]
         if "thrash" in saved:
             settings.mcp_tool_thrash_enabled = saved["thrash"]
         if "store" in saved:
@@ -457,6 +553,40 @@ def _scenario(kind: str):
 
 _GOV_KEYS = ("guardrail_ids", "policy_blocked", "safety_violated", "pii_detected", "toxic_detected",
              "hallucination_detected", "authority_violation_detected", "guardrail_triggered")
+
+# Lab 5 identity: the verified session the router would pass, and the evidence
+# every event of such a turn carries -- the response, the clarifying question's
+# decision and the escalations (policy block, escalated answer) included.
+_IDENTITY_SCENARIOS = ("identity_signed_in", "identity_signed_in_blocked", "identity_signed_in_clarify",
+                       "identity_signed_in_escalated", "identity_signed_in_policy_block")
+_IDENTITY_SESSION = {"session_ref": "parity-ref", "username": "nina.osei", "source": "duo",
+                     "signed_in_at": "2026-11-05T10:00:00", "expires_at": "2026-11-05T22:00:00"}
+_IDENTITY_KEYS = ("enduser_id", "identity_verified", "identity_source", "identity_override", "identity_risk",
+                  "identity_check", "identity_risk_reasons")
+
+# The Identity Risk Gate scenarios (Lab 5, docs/identity.md) and the lookup
+# answer each one gets (anonymous and the spray's actor get a blocking answer:
+# it must never be asked).
+_GATE_SCENARIOS = ("identity_anonymous", "identity_allowed", "identity_blocked", "identity_document_blocked",
+                   "identity_unavailable_fail_open", "identity_spray_actor", "identity_unblocked",
+                   "identity_blocked_duo_down")
+_GATE_STATUS = {
+    "allowed": {"duo_status": "active", "trust_level": "QUESTIONABLE", "failing_checks": [],
+                "as_of": "2026-11-05T10:00:00", "available": True, "sources": {"duo": "ok", "cii": "ok"}},
+    "blocked": {"duo_status": "active", "trust_level": "UNTRUSTED", "failing_checks": ["MFA Flood", "Impossible Travel"],
+                "as_of": "2026-11-05T10:00:00", "available": True, "sources": {"duo": "ok", "cii": "ok"}},
+    "unavailable": {"duo_status": None, "trust_level": None, "failing_checks": [], "as_of": "2026-11-05T10:00:00",
+                    "available": False, "sources": {"duo": "unavailable", "cii": "unavailable"}},
+    # Duo cannot answer, but CII was still asked (with the email Duo last
+    # gave): what identity_lookup returns for the victim during a Duo outage.
+    "duo_down": {"duo_status": None, "trust_level": "UNTRUSTED", "failing_checks": ["MFA Flood", "Impossible Travel"],
+                 "as_of": "2026-11-05T10:00:00", "available": False, "sources": {"duo": "unavailable", "cii": "ok"}},
+}
+_GATE_STATUS_FOR = {"identity_allowed": "allowed", "identity_unavailable_fail_open": "unavailable",
+                    "identity_blocked_duo_down": "duo_down"}
+_VICTIM = "avery.kim"
+# Scenarios that need the sample PDF.
+_NEEDS_DOC = _DOC_SCENARIOS + ("identity_document_blocked",)
 
 # The output-token cache split (backend/agents/token_usage.py): both cores sum it
 # across their agents, and every event — blocked turns included — must report a
@@ -478,7 +608,10 @@ def _run(bp_key: str, theme: str, kind: str) -> Dict[str, Any]:
             stages = [ev["node"] for ev in graph.run_turn_stream(**base) if ev.get("event") == "stage"]
         finally:
             _restore(saved)
-    last = events[-1] if events else {}
+    # The turn's terminal event: an escalation only ever follows it.
+    audits = [e for e in events if e.get("_kind") == "audit"]
+    events = [e for e in events if e.get("_kind") != "audit"]
+    last = next((e for e in reversed(events) if e.get("_kind") != "escalation"), {})
     sev = result.get("severity")
     # A document turn: what the screens, the answering agent ({theme}_domain_agent,
     # shared by both cores) and the internal agents were each given.
@@ -501,6 +634,21 @@ def _run(bp_key: str, theme: str, kind: str) -> Dict[str, Any]:
         # booking is logged once per run.
         "tool_calls": list(dict.fromkeys(e.get("tool_name") for e in events if e.get("_kind") == "tool_call")),
         "governance": {k: last.get(k) for k in _GOV_KEYS},
+        # Lab 5: the end user and the identity evidence on the terminal event,
+        # and whether EVERY event of the turn carries the evidence.
+        "identity": {k: last.get(k) for k in _IDENTITY_KEYS},
+        "identity_on_every_event": bool(events) and all(e.get("identity_verified") is True for e in events),
+        "override_on_every_event": bool(events) and all(e.get("identity_override") is True for e in events),
+        "verdict_on_every_event": bool(events) and all(e.get("identity_risk") for e in events),
+        # The gate's lookup (who it was asked about) and what AI Defense screened.
+        "looked_up": sorted(set(probe.get("lookups") or [])),
+        "ai_defense_calls": len(probe.get("screened") or []),
+        "audit_actions": sorted({str(a.get("action")) for a in audits}),
+        "safety_categories": last.get("safety_categories"),
+        "event_severity": last.get("severity"),
+        "input_text": _norm(_message_text(last.get("input_messages"))),
+        # Which kinds of event the turn logged (once each; both runs log the same).
+        "event_kinds": sorted({e.get("_kind") for e in events}),
         "tokens": {k: last.get(k) for k in _TOKEN_KEYS},
         "gov_present": bool(events),
         "guardrail_stages": [s for s in stages if s in GUARDRAIL_NODES],
@@ -542,7 +690,8 @@ SCENARIOS = ("benign", "policy_block", "ai_defense_prompt_block", "ai_defense_re
              "nemo_input_block", "nemo_output_block", "agent_control_deny", "agent_control_prompt_deny",
              "agent_control_steer", "forced_injection", "pii_exfil_prompt", "pii_exfil_bulk", "internal_docs_ask",
              "generation_error", "multi_agent", "mcp_thrash",
-             "scheduling_offer", "scheduling_book", "scheduling_list") + _DOC_SCENARIOS
+             "scheduling_offer", "scheduling_book", "scheduling_list") + _DOC_SCENARIOS + _IDENTITY_SCENARIOS \
+    + _GATE_SCENARIOS
 
 
 def _document_checks(outcomes: Dict[str, Dict[str, Dict[str, Any]]], keys: List[str]) -> None:
@@ -612,6 +761,83 @@ def _document_checks(outcomes: Dict[str, Dict[str, Dict[str, Any]]], keys: List[
           str(sorted(att)))
 
 
+def _gate_checks(outcomes: Dict[str, Dict[str, Dict[str, Any]]], keys: List[str], *, with_document: bool) -> None:
+    """What the Identity Risk Gate scenarios must show (docs/identity.md), on
+    every blueprint (the generic loop already compares them across blueprints)."""
+    for key in keys:
+        r = outcomes[key]
+        for theme in ("medadvice", "telecomchatbot"):
+            tag = f"[{key}] {theme}"
+            anon = r[f"{theme}/identity_anonymous"]
+            check(f"{tag}: anonymous: no lookup, no identity evidence, identity_risk frame still reported",
+                  anon["looked_up"] == [] and anon["identity"]["identity_verified"] is None
+                  and anon["identity"]["identity_risk"] is None and anon["result"]["policy_blocked"] is False
+                  and anon["guardrail_stages"][:3] == ["attachment_intake", "identity_risk", "policy"],
+                  f"{anon['looked_up']} {anon['identity']} {anon['guardrail_stages'][:3]}")
+            allowed = r[f"{theme}/identity_allowed"]
+            check(f"{tag}: allowed: looked up the verified user, verdict allow / check ok on every event",
+                  allowed["looked_up"] == ["nina.osei"] and allowed["result"]["policy_blocked"] is False
+                  and allowed["identity"]["identity_risk"] == "allow" and allowed["identity"]["identity_check"] == "ok"
+                  and allowed["verdict_on_every_event"] is True and allowed["ai_defense_calls"] > 0,
+                  f"{allowed['looked_up']} {allowed['identity']}")
+            blocked = r[f"{theme}/identity_blocked"]
+            check(f"{tag}: blocked: refused by Cisco Identity Intelligence at identity_risk",
+                  blocked["result"]["policy_blocked"] is True
+                  and blocked["governance"]["guardrail_ids"] == ["cisco_identity_intelligence"]
+                  and blocked["guardrail_stages"][-1] == "identity_risk"
+                  and blocked["identity"]["identity_risk"] == "block"
+                  and blocked["identity"]["identity_risk_reasons"] == ["trust_untrusted", "mfa_flood", "impossible_travel"],
+                  f"{blocked['governance']} {blocked['guardrail_stages'][-2:]} {blocked['identity']}")
+            check(f"{tag}: blocked: AI Defense never called, no model, zero tokens",
+                  blocked["ai_defense_calls"] == 0 and blocked["agents"] == []
+                  and (blocked["tokens"]["usage_output_tokens"] or 0) == 0,
+                  f"{blocked['ai_defense_calls']} {blocked['agents']} {blocked['tokens']}")
+            check(f"{tag}: blocked: compromised_identity, HIGH (never EMERGENCY), no escalation, no audit event",
+                  blocked["safety_categories"] == ["compromised_identity"] and blocked["event_severity"] == "HIGH"
+                  and blocked["event_kinds"] == ["response"] and blocked["audit_actions"] == []
+                  and blocked["result"]["escalated"] is False,
+                  f"{blocked['safety_categories']} {blocked['event_severity']} {blocked['event_kinds']}")
+            check(f"{tag}: blocked: the event names the verified user, typed message only",
+                  blocked["identity"]["enduser_id"] == "nina.osei" and blocked["identity_on_every_event"] is True
+                  and blocked["input_text"] == _norm("I have a mild sore throat and want advice"),
+                  blocked["input_text"][:120])
+            unavailable = r[f"{theme}/identity_unavailable_fail_open"]
+            check(f"{tag}: unavailable: fail open, identity_check=unavailable on the event",
+                  unavailable["result"]["policy_blocked"] is False
+                  and unavailable["identity"]["identity_check"] == "unavailable"
+                  and unavailable["identity"]["identity_risk"] == "allow", str(unavailable["identity"]))
+            duo_down = r[f"{theme}/identity_blocked_duo_down"]
+            check(f"{tag}: Duo down, CII still answered: the CII block holds (fail open never hides it)",
+                  duo_down["result"]["policy_blocked"] is True
+                  and duo_down["governance"]["guardrail_ids"] == ["cisco_identity_intelligence"]
+                  and duo_down["identity"]["identity_check"] == "unavailable"
+                  and duo_down["identity"]["identity_risk_reasons"] == ["trust_untrusted", "mfa_flood", "impossible_travel"]
+                  and duo_down["ai_defense_calls"] == 0 and duo_down["agents"] == []
+                  and duo_down["safety_categories"] == ["compromised_identity"],
+                  f"{duo_down['governance']} {duo_down['identity']} {duo_down['ai_defense_calls']}")
+            spray = r[f"{theme}/identity_spray_actor"]
+            check(f"{tag}: the spray's actor (enduser_id=victim, no session): no lookup, AI Defense still blocks",
+                  spray["looked_up"] == [] and spray["governance"]["guardrail_ids"] == ["cisco_ai_defense"]
+                  and spray["identity"]["enduser_id"] == _VICTIM and spray["identity"]["identity_verified"] is None,
+                  f"{spray['looked_up']} {spray['governance']['guardrail_ids']} {spray['identity']}")
+            unblocked = r[f"{theme}/identity_unblocked"]
+            check(f"{tag}: unblocked: the turn goes on, the REAL verdict (block) plus identity_override on every event",
+                  unblocked["result"]["policy_blocked"] is False and unblocked["identity"]["identity_risk"] == "block"
+                  and unblocked["override_on_every_event"] is True and unblocked["ai_defense_calls"] > 0
+                  and unblocked["audit_actions"] == [], f"{unblocked['identity']} {unblocked['audit_actions']}")
+            if with_document:
+                doc = r[f"{theme}/identity_document_blocked"]
+                check(f"{tag}: document turn blocked: extraction ran, nothing screened, no document text on the event",
+                      doc["result"]["policy_blocked"] is True
+                      and doc["governance"]["guardrail_ids"] == ["cisco_identity_intelligence"]
+                      and "attachment-intake.extract_text" in doc["tool_calls"] and doc["ai_defense_calls"] == 0
+                      and (doc["attachment"] or {}).get("status") == "ok"
+                      and doc["document"]["input_has_payload"] is False
+                      and doc["document"]["record_leaks_content"] is False
+                      and "was screened together with your message" not in doc["message"],
+                      f"{doc['tool_calls']} {doc['ai_defense_calls']} {doc['attachment']}")
+
+
 def test_dynamic_parity() -> None:
     from backend.agents import graph
 
@@ -622,7 +848,7 @@ def test_dynamic_parity() -> None:
     why = _document_fixture()
     check("document scenarios: this host can read the sample attack PDF (pip install -r requirements.txt)",
           not why, why)
-    scenarios = SCENARIOS if not why else tuple(s for s in SCENARIOS if s not in _DOC_SCENARIOS)
+    scenarios = SCENARIOS if not why else tuple(s for s in SCENARIOS if s not in _NEEDS_DOC)
     try:
         outcomes: Dict[str, Dict[str, Dict[str, Any]]] = {}
         for key in keys:
@@ -646,6 +872,12 @@ def test_dynamic_parity() -> None:
                     check(f"[{key}] {sk}: workflow/blueprint attribution", out["blueprint"] == key
                           and out["workflow_name"] == bp_registry.get_blueprint(key).workflow_name,
                           f"{out['workflow_name']}/{out['blueprint']}")
+                elif out["event_kind"] == "decision":
+                    # The intake node's clarifying question; the decision event
+                    # has never carried workflow_name / blueprint.
+                    check(f"[{key}] {sk}: a clarifying question ends the turn with a decision event",
+                          out["result"]["type"] == "clarifying_question" and out["event_kinds"] == ["decision"],
+                          f"{out['result']} {out['event_kinds']}")
                 else:
                     check(f"[{key}] {sk}: a generation failure logs an error event (safe reply)",
                           out["event_kind"] == "error" and out["result"]["type"] == "safety_warning")
@@ -663,6 +895,12 @@ def test_dynamic_parity() -> None:
                       out["tokens"] == ref["tokens"], f"{out['tokens']} != {ref['tokens']}")
                 check(f"[{key} vs {ref_key}] {sk}: same governance guardrail fields",
                       out["governance"] == ref["governance"], f"{out['governance']} != {ref['governance']}")
+                check(f"[{key} vs {ref_key}] {sk}: same end user and identity evidence",
+                      (out["identity"], out["identity_on_every_event"])
+                      == (ref["identity"], ref["identity_on_every_event"]),
+                      f"{out['identity']} != {ref['identity']}")
+                check(f"[{key} vs {ref_key}] {sk}: same kinds of governance event (escalations and decisions included)",
+                      out["event_kinds"] == ref["event_kinds"], f"{out['event_kinds']} != {ref['event_kinds']}")
                 check(f"[{key} vs {ref_key}] {sk}: same Agent Control steer outcome and delivered PII",
                       (out["steer"], out["answer_has_ssn"], out["answer_has_steer_leftovers"])
                       == (ref["steer"], ref["answer_has_ssn"], ref["answer_has_steer_leftovers"]),
@@ -780,6 +1018,43 @@ def test_dynamic_parity() -> None:
                   "internal-docs.search_documents" not in benign["tool_calls"] and not benign["internal_docs"]
                   and benign["docs_grounded"] is False, str(benign["tool_calls"]))
         check("generation error degrades to the safe reply", r["medadvice/generation_error"]["result"]["type"] == "safety_warning")
+        # Lab 5: a signed-in turn names the verified user and carries the
+        # evidence on every event, blocked or not; an anonymous turn carries none.
+        # These scenarios run with no Duo / Identity Intelligence keys, so the
+        # gate cannot look the user up: fail open (A3), allow, check unavailable.
+        verified = {"enduser_id": "nina.osei", "identity_verified": True, "identity_source": "duo",
+                    "identity_override": None, "identity_risk": "allow", "identity_check": "unavailable",
+                    "identity_risk_reasons": None}
+        for theme in ("medadvice", "telecomchatbot"):
+            signed = r[f"{theme}/identity_signed_in"]
+            check(f"{theme}: a signed-in turn's events name the verified user (not the passed enduser_id)",
+                  signed["identity"] == verified and signed["identity_on_every_event"] is True
+                  and signed["result"]["policy_blocked"] is False, str(signed["identity"]))
+            blocked = r[f"{theme}/identity_signed_in_blocked"]
+            check(f"{theme}: a signed-in turn blocked by AI Defense still carries the identity evidence",
+                  blocked["result"]["policy_blocked"] is True
+                  and blocked["governance"]["guardrail_ids"] == ["cisco_ai_defense"]
+                  and blocked["identity"] == verified and blocked["identity_on_every_event"] is True,
+                  f"{blocked['identity']} {blocked['governance']['guardrail_ids']}")
+            check(f"{theme}: an anonymous turn carries no identity evidence",
+                  r[f"{theme}/benign"]["identity"]["identity_verified"] is None
+                  and r[f"{theme}/benign"]["identity"]["identity_source"] is None)
+            # The other events of a signed-in turn: the escalation that follows
+            # a policy block or an escalated answer, and (MedAdvice) the
+            # clarifying question's decision event.
+            for kind in ("identity_signed_in_policy_block", "identity_signed_in_escalated"):
+                out = r[f"{theme}/{kind}"]
+                check(f"{theme}/{kind}: the escalation event carries the identity evidence too",
+                      "escalation" in out["event_kinds"] and out["identity"] == verified
+                      and out["identity_on_every_event"] is True, f"{out['event_kinds']} {out['identity']}")
+            check(f"{theme}: the signed-in policy block is the internal policy block",
+                  r[f"{theme}/identity_signed_in_policy_block"]["governance"]["guardrail_ids"] == ["policy_block"],
+                  str(r[f"{theme}/identity_signed_in_policy_block"]["governance"]))
+        clarify = r["medadvice/identity_signed_in_clarify"]
+        check("medadvice: a signed-in clarifying question's decision event carries the identity evidence",
+              clarify["event_kind"] == "decision" and clarify["result"]["type"] == "clarifying_question"
+              and clarify["identity"] == verified and clarify["identity_on_every_event"] is True,
+              f"{clarify['event_kinds']} {clarify['identity']}")
         check("benign turn passes the whole POST chain",
               r["medadvice/benign"]["guardrail_stages"][-1] == "governance")
         # MCP Tool Thrash: the shared chain's launch/join nodes run on every turn,
@@ -809,6 +1084,7 @@ def test_dynamic_parity() -> None:
         check("attachment: a turn without a document reads nothing and logs no attachment record",
               "attachment-intake.extract_text" not in r["medadvice/benign"]["tool_calls"]
               and r["medadvice/benign"]["attachment"] is None, str(r["medadvice/benign"]["attachment"]))
+        _gate_checks(outcomes, keys, with_document=not why)
         if not why:
             _document_checks(outcomes, keys)
     finally:
@@ -857,6 +1133,8 @@ def main() -> int:
             global _fails
             _fails += 1
             print(f"  ERROR {fn.__name__}: {type(e).__name__}: {e}")
+    refused = identity_isolation.requests_refused()
+    check("no identity request reached a real Duo or CII (each was refused and recorded)", not refused, str(refused))
     print(f"RESULT: {'ok' if not _fails else str(_fails) + ' failed'}")
     return 1 if _fails else 0
 

@@ -20,6 +20,7 @@ from backend.agents.nodes.agent_common import (
     SYNTHESIZER_MAX_TOKENS,
     SYNTHESIZER_TEMPERATURE,
 )
+from backend.agents.state import identity_turn_fields
 from backend.agents.themes import get_theme
 from backend.logging.governance_logger import governance_logger
 from backend.telemetry import otel
@@ -51,6 +52,9 @@ def router_node(state: Dict[str, Any]) -> Dict[str, Any]:
             system_instructions=theme_config.system_prompt,
             user_prompt=user_message,
             enduser_id=state.get("enduser_id"),
+            # Same line as the legacy engine's request log: a signed-in turn's
+            # identity evidence (Lab 5); {} when anonymous.
+            **identity_turn_fields(state),
         )
 
     return {

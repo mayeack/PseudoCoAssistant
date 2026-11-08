@@ -20,6 +20,9 @@ sys.path.insert(0, str(ROOT))
 
 import backend.config  # noqa: E402  (sets CA bundle etc.)
 from backend.config import settings  # noqa: E402
+import identity_isolation  # noqa: E402  (no real Duo / CII, whatever .env holds)
+
+identity_isolation.isolate(settings)
 
 # Ensure the access gate is exercised even if .env has no ACCESS_KEY.
 KEY = settings.access_key or "test-access-key"
@@ -273,6 +276,13 @@ def _attachment_api_checks(c) -> None:
     gated = c.post("/api/server-info/refresh", headers=AUTH).json().get("gated") or {}
     check("server-info gated.pdf_attachments is enabled with pypdf installed",
           gated.get("pdf_attachments") == {"enabled": True, "reason": ""}, str(gated.get("pdf_attachments")))
+    # Lab 5 Duo sign-in: seeded on every read (no probe), closed until configured.
+    duo = (info.get("gated") or {}).get("duo_signin") or {}
+    if not settings.duo_enabled:
+        check("server-info gated.duo_signin is seeded and closed while DUO_ENABLED is off",
+              duo == {"enabled": False, "reason": "Duo sign-in is off (DUO_ENABLED is not true)."}, str(duo))
+    check("server-info gated.duo_signin is the same rule after a refresh",
+          gated.get("duo_signin") == duo, f"{gated.get('duo_signin')} vs {duo}")
 
 
 def main() -> int:
@@ -764,7 +774,7 @@ def main() -> int:
         from backend.hec.forwarder import HECForwarder as _HECFwd, _BODY_OWNED_KEYS
         _fwd = _HECFwd(_HECConfig(id="t", name="t", url="https://localhost:8088"), "tok")
         _body = {"session_id": "s1", "request_id": "r1", "trace_id": "t1",
-                 "enduser_id": "t.nguyen", "risk_score": 60}
+                 "enduser_id": "t.nguyen", "user": "t.nguyen", "risk_score": 60}
         _env = _fwd._build_event("governance", _body)
         _dupes = sorted(set(_env["fields"]) & set(_env["event"]))
         check("HEC envelope: no field is both indexed and in the event body",
@@ -773,6 +783,23 @@ def main() -> int:
               all(k in _env["event"] for k in _BODY_OWNED_KEYS))
         check("HEC envelope: forwarder-owned log_type is still indexed",
               _env["fields"].get("log_type") == "governance")
+        check("HEC envelope: the actor (enduser_id / CIM user) is never an indexed field",
+              {"enduser_id", "user"} <= set(_BODY_OWNED_KEYS) and _env["fields"] == {"log_type": "governance"})
+        # HEC_HOST (Lab 5): each instance stamps its own name as the HEC host.
+        _saved_host = settings.hec_host
+        try:
+            settings.hec_host = ""
+            # Built after the blanking, so the check reads this setting, not the one _env was stamped with.
+            check("HEC host: empty HEC_HOST keeps the destination's host (default medadvice)",
+                  _fwd._build_event("governance", _body)["host"] == "medadvice"
+                  and _HECFwd(_HECConfig(id="t", host="custom", url="https://localhost:8088"), "tok")
+                  ._build_event("audit", _body)["host"] == "custom")
+            settings.hec_host = "l5-ws-3"
+            check("HEC host: HEC_HOST is stamped on every destination's events",
+                  _HECFwd(_HECConfig(id="t", host="custom", url="https://localhost:8088"), "tok")
+                  ._build_event("audit", _body)["host"] == "l5-ws-3")
+        finally:
+            settings.hec_host = _saved_host
 
         # ---- admin ----
         for path in ("/admin/logs/interactions", "/admin/logs/escalations", "/admin/logs/metrics", "/admin/logs/export"):
@@ -819,6 +846,17 @@ def main() -> int:
         check("POST /login correct code -> redirect + md_access cookie",
               good.status_code in (302, 303, 200) and "md_access" in good.cookies, f"{good.status_code}")
         check("GET /logout -> 2xx/3xx", c.get("/logout", headers=AUTH, follow_redirects=False).status_code in (200, 302, 303))
+
+        # ---- Lab 5 identity middleware: inside the room-key gate, inert while off ----
+        _order = [m.cls.__name__ for m in app.user_middleware]
+        check("middleware order: RequestLogging -> AccessKey -> Identity -> ChatBodyLimit -> CORS",
+              _order == ["RequestLoggingMiddleware", "AccessKeyMiddleware", "IdentityMiddleware",
+                         "ChatBodyLimitMiddleware", "CORSMiddleware"], str(_order))
+        if not settings.duo_enabled:
+            _rid = c.get("/api/chat/disclaimer",
+                         headers={**AUTH, "Cookie": "__Host-pseudoco_assistant_identity=bogus"})
+            check("an identity cookie is ignored while DUO_ENABLED is off", _rid.status_code == 200,
+                  f"{_rid.status_code}")
 
         # ---- settings gate (a SECOND code, hardcoded, in front of /settings-ui) ----
         # Runs before anything unlocks it, so the locked case is genuinely locked.
@@ -969,6 +1007,9 @@ def main() -> int:
               'id="demoControlsList"' in s_html and 'id="controlsStatus"' in s_html)
         check("Settings: host-capabilities strip present (greyed-out options explained here)",
               'id="hostCaps"' in s_html)
+        check("Settings: a Duo sign-in chip rendered from gated.duo_signin",
+              "g.duo_signin" in _js and "Duo sign-in:" in _js)
+        check("Settings: settings.js cache-buster bumped to v=12", "/static/js/settings.js?v=12" in s_html)
         # Accordion a11y: each toggle is a <button> nested INSIDE its <h2> (heading role preserved),
         # never an <h2> nested inside a <button> (which screen readers flatten away).
         check("Settings: headers use accordion <h2><button> (heading not nested in button)",
@@ -1035,7 +1076,7 @@ def main() -> int:
         check("Composer: attachment chip row present", 'id="attachmentChip"' in a_html)
         check("Composer: the attachment controls are outside the Demo Controls drawer",
               all(f'id="{i}"' not in _drawer for i in ("attachButton", "attachmentInput", "attachmentChip")))
-        check("Chat: chat.js cache-buster bumped to v=35", "/static/js/chat.js?v=35" in a_html)
+        check("Chat: chat.js cache-buster bumped to v=41", "/static/js/chat.js?v=41" in a_html)
         # Auto-Generate Sessions turns itself off after 60 minutes; the countdown
         # lives inside the existing #autoPromptStats counter, beside the pill.
         check("Auto-Generate Sessions: card says it turns off after 60 minutes",

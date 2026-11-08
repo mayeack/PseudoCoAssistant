@@ -13,8 +13,9 @@ from backend.logging.log_handlers import setup_logging
 from backend.middleware.request_logging import RequestLoggingMiddleware
 from backend.middleware.access_key import AccessKeyMiddleware
 from backend.middleware.body_limit import ChatBodyLimitMiddleware
+from backend.middleware.identity import IdentityMiddleware
 from backend.middleware.settings_gate import has_settings_access
-from backend.routers import chat, admin, auth, settings as settings_routes, incident, spray, toolguard, analytics, appointments, attachments
+from backend.routers import chat, admin, auth, settings as settings_routes, incident, spray, toolguard, analytics, appointments, attachments, identity_auth
 from backend.telemetry import otel, tracestate_guard
 
 # Cap inbound W3C tracestate before OpenTelemetry parses it (CVE-2026-114603).
@@ -58,9 +59,16 @@ app.add_middleware(
 # /api/chat/message[/stream] larger than the biggest allowed attachment plus
 # headroom. Added BEFORE the access-key gate so it runs INSIDE it -- an
 # unauthenticated caller still gets its 401 first, and nobody can make the app
-# count an anonymous upload. Resulting order:
-# RequestLogging -> AccessKey -> ChatBodyLimit -> CORS -> app.
+# count an anonymous upload.
 app.add_middleware(ChatBodyLimitMiddleware)
+
+# Identity (Lab 5, backend/middleware/identity.py): resolves the Duo sign-in
+# cookie into request.state.identity. Inert unless DUO_ENABLED. Added after the
+# body cap and before the access-key gate, so it runs INSIDE the room-key gate
+# (the room key stays the outer trust boundary) and outside the body cap.
+# Resulting order:
+# RequestLogging -> AccessKey -> Identity -> ChatBodyLimit -> CORS -> app.
+app.add_middleware(IdentityMiddleware)
 
 # Access-key gate (Basic Auth) — added before request logging so logging stays
 # outermost and still records rejected (401) requests. No-op unless ACCESS_KEY is set.
@@ -87,6 +95,7 @@ app.include_router(toolguard.router)
 app.include_router(analytics.router)
 app.include_router(appointments.router)
 app.include_router(attachments.router)
+app.include_router(identity_auth.router)
 
 def _prewarm_llm_stack() -> None:
     """Absorb the first-turn cold start off the request path.
@@ -176,6 +185,17 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Failed to initialize settings/HEC: {e}")
 
+    # Lab 5 Duo sign-in: Duo's health check on a daemon thread (never the event
+    # loop), now and then every 5 minutes (every minute while it fails). Each
+    # result opens or closes the duo_signin host gate. A no-op unless
+    # DUO_ENABLED with the Web SDK keys and an https PUBLIC_BASE_URL
+    # (backend/services/identity_signin.py).
+    try:
+        from backend.services import identity_signin
+        identity_signin.start_health_check()
+    except Exception as e:
+        logger.error(f"Failed to start the Duo health check: {e}")
+
     # Pre-warm AFTER the persisted provider/model override is applied so the
     # right model gets loaded. Background thread: startup isn't blocked.
     if settings.prewarm_llm:
@@ -187,6 +207,11 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    try:
+        from backend.services import identity_signin
+        await asyncio.to_thread(identity_signin.stop_health_check)
+    except Exception:
+        logger.debug("Duo health check shutdown error", exc_info=True)
     try:
         from backend.hec.runtime import hec_runtime
         await hec_runtime.stop()

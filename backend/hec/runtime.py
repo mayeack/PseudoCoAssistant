@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
 from backend.hec.client import HECClient, HECSendResult
-from backend.hec.config import DEFAULT_HOST, DEFAULT_INDEX, DEFAULT_SOURCE, HECConfig
+from backend.hec.config import DEFAULT_INDEX, DEFAULT_SOURCE, HECConfig, effective_host
 from backend.hec.forwarder import HECForwarder, HECStats
 
 logger = logging.getLogger(__name__)
@@ -124,7 +124,7 @@ class HECRuntime:
             ts = datetime.now(timezone.utc)
             event = {
                 "time": round(ts.timestamp(), 3),
-                "host": cfg.host or DEFAULT_HOST,
+                "host": effective_host(cfg.host),
                 "source": cfg.source or DEFAULT_SOURCE,
                 "sourcetype": cfg.sourcetype or "medadvice:test",
                 "index": cfg.index or DEFAULT_INDEX,

@@ -295,10 +295,55 @@ check("appointments: cancel then upcoming excludes it",
        and len(_appt_store.list_upcoming("c-integrity", now_utc=_dt(2029, 1, 1))) == 7)(
           _appt_store.list_all(client_id="c-integrity", limit=100)))
 
+# 8. Lab 5 identity: identity_sessions comes from create_all; audit_logs gains
+#    enduser_id, and reconcile_schema (bare columns only) is followed by
+#    ensure_indexes, so an existing database gets the column AND its index.
+from sqlalchemy import create_engine as _create_engine  # noqa: E402
+from sqlalchemy import text as _text  # noqa: E402
+
+_insp = _sa_inspect(dbmod.engine)
+check("identity: identity_sessions created by create_all", "identity_sessions" in set(_insp.get_table_names()))
+check("identity: identity_sessions stores the token hash, never a token column",
+      {"token_hash", "username", "expires_at", "revoked_at", "revoked_reason", "duo_txid", "user_agent",
+       "client_address", "last_seen_at"} <= {c["name"] for c in _insp.get_columns("identity_sessions")}
+      and not any(c["name"] == "token" for c in _insp.get_columns("identity_sessions")))
+check("identity: a fresh audit_logs has enduser_id + ix_audit_logs_enduser_id",
+      "enduser_id" in {c["name"] for c in _insp.get_columns("audit_logs")}
+      and "ix_audit_logs_enduser_id" in {i["name"] for i in _insp.get_indexes("audit_logs")})
+
+_old_file = os.path.join(_tmpdir, "pre-4.22.db")
+_old = _create_engine(f"sqlite:///{_old_file}")
+with _old.begin() as _conn:   # the pre-4.22 shape: no enduser_id
+    _conn.execute(_text(
+        "CREATE TABLE audit_logs (id INTEGER PRIMARY KEY, audit_id VARCHAR NOT NULL, session_id VARCHAR NOT NULL, "
+        "request_id VARCHAR NOT NULL, timestamp DATETIME NOT NULL, action VARCHAR NOT NULL, actor VARCHAR NOT NULL, "
+        "details JSON NOT NULL, ip_address VARCHAR)"))
+_added = dbmod.reconcile_schema(_old)
+check("identity: reconcile_schema adds audit_logs.enduser_id to an existing database",
+      ("audit_logs", "enduser_id") in _added, str(_added))
+check("identity: ensure_indexes creates its index there",
+      dbmod.ensure_indexes(_old) == ["ix_audit_logs_enduser_id"]
+      and "ix_audit_logs_enduser_id" in {i["name"] for i in _sa_inspect(_old).get_indexes("audit_logs")})
+check("identity: ensure_indexes is idempotent", dbmod.ensure_indexes(_old) == ["ix_audit_logs_enduser_id"])
+_old.dispose()
+
+from backend.logging.governance_logger import governance_logger as _gl  # noqa: E402
+from backend.logging.log_schemas import create_audit_log as _cal  # noqa: E402
+from backend.models.db_models import AuditLog as _AuditLog  # noqa: E402
+
+_gl._write_audit_to_db(_cal(audit_id="aud-identity-1", session_id="identity-ref1", request_id="r1",
+                            action="identity_signin_success", actor="user", details={"duo_txid": "t1"},
+                            ip_address="203.0.113.7", enduser_id="nina.osei"))
+with dbmod.get_db_context() as s:
+    _row = s.query(_AuditLog).filter(_AuditLog.audit_id == "aud-identity-1").first()
+    check("identity: _write_audit_to_db maps enduser_id (and keeps ip_address)",
+          _row is not None and _row.enduser_id == "nina.osei" and _row.ip_address == "203.0.113.7")
+
 # Cleanup: drop the temp database entirely.
 dbmod.engine.dispose()
 try:
     os.remove(_dbfile)
+    os.remove(_old_file)
     os.rmdir(_tmpdir)
 except OSError:
     pass
