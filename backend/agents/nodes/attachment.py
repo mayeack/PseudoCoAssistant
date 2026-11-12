@@ -129,9 +129,9 @@ def _with_current_turn(messages: List[Dict[str, Any]], state: Dict[str, Any], co
     """A new list whose current user turn reads ``content``.
 
     The current turn is the last user message when it is the typed
-    ``user_message`` (production: the router's history ends with it); otherwise
-    -- spray and the parity tests pass a history without it -- a user turn is
-    appended. The input list and its dicts are never mutated.
+    ``user_message`` (production: the router's history ends with it, and so
+    does the spray's); otherwise -- the parity tests pass a history without it
+    -- a user turn is appended. The input list and its dicts are never mutated.
     """
     out = list(messages or [])
     typed = state.get("user_message") or ""
