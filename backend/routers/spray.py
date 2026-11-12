@@ -167,44 +167,80 @@ def _gap_seconds(duration_s: int, turns: int, rng: random.Random) -> float:
     return max(_MIN_GAP_S, min(_MAX_GAP_S, rng.uniform(low, high)))
 
 
+async def _play_turn(turn: _Turn, history: List[Dict[str, Any]], *,
+                     client_address: str, campaign_id: Optional[str]) -> None:
+    """Send one planned turn through the real graph and tally what came back.
+
+    The graph gets the conversation the chat router gives it: the session's
+    earlier exchanges with this prompt as the last user message. The router
+    appends the typed message to ``session["messages"]`` (``_prepare_session``)
+    before ``run_turn`` reads it, and the answering agent builds the model's
+    messages from ``conversation_history`` alone (``nodes/synthesizer.py``), so
+    a history without the prompt sent every allowed turn to the model with
+    nothing to answer. ``history`` grows by whole exchanges, after the turn, so
+    the next step of a multi-turn session sees this prompt once.
+
+    The tally is taken here, in the turn's own task, so it lands even when the
+    campaign is stopped mid-turn (see ``_drive_campaign``).
+    """
+    prompt = {"role": "user", "content": turn.prompt}
+    try:
+        result = await run_in_threadpool(
+            run_turn,
+            session_id=turn.session_id,
+            user_message=turn.prompt,
+            conversation_history=[*history, prompt],
+            client_address=client_address,
+            theme=turn.app["theme"],
+            service_name=turn.app["service_name"],
+            deployment_id=turn.app["deployment_id"],
+            enduser_id=turn.actor,
+            ai_defense_review=True,
+            internal_policy_review=True,
+        )
+        blocked = bool(result.get("policy_blocked"))
+        history.extend([prompt, {"role": "assistant", "content": result.get("message", "")}])
+    except Exception:  # noqa: BLE001 - one bad turn must not end the campaign
+        logger.exception("spray turn failed (technique=%s)", turn.technique)
+        blocked = None
+
+    spray_campaign.record_turn(
+        campaign_id=campaign_id, session_id=turn.session_id, technique=turn.technique,
+        app_name=turn.app["service_name"], blocked=blocked,
+    )
+
+
 async def _drive_campaign(body: SprayStart, rng: random.Random) -> None:
-    """Walk the plan, one real turn at a time, until it's done or stopped."""
+    """Walk the plan, one real turn at a time, until it's done or stopped.
+
+    A stop (``/stop``, or the auto-stop at ``duration_s``) cancels this task.
+    Between turns that ends the campaign at once. A turn already in flight
+    still counts: ``run_turn`` keeps going in its worker thread whatever
+    happens to this task (a thread cannot be cancelled) and writes the turn's
+    governance events, so the turn runs shielded in its own task, tally
+    included, and the driver waits for it before it exits. No further turn
+    starts.
+    """
     plan = _build_plan(body, rng)
+    campaign_id = spray_campaign.campaign_id
     logger.warning("spray campaign driver started: %s planned turn(s)", len(plan))
     # Accumulated per session so a multi-turn conversation actually reads as one.
     histories: Dict[str, List[Dict[str, Any]]] = {}
 
     try:
         for turn in plan:
-            if not spray_campaign.is_active():
+            if not spray_campaign.is_active(campaign_id):
                 break
-            history = histories.setdefault(turn.session_id, [])
+            in_flight = asyncio.create_task(_play_turn(
+                turn, histories.setdefault(turn.session_id, []),
+                client_address=rng.choice(CLIENT_ADDRESSES), campaign_id=campaign_id,
+            ))
             try:
-                result = await run_in_threadpool(
-                    run_turn,
-                    session_id=turn.session_id,
-                    user_message=turn.prompt,
-                    conversation_history=list(history),
-                    client_address=rng.choice(CLIENT_ADDRESSES),
-                    theme=turn.app["theme"],
-                    service_name=turn.app["service_name"],
-                    deployment_id=turn.app["deployment_id"],
-                    enduser_id=turn.actor,
-                    ai_defense_review=True,
-                    internal_policy_review=True,
-                )
-                blocked = bool(result.get("policy_blocked"))
-                history.append({"role": "user", "content": turn.prompt})
-                history.append({"role": "assistant",
-                                "content": result.get("message", "")})
-            except Exception:  # noqa: BLE001 - one bad turn must not end the campaign
-                logger.exception("spray turn failed (technique=%s)", turn.technique)
-                blocked = None
-
-            spray_campaign.record_turn(
-                session_id=turn.session_id, technique=turn.technique,
-                app_name=turn.app["service_name"], blocked=blocked,
-            )
+                await asyncio.shield(in_flight)
+            except asyncio.CancelledError:
+                # Stopped mid-turn: let the turn land in the tally, then end.
+                await asyncio.wait({in_flight})
+                raise
             await asyncio.sleep(_gap_seconds(body.duration_s, len(plan), rng))
     except asyncio.CancelledError:
         pass
@@ -212,11 +248,18 @@ async def _drive_campaign(body: SprayStart, rng: random.Random) -> None:
 
 
 async def _do_stop() -> None:
-    global _driver_task
+    """End the campaign: no new turn starts.
+
+    The driver is cancelled but kept here until it exits, so ``driver_running``
+    stays true while a turn that was in flight at the stop lands in the tally.
+    ``start_spray`` replaces it.
+    """
     spray_campaign.stop()
     if _driver_task and not _driver_task.done():
         _driver_task.cancel()
-    _driver_task = None
+        # One loop pass lets a driver that was idle between turns exit, so the
+        # caller's status reads driver_running false unless a turn is landing.
+        await asyncio.sleep(0)
 
 
 async def _auto_stop_after(duration_s: int) -> None:
