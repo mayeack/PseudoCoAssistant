@@ -116,7 +116,12 @@ class SprayCampaign:
             self.campaign_id, self.turns_sent, self.blocked, self.allowed, self.errors,
         )
 
-    def is_active(self) -> bool:
+    def is_active(self, campaign_id: Optional[str] = None) -> bool:
+        """Whether turns may still be sent. With ``campaign_id``, whether THAT
+        campaign may: a driver asks about its own, so one still finishing a turn
+        when a new campaign starts never sends the next one's turns."""
+        if campaign_id is not None and campaign_id != self.campaign_id:
+            return False
         if not self.enabled:
             return False
         if self.duration_s and self._start_time and \
@@ -125,9 +130,22 @@ class SprayCampaign:
             return False
         return True
 
-    def record_turn(self, *, session_id: str, technique: str, app_name: str,
-                    blocked: Optional[bool]) -> None:
-        """Tally one completed turn. ``blocked=None`` means the turn errored."""
+    def record_turn(self, *, campaign_id: Optional[str], session_id: str, technique: str,
+                    app_name: str, blocked: Optional[bool]) -> bool:
+        """Tally one completed turn of ``campaign_id``. ``blocked=None`` means the
+        turn errored. Returns whether it was counted.
+
+        A stopped campaign still counts a turn that was in flight at the stop:
+        that turn wrote its governance events, so the tally has to match them.
+        A turn from a campaign a new start has since replaced is not counted:
+        its campaign's tally is gone, and the new campaign never sent it.
+        """
+        if campaign_id != self.campaign_id:
+            logger.warning(
+                "spray_campaign: not counting a turn from replaced campaign %s (current %s)",
+                campaign_id, self.campaign_id,
+            )
+            return False
         self.turns_sent += 1
         self._sessions.add(session_id)
         self._techniques.add(technique)
@@ -138,6 +156,7 @@ class SprayCampaign:
             self.blocked += 1
         else:
             self.allowed += 1
+        return True
 
     def status(self) -> Dict[str, Any]:
         active = self.is_active()
