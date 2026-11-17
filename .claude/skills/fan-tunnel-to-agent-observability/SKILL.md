@@ -18,7 +18,7 @@ differently.** Both are driven by the *same four* `.env` keys, so it is easy to
 assume one working path means both are working.
 
 ```
-Path A — SDK (backend/agent_observability.py, splunk-ao 0.4.0), the one that matters
+Path A — SDK (backend/agent_observability.py, splunk-ao 0.8.0), the one that matters
   chat turn -> governance logger -> SplunkAOLogger (one per process, worker thread)
     -> OTLP/HTTP POST ingest.<realm>.observability.splunkcloud.com/v2/trace/otlp
     -> trace "chat turn" carrying safety / PII / toxicity / policy / eval metadata
@@ -174,7 +174,7 @@ this is the checklist for a box built from an older bootstrap:
    the `filter/genai_only` processor it references lives in the base config.
    Verbatim block: `reference/otel-agent-obs-pipeline.yaml`. Validate both files
    together with `./scripts/validate-collector-config.sh`.
-3. The app venv has the SDK: `~/DemoBot/venv/bin/pip show splunk-ao` (0.4.0 known good).
+3. The app venv has the SDK: `~/DemoBot/venv/bin/pip show splunk-ao` (0.8.0 known good; 0.4.0-0.6.x lose sessions on the capability_based role).
 
 Ship and restart:
 
