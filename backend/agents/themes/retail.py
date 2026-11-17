@@ -81,7 +81,7 @@ SCHEDULING = SchedulingProfile(
     offer=("Want me to book an in-store appointment with a product specialist? "
            "Here are the next openings:"),
     choose="Here are the next in-store appointment times:",
-    ask_name="Sounds good — whose name should I put the appointment under?",
+    ask_name="Sounds good — I'm holding {label} for you. Whose name should I put the appointment under?",
     confirmed=(
         "You're booked: {label} — in-store appointment with a product specialist, "
         "under {name}. Bring your order number or receipt."

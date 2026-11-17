@@ -92,7 +92,11 @@ scheduling agent phrases what follows it, not the check itself.)
   `medadvice_client_id` in localStorage and sends it as `client_id` on every request.
   It is a partition key, **not authorization** — every visitor shares one access key.
   The agent still asks what **name** to put on the booking (display only, remembered
-  from the client's latest appointment).
+  from the client's latest appointment). Until then nothing is booked: a slot chip on a
+  browser with no saved name **holds** the time (`awaiting_name`), the reply names that
+  time and asks for a name, and the typed name completes the booking. A model reply
+  that does not name the held time is replaced by the theme's `ask_name` copy, in both
+  modes.
 - Slots are synthetic and unlimited: the next N after `now + lead time` inside the
   theme's business hours, paged forward by "More times". No calendar, no conflicts.
 - Storage is naive UTC like every other timestamp; labels are rendered in the client's

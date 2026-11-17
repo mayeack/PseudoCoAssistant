@@ -59,6 +59,9 @@ for key, theme in THEMES.items():
     check(f"{key}: offer copy renders without stray placeholders", "{" not in theme.scheduling.render("offer"))
     check(f"{key}: confirmation copy renders",
           "{" not in theme.scheduling.render("confirmed", label="Mon Sep 7, 8:00 AM", name="Alex"))
+    ask = theme.scheduling.render("ask_name", label="Mon Sep 7, 8:00 AM")
+    check(f"{key}: the name question names the held time and asks for a name",
+          "{" not in ask and "Mon Sep 7, 8:00 AM" in ask and "name" in ask.lower(), ask)
 check("medadvice never offers on an EMERGENCY first answer",
       "EMERGENCY" in THEMES["medadvice"].scheduling.first_offer_excludes)
 check("telecom books 2-hour arrival windows", THEMES["telecomchatbot"].scheduling.window_minutes == 120)

@@ -59,7 +59,7 @@
 
 <h2>Identity and time</h2>
 <ul>
-<li>The <strong>browser</strong> owns its bookings: <code>frontend/js/chat.js</code> keeps a stable <code>medadvice_client_id</code> in localStorage and sends it as <code>client_id</code> on every request. It is a partition key, <strong>not authorization</strong> — every visitor shares one access key. The agent still asks what <strong>name</strong> to put on the booking (display only, remembered from the client's latest appointment).</li>
+<li>The <strong>browser</strong> owns its bookings: <code>frontend/js/chat.js</code> keeps a stable <code>medadvice_client_id</code> in localStorage and sends it as <code>client_id</code> on every request. It is a partition key, <strong>not authorization</strong> — every visitor shares one access key. The agent still asks what <strong>name</strong> to put on the booking (display only, remembered from the client's latest appointment). Until then nothing is booked: a slot chip on a browser with no saved name <strong>holds</strong> the time (<code>awaiting_name</code>), the reply names that time and asks for a name, and the typed name completes the booking. A model reply that does not name the held time is replaced by the theme's <code>ask_name</code> copy, in both modes.</li>
 <li>Slots are synthetic and unlimited: the next N after <code>now + lead time</code> inside the theme's business hours, paged forward by "More times". No calendar, no conflicts.</li>
 <li>Storage is naive UTC like every other timestamp; labels are rendered in the client's IANA zone (<code>client_tz</code>, stdlib <code>zoneinfo</code>), falling back to <code>SCHEDULING_DEFAULT_TIMEZONE</code> (<code>.env</code>, default <code>America/New_York</code>).</li>
 </ul>

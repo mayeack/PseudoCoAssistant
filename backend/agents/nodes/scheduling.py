@@ -194,8 +194,18 @@ def build_scheduling_directive(profile: SchedulingProfile, ctx: Dict[str, Any], 
                      + "; ".join(f"{a['label']} ({a.get('name') or 'no name'})" for a in upcoming) + ".")
     else:
         lines.append(f"They have no {profile.noun_plural} scheduled.")
+    chosen = ctx.get("chosen_label")
+    if chosen:
+        lines.append(f"The time the user picked: {chosen}.")
     if action == "book" and not ctx.get("name_known") and not (ctx.get("action") or {}).get("name"):
-        lines.append("A name is needed for the booking: ask what name to put it under.")
+        # A chip click lands here on a browser that has never booked: nothing
+        # is booked yet. Without the time and the "not booked" fact the model
+        # used to invent a "click the button above" step that does not exist.
+        lines.append(
+            (f"{chosen} is held but NOT booked yet" if chosen else "The booking is not made yet")
+            + ": a name is needed first. Say the time and ask what name to put it under. "
+            "There is no button for this step: the user types the name."
+        )
     if ctx.get("pending"):
         lines.append(f"Pending step: {ctx['pending']}.")
     return "\n".join(lines)
@@ -250,6 +260,11 @@ def scheduling_intake_node(state: Dict[str, Any]) -> Dict[str, Any]:
         action and action.get("action") == "reschedule" and not action.get("slot_id")
     ):
         slots = [s.as_dict() for s in svc.suggest_slots(profile, now_utc=now, tz=tz, page=page)]
+    # The slot a chip (or a typed pick) chose, so the domain agent can name it.
+    chosen_label = None
+    if action and action.get("action") in ("book", "reschedule") and action.get("slot_id"):
+        chosen = svc.resolve_slot(profile, action.get("slot_id"), now_utc=now, tz=tz)
+        chosen_label = chosen.label if chosen else None
 
     hist = _session_scheduling_history(history)
     ctx = {
@@ -260,6 +275,7 @@ def scheduling_intake_node(state: Dict[str, Any]) -> Dict[str, Any]:
         "action": action,
         "page": page,
         "slots": slots,
+        "chosen_label": chosen_label,
         "upcoming": upcoming,
         "pending": (last_meta or {}).get("pending"),
         "last_state": (last_meta or {}).get("state"),
@@ -425,12 +441,14 @@ def _execute(state: Dict[str, Any], profile: SchedulingProfile, theme_key: str, 
             except Exception:  # noqa: BLE001
                 name = None
         if not name:
-            text = profile.render("ask_name")
+            text = profile.render("ask_name", label=slot.label)
             return {"payload": _payload(profile, theme_key, "awaiting_name", slots=[slot.as_dict()],
                                         pending={"awaiting": "name", "slot_id": slot.slot_id},
                                         appointments=upcoming, actions=[_action_chip("decline", "Never mind")]),
-                    "text": text, "summary": f"Slot {slot.label} chosen; ask what name to put it under.",
-                    "facts": [f"Chosen time: {slot.label}."]}
+                    "text": text,
+                    "summary": f"{slot.label} is held but NOT booked yet; ask what name to put it under.",
+                    "facts": [f"Chosen time: {slot.label}. Say this time.",
+                              "The user types the name; there is no button for it."]}
         appt = store.book(client_id=client_id, session_id=state["session_id"], theme=theme_key, name=name,
                           provider_label=profile.provider_label, start_utc=slot.start_utc,
                           duration_minutes=profile.duration_minutes, timezone_name=tz,
@@ -558,6 +576,11 @@ def scheduling_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 response = None
         if response is not None:
             wording = (response.content or "").strip()
+            if wording and payload["state"] == "awaiting_name" and not _model_covers_outcome(payload, wording):
+                # The name step must say the held time and ask for the name
+                # (the agent is told not to list times); keep the template
+                # when its wording drops either.
+                wording = ""
             if wording:
                 # Keep the deterministic facts line for listings (the agent is
                 # told not to enumerate); prepend its wording otherwise.
@@ -599,7 +622,11 @@ def _model_covers_outcome(payload: Dict[str, Any], text: str) -> bool:
     if state_name in ("booked", "rescheduled", "cancelled"):
         return bool(appt.get("label")) and appt["label"] in text
     if state_name == "awaiting_name":
-        return "name" in low
+        # It must ask for the name AND say which time is held. "name" alone
+        # passed a reply that told the user to "click the button above" and
+        # never said the time was held, not booked.
+        held = [s.get("label") for s in payload.get("slots") or [] if s.get("label")]
+        return "name" in low and bool(held) and all(label in text for label in held)
     if state_name == "listed":
         labels = [a.get("label") for a in payload.get("appointments") or [] if a.get("label")]
         return bool(labels) and all(label in text for label in labels)

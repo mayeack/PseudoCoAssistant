@@ -90,7 +90,9 @@ class SchedulingProfile:
                             "Here are the closest times:")
     already_booked: str = ("You already have {a_noun} scheduled for {label}. "
                            "Ask me about your schedule if you'd like to change it.")
-    ask_name: str = "Great — what name should I put the {noun} under?"
+    # Names the held time: a chip click that stops here has not booked yet, and
+    # the reply has to say so (the slot is held, a typed name completes it).
+    ask_name: str = "Great — I'm holding {label} for you. What name should I put the {noun} under?"
     confirmed: str = "You're booked: {label} — {noun} with {provider}, under {name}."
     listed: str = "Here's what you have scheduled:"
     none_scheduled: str = "You don't have any {noun_plural} scheduled."
