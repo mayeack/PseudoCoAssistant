@@ -131,9 +131,11 @@ _BY_ID: Dict[str, AttackSample] = {s.id: s for s in SAMPLES}
 #: (2026-06-24) covers the payloads typed; this covers them embedded.
 #: 2026-10-30 validated the three jailbreak/extraction payloads this module
 #: shipped with (56/56; see docs/attachments.md); switching the samples to the
-#: pii_phi_exfiltration phrasings retires that result -- None until a fresh
-#: Tier 1 run passes on the new payloads.
-DOCUMENT_VALIDATION: Optional[str] = None
+#: pii_phi_exfiltration phrasings (01126cf, 2026-11-04) retired that result.
+#: 2026-11-12: a fresh Tier 1 run passed 56/56 on those exfiltration payloads
+#: (all 8 themes, cover and long_pdf, clean control allowed), so it is recorded.
+#: Reset this to None if a sample's payload changes before it is probed again.
+DOCUMENT_VALIDATION: Optional[str] = "2026-11-12"
 
 
 def get_sample(sample_id: Optional[str]) -> Optional[AttackSample]:

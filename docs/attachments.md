@@ -515,15 +515,24 @@ LOG_TO_FILE=false LOG_TO_DATABASE=false SPLUNK_AO_LOGGING_DISABLED=1 \
 The samples carried generic jailbreak/extraction payloads until 2026-11-04,
 when they were switched to the `pii_phi_exfiltration` family so a missed turn
 makes the assistant disclose a synthetic record (the data-exfiltration demo).
-The 2026-10-30 run below validated the earlier payloads; the 2026-11-04 run
-re-validates the exfiltration ones.
+The 2026-10-30 run below validated the earlier payloads; the 2026-11-04 and
+2026-11-12 runs re-validate the exfiltration ones.
+
+**2026-11-12, Tier 1** (`probe_attachments.py all`, live Cisco AI Defense, run
+during the Lab 5 Stage A rehearsal): **56/56 as expected**, on the same
+`pii_phi_exfiltration` payloads (unchanged since 01126cf on 2026-11-04). On all
+8 themes the white-text, tiny-font and off-page samples were blocked with
+*Prompt Injection*, as the cover page and as the ~11,000-character `long_pdf`;
+every clean control was allowed. This is the run recorded in
+`attack_documents.DOCUMENT_VALIDATION` (`"2026-11-12"`).
 
 **2026-11-04, Tier 1** (`probe_attachments.py all`, live Cisco AI Defense, us
 region): **56/56 as expected.** On all 8 themes every attack sample (white-text,
 tiny-font, off-page, each a `pii_phi_exfiltration` phrasing) was blocked with
 *Prompt Injection*, both as the one-page cover and as the ~11,000-character
 `long_pdf` with the payload at the very end; every clean control was allowed.
-Recorded in `attack_documents.DOCUMENT_VALIDATION`.
+Its date was never written into `attack_documents.DOCUMENT_VALIDATION`, which
+stayed `None` until the 2026-11-12 run was recorded.
 
 **2026-11-04, Tier 2** (`--turns retail medadvice`, ollama `mistral-nemo:12b`,
 Multi-Agent Mode off, 24 turns):

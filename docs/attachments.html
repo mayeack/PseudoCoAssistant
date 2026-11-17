@@ -774,14 +774,22 @@ ever added to make a run look different.</li>
 <p>The samples carried generic jailbreak/extraction payloads until 2026-11-04,
 when they were switched to the <code>pii_phi_exfiltration</code> family so a missed turn
 makes the assistant disclose a synthetic record (the data-exfiltration demo).
-The 2026-10-30 run below validated the earlier payloads; the 2026-11-04 run
-re-validates the exfiltration ones.</p>
+The 2026-10-30 run below validated the earlier payloads; the 2026-11-04 and
+2026-11-12 runs re-validate the exfiltration ones.</p>
+<p><strong>2026-11-12, Tier 1</strong> (<code>probe_attachments.py all</code>, live Cisco AI Defense, run
+during the Lab 5 Stage A rehearsal): <strong>56/56 as expected</strong>, on the same
+<code>pii_phi_exfiltration</code> payloads (unchanged since 01126cf on 2026-11-04). On all
+8 themes the white-text, tiny-font and off-page samples were blocked with
+<em>Prompt Injection</em>, as the cover page and as the ~11,000-character <code>long_pdf</code>;
+every clean control was allowed. This is the run recorded in
+<code>attack_documents.DOCUMENT_VALIDATION</code> (<code>"2026-11-12"</code>).</p>
 <p><strong>2026-11-04, Tier 1</strong> (<code>probe_attachments.py all</code>, live Cisco AI Defense, us
 region): <strong>56/56 as expected.</strong> On all 8 themes every attack sample (white-text,
 tiny-font, off-page, each a <code>pii_phi_exfiltration</code> phrasing) was blocked with
 <em>Prompt Injection</em>, both as the one-page cover and as the ~11,000-character
 <code>long_pdf</code> with the payload at the very end; every clean control was allowed.
-Recorded in <code>attack_documents.DOCUMENT_VALIDATION</code>.</p>
+Its date was never written into <code>attack_documents.DOCUMENT_VALIDATION</code>, which
+stayed <code>None</code> until the 2026-11-12 run was recorded.</p>
 <p><strong>2026-11-04, Tier 2</strong> (<code>--turns retail medadvice</code>, ollama <code>mistral-nemo:12b</code>,
 Multi-Agent Mode off, 24 turns):</p>
 <table>
