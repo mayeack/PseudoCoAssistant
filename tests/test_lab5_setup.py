@@ -203,7 +203,15 @@ class FakeBox:
             "sources": {"duo": "ok", "cii": "ok"}, "errors": {}, "available": True, "verdict": "block",
             "reasons": ["mfa_flood", "impossible_travel"], "duo_status": "active", "trust_level": "QUESTIONABLE",
             "failing_checks": ["MFA Flood", "Impossible Travel"]}
+        # ...and about each control (the trusted personas): allowed, as on lab day.
+        self.control_answer: Dict[str, Any] = {
+            "sources": {"duo": "ok", "cii": "ok"}, "errors": {}, "available": True, "verdict": "allow",
+            "reasons": [], "duo_status": "active", "trust_level": "TRUSTED", "failing_checks": []}
+        self.user_answers: Dict[str, Dict[str, Any]] = {}     # per username, over both of the above
         self.victim_runs: List[Tuple[List[str], Optional[bytes]]] = []
+        # The Demo Controls state the app reports (GET /api/incident/status, /api/settings/integrations).
+        self.incident_active = False
+        self.ai_defense = {"enabled": True, "api_key": True}
         self._load_running_env()
 
     # what the running app read at its last start
@@ -270,7 +278,9 @@ class FakeBox:
                           envfile.get(lines, "CII_ACCESS_TOKEN")
                           or all(envfile.get(lines, k) for k in ("CII_CLIENT_ID", "CII_CLIENT_SECRET", "CII_TOKEN_URL"))))}
             if answer["duo_configured"] and answer["cii_configured"]:
-                answer.update(self.victim_answer)
+                user = argv[-1]
+                answer.update(self.user_answers.get(user) or (
+                    self.control_answer if user in ls.DEFAULT_TRUSTED else self.victim_answer))
             return R(0, json.dumps(answer) + "\n")
         # ---- everything below changes the box
         self.mutations.append(joined if not stdin else f"{joined} <stdin>")
@@ -332,6 +342,23 @@ class FakeBox:
             if ls.version_at_least(self.version, "4.23.0"):
                 gated["duo_signin"] = gate
             return 200, {"version": self.version, "gated": gated}
+        if path == "/api/incident/status" and method == "GET":
+            return 200, {"active": self.incident_active, "latency_ms": 20000, "error_rate": 0.6, "duration_s": 600,
+                         "elapsed_s": 120 if self.incident_active else 0,
+                         "remaining_s": 480 if self.incident_active else None, "drove_traffic": True,
+                         "load_driver_running": self.incident_active}
+        if path == "/api/settings/integrations" and method == "GET":
+            # The app's shape: a secret field reports only `present`, a boolean its value as "true"/"false".
+            return 200, {"integrations": {
+                "ai_defense": [
+                    {"key": "enabled", "label": "Enabled", "secret": False, "boolean": True, "present": True,
+                     "value": "true" if self.ai_defense["enabled"] else "false"},
+                    {"key": "api_key", "label": "Inspection API key", "secret": True, "boolean": False,
+                     "present": self.ai_defense["api_key"]},
+                    {"key": "region", "label": "Region", "secret": False, "boolean": False, "present": True,
+                     "value": "us"}],
+                "splunk_o11y": [{"key": "realm", "secret": False, "boolean": False, "present": True,
+                                 "value": "us1"}]}}
         if path == "/api/hec/destinations" and method == "GET":
             return 200, {"destinations": [mask(d) for d in self.destinations]}
         m = re.match(r"^/api/hec/destinations/([^/]+)$", path)
@@ -712,10 +739,26 @@ def test_up_status_down() -> None:
         check("status: each box's own gate blocks the room's victim (run on the box, its venv, script on stdin)",
               out3.count("OK       victim       the box's Identity Risk Gate blocks avery.kim: mfa_flood, "
                          "impossible_travel") == 2
-              and all(b.victim_runs and b.victim_runs[-1][0] == ["/home/splunk/DemoBot/venv/bin/python", "-I", "-",
-                                                                "/home/splunk/DemoBot", "avery.kim"]
-                      and b"identity_lookup.lookup(user)" in (b.victim_runs[-1][1] or b"")
+              and all(any(argv == ["/home/splunk/DemoBot/venv/bin/python", "-I", "-", "/home/splunk/DemoBot",
+                                   "avery.kim"] and b"identity_lookup.lookup(user)" in (stdin or b"")
+                          for argv, stdin in b.victim_runs)
                       for b in world.boxes.values()), out3)
+        check("status: ...and the same self-check allows each control (room.trusted), one run per persona",
+              out3.count("OK       controls     the box's Identity Risk Gate allows every control: marcus.bell, "
+                         "elena.sousa, grace.lin") == 2
+              and all(sorted(argv[-1] for argv, _ in b.victim_runs[-4:])
+                      == ["avery.kim", "elena.sousa", "grace.lin", "marcus.bell"]
+                      and all(stdin == ls.VICTIM_CHECK_SCRIPT for _, stdin in b.victim_runs)
+                      for b in world.boxes.values()), out3)
+        check("status: the toggles row reads Trigger Demo Incident and Cisco AI Defense through the public name",
+              out3.count("OK       toggles      Trigger Demo Incident off; Cisco AI Defense configured") == 2
+              and all(any(u == f"https://l5-acme-{nn}.pseudocoassistant.com{p}" and h == {"X-Access-Key": ACCESS_KEYS[nn]}
+                          for m, u, h in world.https_log if m == "GET")
+                      for nn in world.boxes for p in ("/api/incident/status", "/api/settings/integrations")), out3)
+        check("status: the room row no longer waits on the S1 decision, and says the stack check needs its "
+              "credentials", "S1 decision" not in out3
+              and "SKIP     room         the victim's events in the room's Splunk stack: this needs the stack's "
+                  "search credentials" in out3, out3)
 
         secrets_all = all_secrets(world)
         state_text = "".join(p.read_text() for p in (tmp / "state").rglob("*") if p.is_file())
@@ -887,6 +930,12 @@ def test_example_yaml() -> None:
     print("== workshop.example.yaml ==")
     ws = ls.load_workshop(LAB5 / "workshop.example.yaml")
     check("loads and validates", ws.name == "acme-1105" and len(ws.boxes) == 2)
+    text = (LAB5 / "workshop.example.yaml").read_text()
+    check("room.lab_end is there commented out: no lab end, the 8 h token rule", ws.lab_end is None
+          and "  # lab_end: 2026-11-24T23:00:00Z\n" in text)
+    import yaml
+    uncommented = ls.workshop_from_dict(yaml.safe_load(text.replace("  # lab_end:", "  lab_end:", 1)))
+    check("...and valid once uncommented", uncommented.lab_end == 1795561200.0, repr(uncommented.lab_end))
     check("defaults apply to every box", all(b.port == 2222 and b.user == "splunk"
                                              and b.checkout == "/home/splunk/DemoBot" for b in ws.boxes))
     check("hostname is single-label under the zone", ws.hostname(ws.boxes[0]) == "l5-acme-1105-01.pseudocoassistant.com")
@@ -1884,8 +1933,239 @@ def test_cii_token() -> None:
               and all(not b.mutations for b in world.boxes.values()), out)
 
 
+def _with_lab_end(value: str, yaml_text: str = WORKSHOP_YAML) -> str:
+    return yaml_text.replace("  fallback: jordan.reyes\n", f"  fallback: jordan.reyes\n  lab_end: {value}\n", 1)
+
+
+def _iso(when: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when))
+
+
+def _row(out: str, name: str) -> str:
+    return next((l for l in out.splitlines() if l.split()[1:2] == [name]), "")
+
+
+def test_lab_end() -> None:
+    print("== room.lab_end: an ISO-8601 UTC time; the CII token must outlast the lab's end plus 1 hour ==")
+    import yaml
+    end = 1795561200.0                                       # 2026-11-24 23:00 UTC
+    for text, why in (("2026-11-24T23:00:00Z", "unquoted (YAML reads a timestamp)"),
+                      ("'2026-11-24T23:00:00Z'", "quoted"), ("2026-11-24T23:00:00+00:00", "+00:00"),
+                      ("'2026-11-24T23:00Z'", "no seconds")):
+        ws = ls.workshop_from_dict(yaml.safe_load(_with_lab_end(text)))
+        check(f"lab_end accepted: {why}", ws.lab_end == end, repr(ws.lab_end))
+    check("lab_end absent: None, today's token rule", ls.workshop_from_dict(yaml.safe_load(WORKSHOP_YAML)).lab_end is None)
+    check("lab_end empty: None", ls.workshop_from_dict(yaml.safe_load(_with_lab_end("''"))).lab_end is None)
+    for text, why, needle in (("2026-11-24T23:00:00", "no Z (anyone's local time)", "add Z: the time is UTC"),
+                              ("2026-11-24", "a date with no time", "needs the time of day"),
+                              ("2026-11-24T23:00:00+02:00", "another offset", "must be in UTC (Z or +00:00)"),
+                              ("'2026-11-24T23:00:00-08:00'", "another offset, quoted", "an ISO-8601 UTC time"),
+                              ("'2026-13-24T23:00:00Z'", "month 13", "an ISO-8601 UTC time"),
+                              ("'tomorrow evening'", "words", "an ISO-8601 UTC time"),
+                              ("1795561200", "epoch seconds", "an ISO-8601 UTC time")):
+        try:
+            ls.workshop_from_dict(yaml.safe_load(_with_lab_end(text)))
+            msg = ""
+        except Lab5Error as exc:
+            msg = str(exc)
+        check(f"lab_end refused: {why}, with a clear error",
+              "`room.lab_end`" in msg and needle in msg and "2026-11-24T23:00:00Z" in msg, msg or "accepted")
+
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        rc, out = run_cli(world, tmp, "up")
+        check("up exits 0", rc == 0, out)
+        now = time.time()
+        lab_end = now + 3 * 3600
+        (tmp / "workshop.yaml").write_text(_with_lab_end(_iso(lab_end)))
+        short = cii_jwt(lab_end + 1800)                       # runs out 30 min after the lab: inside the margin
+        lasts = cii_jwt(lab_end + 2 * 3600)                   # 5 h left: under 8 h, but past the lab plus 1 h
+        _set_box_env(world.boxes["01"], CII_ACCESS_TOKEN=short)
+        _set_box_env(world.boxes["02"], CII_ACCESS_TOKEN=lasts)
+        rc, out = run_cli(world, tmp, "status")
+        row1 = next((l for l in out.split("== box 02")[0].splitlines() if "CII token" in l), "")
+        row2 = next((l for l in out.split("== box 02")[1].splitlines() if "CII token" in l), "") if "== box 02" in out else ""
+        check("lab_end: a token that runs out before the lab ends plus 1 hour is FAIL, with the fix",
+              row1.split()[:1] == ["FAIL"] and "expires before the lab ends plus 1 hour" in row1
+              and f"room.lab_end {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(lab_end))}" in row1
+              and "run cii-token on the morning of the lab" in row1 and rc == 1, row1 or out)
+        check("lab_end: a token that outlasts it is OK, even with less than 8 h left (no WARN)",
+              row2.split()[:1] == ["OK"] and "lasts past the lab's end plus 1 hour" in row2, row2 or out)
+        check("...never printing either token", short not in out and lasts not in out)
+        (tmp / "workshop.yaml").write_text(WORKSHOP_YAML)
+        rc, out = run_cli(world, tmp, "status", "--only", "2")
+        check("no lab_end: the same 5 h token is WARN, as before", re.search(
+            r"WARN\s+CII token\s+\d\.\d h left.*less than a lab day; run cii-token", out) is not None, out)
+        (tmp / "workshop.yaml").write_text(_with_lab_end(_iso(now - 3600)))
+        _set_box_env(world.boxes["01"], CII_ACCESS_TOKEN=cii_jwt(now - 60))
+        rc, out = run_cli(world, tmp, "status", "--only", "1")
+        check("lab_end: an expired token is still FAIL as expired", re.search(r"FAIL\s+CII token\s+expired", out)
+              is not None, out)
+
+
+def test_status_controls_check() -> None:
+    print("== status: does each box's own Identity Risk Gate allow every control (the S1 control criterion)? ==")
+    ok = {"sources": {"duo": "ok", "cii": "ok"}, "errors": {}, "available": True, "verdict": "allow", "reasons": [],
+          "duo_status": "active", "trust_level": "TRUSTED", "failing_checks": []}
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        run_cli(world, tmp, "up")
+        box = world.boxes["01"]
+        cases = (
+            ("a control failing MFA Flood (its CII exclusion missing): FAIL, naming it and the S1 fallback",
+             {"marcus.bell": dict(ok, verdict="block", reasons=["mfa_flood"], trust_level="QUESTIONABLE",
+                                  failing_checks=["MFA Flood"])},
+             "FAIL", ["would block 1 control(s): marcus.bell (mfa_flood)", "S1 negative-control scenario",
+                      "the plan's fallback control is elena.sousa"], ["grace.lin ("]),
+            ("the fallback itself UNTRUSTED: FAIL, and the row says the fallback is refused too",
+             {"elena.sousa": dict(ok, verdict="block", reasons=["trust_untrusted"], trust_level="UNTRUSTED")},
+             "FAIL", ["elena.sousa (trust_untrusted)", "the plan's fallback, elena.sousa, is refused too"], []),
+            ("UNTRUSTED with an allow verdict (a gate that left it out): still FAIL",
+             {"grace.lin": dict(ok, trust_level="UNTRUSTED")},
+             "FAIL", ["grace.lin (trust_untrusted)"], []),
+            ("failing Impossible Travel with an allow verdict: still FAIL",
+             {"grace.lin": dict(ok, trust_level="NEUTRAL", failing_checks=["Impossible Travel"])},
+             "FAIL", ["grace.lin (impossible_travel)"], []),
+            ("two controls refused, each with its reasons",
+             {"marcus.bell": dict(ok, verdict="block", reasons=["mfa_flood", "impossible_travel"]),
+              "grace.lin": dict(ok, verdict="block", reasons=["duo_disabled"])},
+             "FAIL", ["would block 2 control(s): marcus.bell (mfa_flood, impossible_travel), grace.lin (duo_disabled)"],
+             []),
+            ("a control Duo has no user for: FAIL, provision the cast",
+             {"grace.lin": dict(ok, sources={"duo": "not_found", "cii": "unavailable"}, errors={"cii": "no_login"},
+                                available=False, verdict="block", reasons=["duo_user_not_found"])},
+             "FAIL", ["grace.lin (duo_user_not_found; provision the cast: scripts/identity/provision_personas.py)"],
+             []),
+            ("a control locked out in Duo: FAIL, for as long as the lockout lasts",
+             {"marcus.bell": dict(ok, verdict="block", reasons=["duo_locked_out"], duo_status="locked_out")},
+             "FAIL", ["marcus.bell (duo_locked_out; only while Duo's lockout lasts"], []),
+            ("CII could not answer for a control (its token expired): WARN, saying what did not answer",
+             {"grace.lin": dict(ok, sources={"duo": "ok", "cii": "unavailable"}, errors={"cii": "token_expired"},
+                                available=False, trust_level=None)},
+             "WARN", ["cannot verify 1 control(s): grace.lin (cii token_expired)", "lets them chat unverified",
+                      "the box's CII access token, which has expired: run `cii-token`"], ["pseudoco-lab5-cii-"]),
+            ("a stale Status key (Duo 401, CII not asked): WARN, naming the Status keys once",
+             {u: dict(ok, sources={"duo": "unavailable", "cii": "unavailable"},
+                      errors={"duo": "http_401", "cii": "no_login"}, available=False, trust_level=None)
+              for u in ("marcus.bell", "elena.sousa")},
+             "WARN", ["cannot verify 2 control(s): marcus.bell (duo http_401, cii no_login), elena.sousa (duo "
+                      "http_401, cii no_login)", "pseudoco-lab5-duo-status-ikey"], []),
+            ("one refused and one unverified: FAIL with both",
+             {"marcus.bell": dict(ok, verdict="block", reasons=["mfa_flood"]),
+              "grace.lin": dict(ok, sources={"duo": "ok", "cii": "unavailable"}, errors={"cii": "graphql_error"},
+                                available=False)},
+             "FAIL", ["marcus.bell (mfa_flood)", "cannot verify grace.lin (cii graphql_error)", "spikes S5/S6"], []),
+            ("no CII record yet, and a failing check the gate does not block on: OK",
+             {"grace.lin": dict(ok, sources={"duo": "ok", "cii": "not_found"}, trust_level=None),
+              "marcus.bell": dict(ok, trust_level="NEUTRAL",
+                                  failing_checks=["A Bypass Code Was Used To Successfully Sign In"])},
+             "OK", ["allows every control: marcus.bell, elena.sousa, grace.lin (no record in CII yet)"], []),
+        )
+        for name, answers, status, needles, absent in cases:
+            box.user_answers = answers
+            rc, out = run_cli(world, tmp, "status", "--only", "1")
+            row = _row(out, "controls")
+            check(f"{name}: {status}" + (" (the run fails)" if status == "FAIL" else ""),
+                  row.split()[:1] == [status] and all(n in row for n in needles)
+                  and not any(n in row for n in absent) and (rc == 1) == (status == "FAIL"), row or out)
+        box.user_answers = {}
+        check("the victim row is untouched by the controls' answers",
+              _row(out, "victim").startswith("  OK       victim       the box's Identity Risk Gate blocks avery.kim"),
+              _row(out, "victim"))
+
+        real = box._dispatch
+        box._dispatch = lambda argv, stdin, sudo: (remote.CmdResult(1, "", "ModuleNotFoundError: No module named "
+                                                                           "'backend.services.identity_gate'\n")
+                                                   if argv[0].endswith("/venv/bin/python") else real(argv, stdin, sudo))
+        runs = len(box.commands)
+        rc, out = run_cli(world, tmp, "status", "--only", "1")
+        python_runs = [c for c, _, _ in box.commands[runs:] if c[0].endswith("/venv/bin/python")]
+        check("a box whose self-check does not run: the controls row FAILs naming it, after one control's run",
+              rc == 1 and "FAIL     controls     the control self-check did not run on the box (exit 1: "
+                          "ModuleNotFoundError" in out and len(python_runs) == 2, f"{len(python_runs)} runs\n{out}")
+        box._dispatch = real
+
+    print("== status: with identity.fail_open false, a control the box cannot verify is refused ==")
+    world = FakeWorld()
+    closed = WORKSHOP_YAML.replace("participants:\n", "identity:\n  fail_open: false\nparticipants:\n", 1)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "workshop.yaml").write_text(closed)
+        rc, out = run_cli(world, tmp, "up", "--only", "1")
+        check("up with fail_open false exits 0", rc == 0, out)
+        world.boxes["01"].user_answers = {"grace.lin": dict(ok, sources={"duo": "ok", "cii": "unavailable"},
+                                                            errors={"cii": "token_rejected"}, available=False)}
+        rc, out = run_cli(world, tmp, "status", "--only", "1")
+        row = _row(out, "controls")
+        check("fail-closed: an unverifiable control is FAIL (its gate refuses it), with what to check",
+              rc == 1 and row.split()[:1] == ["FAIL"] and "cannot verify grace.lin (cii token_rejected)" in row
+              and "with IDENTITY_FAIL_OPEN off its gate refuses them" in row and "run `cii-token`" in row, row or out)
+
+
+def test_status_toggles() -> None:
+    print("== status: Trigger Demo Incident off and Cisco AI Defense configured on each box ==")
+    world = FakeWorld()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        run_cli(world, tmp, "up")
+        box = world.boxes["01"]
+        rc, out = run_cli(world, tmp, "status", "--only", "1")
+        check("both as Lab 5 needs: OK", rc == 0 and _row(out, "toggles").startswith(
+            "  OK       toggles      Trigger Demo Incident off; Cisco AI Defense configured"), _row(out, "toggles"))
+        for name, incident, ai, needles in (
+                ("the demo incident running", True, {"enabled": True, "api_key": True},
+                 ["Trigger Demo Incident is running (480 s left): turn it off in the instance's Demo Controls"]),
+                ("AI Defense's Enabled switch off", False, {"enabled": False, "api_key": True},
+                 ["Cisco AI Defense is not configured on the box (its Enabled switch is off)", "claim 3"]),
+                ("no AI Defense inspection key", False, {"enabled": True, "api_key": False},
+                 ["Cisco AI Defense is not configured on the box (it has no inspection API key)"]),
+                ("both wrong at once", True, {"enabled": False, "api_key": False},
+                 ["Trigger Demo Incident is running", "its Enabled switch is off and it has no inspection API key"])):
+            box.incident_active, box.ai_defense = incident, ai
+            rc, out = run_cli(world, tmp, "status", "--only", "1")
+            row = _row(out, "toggles")
+            check(f"{name}: FAIL (the run fails), saying what to change", rc == 1 and row.split()[:1] == ["FAIL"]
+                  and all(n in row for n in needles), row or out)
+        box.incident_active, box.ai_defense = False, {"enabled": True, "api_key": True}
+
+        real_app = box.app
+        box.app = lambda method, path, headers, body: ((404, {"detail": "Not Found"}) if path == "/api/incident/status"
+                                                       else real_app(method, path, headers, body))
+        rc, out = run_cli(world, tmp, "status", "--only", "1")
+        check("an endpoint the box does not answer: FAIL with the path and status",
+              rc == 1 and "FAIL     toggles      cannot read the box's Demo Controls state (/api/incident/status: "
+                          "HTTP 404)" in out, _row(out, "toggles") or out)
+        box.app = lambda method, path, headers, body: ((200, {"integrations": {"splunk_o11y": []}})
+                                                       if path == "/api/settings/integrations"
+                                                       else real_app(method, path, headers, body))
+        rc, out = run_cli(world, tmp, "status", "--only", "1")
+        check("an integrations answer without the Cisco AI Defense card: FAIL, saying so",
+              rc == 1 and "cannot read the box's Demo Controls state (/api/settings/integrations has no Cisco AI "
+                          "Defense card)" in out, _row(out, "toggles") or out)
+        box.app = real_app
+
+        world.prompt = lambda text: "wrong-password-123"
+        rc, out = run_cli(world, tmp, "status", "--only", "1")
+        check("no SSH (so no ACCESS_KEY): SKIP, like duo_signin",
+              "SKIP     toggles      needs the box's ACCESS_KEY (SSH was not available)" in out, out)
+        del world.prompt                                  # back to the suite's prompt
+        rec_id = next(k for k, r in world.cf.records.items() if r["name"] == "l5-acme-01.pseudocoassistant.com")
+        record = world.cf.records.pop(rec_id)
+        rc, out = run_cli(world, tmp, "status", "--only", "1")
+        check("a box that does not answer through its public name: SKIP, pointing at the dns and https rows",
+              "SKIP     toggles      https://l5-acme-01.pseudocoassistant.com does not answer (see the dns and "
+              "https rows)" in out, out)
+        world.cf.records[rec_id] = record
+        logs = "".join(p.read_text() for p in (tmp / "state").rglob("*.log"))
+        leaked = [s for s in all_secrets(world) if s in out + logs]
+        check("no secret in the output or the run log (the access key goes only in a header)", not leaked, str(leaked))
+
+
 def main() -> int:
     for test in (test_envfile, test_check_is_read_only, test_up_status_down, test_refusals, test_cii_token,
+                 test_lab_end, test_status_controls_check, test_status_toggles,
                  test_down_without_record, test_preflight_gate_and_unreachable, test_failed_up_resumes,
                  test_wrong_password_and_cli, test_down_failures_are_failures, test_identity_values_and_rollback,
                  test_diff_on_long_env,
