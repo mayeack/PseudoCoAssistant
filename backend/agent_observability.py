@@ -553,11 +553,50 @@ def _build_logger(stream: str):
     if sdk_log.level == logging.NOTSET or sdk_log.level > logging.WARNING:
         sdk_log.setLevel(logging.WARNING)
     from splunk_ao import SplunkAOLogger  # lazy: keeps the module importable without the package
+    _tolerate_unknown_user_roles()
     project = os.getenv("SPLUNK_AO_PROJECT") or _DEFAULT_PROJECT
     sink = _bounded_sink(project, stream)
     if sink is None:                      # SDK shape drifted; unbounded but working
         return SplunkAOLogger(project=project, agent_stream=stream)
     return SplunkAOLogger(project=project, agent_stream=stream, _sink=sink)
+
+
+def _tolerate_unknown_user_roles() -> None:
+    """Let the SDK parse a user role it has never heard of instead of raising.
+
+    ``start_session`` first looks the project up, and the generated client parses
+    every run's ``creator`` into ``UserDB``, whose ``role`` goes through the strict
+    str-enum ``UserRole(value)``. When Agent Observability starts returning a role
+    the installed SDK predates, that lookup raises ``ValueError: '<role>' is not a
+    valid UserRole`` and every turn loses its session. It happened with
+    ``capability_based`` (splunk-ao 0.4.0; added in 0.7.0) and again with
+    ``org_annotator`` (added in 0.8.0); the enum grows whenever the org's RBAC does.
+
+    The role is never read on this path, so an unknown value becomes a pseudo-member
+    that keeps its wire value (``str(role)`` is still ``'capability_based'``).
+    Known values are untouched. Idempotent, and silent if the SDK's model layout
+    moves: the cost of drift is only the old warning, never a failed build.
+    """
+    try:
+        from splunk_ao.resources.models.user_role import UserRole
+    except Exception:  # noqa: BLE001 - layout drifted; sessions just keep their old behaviour
+        return
+    if getattr(UserRole, "_pseudoco_tolerant", False):
+        return
+
+    def _missing_(cls, value):
+        if not isinstance(value, str):
+            return None
+        member = str.__new__(cls, value)
+        member._name_ = value.upper()
+        member._value_ = value
+        return member
+
+    try:
+        UserRole._missing_ = classmethod(_missing_)
+        UserRole._pseudoco_tolerant = True
+    except Exception:  # noqa: BLE001
+        logger.debug("agent observability: could not relax UserRole parsing", exc_info=True)
 
 
 def _bounded_sink(project: str, stream: str):
@@ -577,7 +616,8 @@ def _bounded_sink(project: str, stream: str):
     numbers here.
 
     ``_sink`` is the constructor's injection seam; the three builders below are
-    public module functions in splunk-ao 0.4.0. Returns None (and warns once) if
+    public module functions in splunk-ao 0.4.0 through 0.8.0 (signatures unchanged
+    across that range). Returns None (and warns once) if
     any of that drifts, so a future SDK loses the bound but never loses emission.
 
     NOTE for reviewers: this is deliberately NOT a timeout on

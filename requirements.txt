@@ -76,7 +76,7 @@ opentelemetry-instrumentation-fastapi==0.59b0
 # (backend/agent_observability.py); the collector overlay
 # (otel-collector-agent-obs.yaml) fans the raw gen_ai spans to the same project.
 # Both are a no-op without SPLUNK_AO_O11Y_TOKEN + SPLUNK_AO_REALM.
-splunk-ao==0.4.0
+splunk-ao==0.8.0   # 0.7.0 added the capability_based user role (0.4.0 raised on it and lost every AO session); 0.8.0 adds org_annotator. Not on the Artifactory mirror: pip install --index-url https://pypi.org/simple
 galileo-core==4.5.0     # splunk-ao needs >=4.4,<5; galileo 2.3.0 accepts >=4.3,<5
 
 # LEGACY — Galileo eval scripts only (scripts/demo/galileo_*.py,

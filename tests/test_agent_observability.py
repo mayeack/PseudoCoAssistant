@@ -913,6 +913,92 @@ except Exception:
     check("shutdown is idempotent", False)
 _disable()
 
+# ---- 11b. a user role the SDK predates must not cost the session ------------
+# 2026-11: AO started returning creator.role "capability_based"; splunk-ao 0.4.0's
+# strict UserRole enum raised inside start_session's project lookup and every turn
+# was logged without a session. The guard turns an unknown role into a pseudo-member.
+print("\n[11b] unknown user roles")
+
+
+class _StrictUserRole(str, _enum.Enum):       # splunk-ao 0.4.0's enum, verbatim values
+    ADMIN = "admin"
+    MANAGER = "manager"
+    READ_ONLY = "read_only"
+    USER = "user"
+
+    def __str__(self) -> str:
+        return str(self.value)
+
+
+_sdk_resources = types.ModuleType("splunk_ao.resources")
+_sdk_models = types.ModuleType("splunk_ao.resources.models")
+_sdk_user_role = types.ModuleType("splunk_ao.resources.models.user_role")
+_sdk_user_role.UserRole = _StrictUserRole
+for _name, _mod in (("splunk_ao.resources", _sdk_resources), ("splunk_ao.resources.models", _sdk_models),
+                    ("splunk_ao.resources.models.user_role", _sdk_user_role)):
+    sys.modules[_name] = _mod
+try:
+    _StrictUserRole("capability_based")
+    check("precondition: the strict enum rejects capability_based", False)
+except ValueError:
+    check("precondition: the strict enum rejects capability_based", True)
+ao._tolerate_unknown_user_roles()
+ao._tolerate_unknown_user_roles()                # idempotent
+_cb = _StrictUserRole("capability_based")
+check("an unknown role parses and keeps its wire value",
+      isinstance(_cb, _StrictUserRole) and _cb.value == "capability_based" and str(_cb) == "capability_based"
+      and _cb == "capability_based")
+check("a role no SDK has seen yet parses too", _StrictUserRole("some_future_role").value == "some_future_role")
+check("known roles still resolve to the real members",
+      _StrictUserRole("admin") is _StrictUserRole.ADMIN and _StrictUserRole("read_only") is _StrictUserRole.READ_ONLY)
+try:
+    _StrictUserRole(42)
+    check("a non-string role is still rejected", False)
+except ValueError:
+    check("a non-string role is still rejected", True)
+_fresh()
+_enable()
+_StrictUserRole._pseudoco_tolerant = False       # prove the build path applies it
+del _StrictUserRole._missing_
+ao.maybe_log_turn(_turn())
+ao._drain_for_tests(5.0)
+check("building the logger applies the guard before any session call",
+      getattr(_StrictUserRole, "_pseudoco_tolerant", False)
+      and _StrictUserRole("capability_based").value == "capability_based")
+_disable()
+for _name in ("splunk_ao.resources.models.user_role", "splunk_ao.resources.models", "splunk_ao.resources"):
+    del sys.modules[_name]
+check("the guard is silent when the SDK's model layout moves",
+      ao._tolerate_unknown_user_roles() is None)
+
+# Against the REAL installed SDK (a child process, so the fakes above don't
+# shadow it): the exact parse that failed, UserDB.from_dict with that role.
+import subprocess  # noqa: E402
+_probe = r'''
+import sys
+sys.path.insert(0, sys.argv[1])
+try:
+    from splunk_ao.resources.models.user_db import UserDB
+except Exception as e:
+    print("SKIP", type(e).__name__); raise SystemExit(0)
+from backend import agent_observability as ao
+ao._tolerate_unknown_user_roles()
+base = {"id": "00000000-0000-0000-0000-000000000000", "email": "x@y.invalid",
+        "organization_id": "00000000-0000-0000-0000-000000000000", "organization_name": "o",
+        "created_at": "2026-11-17T00:00:00+00:00", "updated_at": "2026-11-17T00:00:00+00:00"}
+roles = [str(UserDB.from_dict(dict(base, role=r)).role) for r in ("capability_based", "org_annotator", "admin")]
+print("OK", ",".join(roles))
+'''
+_res = subprocess.run([sys.executable, "-c", _probe, str(ROOT)], capture_output=True, text=True, timeout=60)
+_out = (_res.stdout or "").strip().splitlines()[-1:] or [""]
+if _out[0].startswith("SKIP"):
+    print(f"  SKIP  real-SDK UserDB parse (splunk_ao not installed: {_out[0]})")
+else:
+    check("the real SDK's UserDB.from_dict accepts capability_based / org_annotator after the guard",
+          _res.returncode == 0 and _out[0] == "OK capability_based,org_annotator,admin")
+    if _res.returncode != 0:
+        print(_res.stderr[-800:])
+
 # ---- 12. wiring presence (export paths) ------------------------------------
 print("\n[12] wiring")
 collector = (ROOT / "otel-collector-config.yaml").read_text()
