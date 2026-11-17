@@ -22,7 +22,10 @@ stack:
 room:
   victim: avery.kim          # on every box's IDENTITY_ALLOWED_USERS
   fallback: jordan.reyes     # untouched; to swap, set victim: jordan.reyes and re-run up
-  trusted: [marcus.bell, elena.sousa, grace.lin]
+  trusted: [marcus.bell, elena.sousa, grace.lin]   # the controls: status checks each box's gate allows them
+  # When the lab ends, in UTC (keep the Z). Set, `status` fails a box whose CII
+  # token runs out before this plus 1 hour; unset, it warns below 8 h left.
+  # lab_end: 2026-11-24T23:00:00Z
 
 # Participant accounts (plan 12.2): `up` creates Duo user l5-<workshop>-<nn> for
 # each box (CII Read-Only + group l5-<workshop>, one HOTP token, 10 passcodes on

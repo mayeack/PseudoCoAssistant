@@ -49,6 +49,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -86,8 +87,11 @@ CII_CLIENT_KEYS = ("CII_CLIENT_ID", "CII_CLIENT_SECRET", "CII_TOKEN_URL")
 # `up` and `cii-token` keep a box's token while it has this long left; a CII
 # token lasts 24 h, so one minted the day before runs out on lab day.
 TOKEN_KEEP_S = 20 * 3600.0
-# `status` warns below this: less than a lab day.
+# `status` warns below this: less than a lab day (without `room.lab_end`).
 TOKEN_WARN_S = 8 * 3600.0
+# With `room.lab_end`, `status` fails a box whose token runs out before the lab
+# ends plus this margin (the debrief and a late finish).
+LAB_END_MARGIN_S = 3600.0
 IDENTITY_KEYS = {"session_ttl_minutes": "IDENTITY_SESSION_TTL_MINUTES",
                  "status_ttl_seconds": "IDENTITY_STATUS_TTL_SECONDS",
                  "fail_open": "IDENTITY_FAIL_OPEN"}
@@ -211,6 +215,7 @@ class Workshop:
     email_domain: str = ""             # participant emails; the zone when empty
     personas_file: str = ""            # the cast: expire never touches it, up only adds the room's bypass codes
     bypass_codes: bypass.Settings = field(default_factory=bypass.Settings)   # 4.3: persona codes per card
+    lab_end: Optional[float] = None    # room.lab_end, epoch seconds (UTC): the CII token must outlast it
 
     def tunnel_name(self, box: BoxSpec) -> str:
         return f"l5-{self.name}-{box.nn}"
@@ -222,6 +227,33 @@ class Workshop:
 def _require(cond: bool, msg: str) -> None:
     if not cond:
         raise Lab5Error(f"workshop.yaml: {msg}")
+
+
+_LAB_END_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2})?(?:Z|\+00:00)$")
+_LAB_END_HINT = "an ISO-8601 UTC time such as 2026-11-24T23:00:00Z"
+
+
+def lab_end_value(value: Any) -> Optional[float]:
+    """workshop.yaml `room.lab_end`: when the lab ends, in UTC, as epoch
+    seconds (None when unset). A quoted string and the timestamp YAML reads
+    from an unquoted one are both accepted, but only with an explicit UTC
+    designator (Z or +00:00): a bare time could be anyone's local time."""
+    if value is None or value == "":
+        return None
+    shown = value.isoformat() if isinstance(value, date) else repr(value)
+    _require(not isinstance(value, date) or isinstance(value, datetime),
+             f"`room.lab_end` needs the time of day as well as the date: {_LAB_END_HINT}, not {shown}")
+    when: Optional[datetime] = value if isinstance(value, datetime) else None
+    if isinstance(value, str) and _LAB_END_RE.match(value.strip()):
+        try:
+            when = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:          # a month 13, a 25th hour
+            when = None
+    _require(when is not None, f"`room.lab_end` must be {_LAB_END_HINT}, not {shown}")
+    offset = when.utcoffset()
+    _require(offset is not None, f"`room.lab_end` must be {_LAB_END_HINT}, not {shown} (add Z: the time is UTC)")
+    _require(offset == timedelta(0), f"`room.lab_end` must be in UTC (Z or +00:00): {_LAB_END_HINT}, not {shown}")
+    return when.astimezone(timezone.utc).timestamp()
 
 
 def workshop_from_dict(doc: Dict[str, Any]) -> Workshop:
@@ -241,6 +273,7 @@ def workshop_from_dict(doc: Dict[str, Any]) -> Workshop:
     for user in trusted + ([fallback] if fallback else []):
         _require(bool(_USER_RE.match(user)), f"persona username {user!r} is not valid")
     _require(victim not in trusted, "the victim cannot also be a trusted persona")
+    lab_end = lab_end_value(room.get("lab_end"))
 
     defaults = doc.get("defaults") or {}
     boxes: List[BoxSpec] = []
@@ -297,6 +330,7 @@ def workshop_from_dict(doc: Dict[str, Any]) -> Workshop:
         participants_enabled=enabled, cii_url=cii_url, email_domain=email_domain,
         personas_file=str(doc.get("personas_file") or ""),
         bypass_codes=bypass_settings(doc.get("bypass_codes")),
+        lab_end=lab_end,
     )
 
 
@@ -458,9 +492,9 @@ def revoke_codes(ctx: "Ctx", deps: "Deps", numbers: Sequence[str]) -> List[str]:
 
 # Runs on the box with its own venv, code and .env (the Status keys and the CII
 # access token `up` wrote there): the gate's own lookup and decision for one
-# username, as JSON. Read-only (a Duo Admin API GET and a CII query with the
-# pushed token: no token is minted); it prints fixed-vocabulary codes, never
-# a key, URL or answer body.
+# username, as JSON: the room's victim, then each control. Read-only (a Duo
+# Admin API GET and a CII query with the pushed token: no token is minted); it
+# prints fixed-vocabulary codes, never a key, URL or answer body.
 VICTIM_CHECK_SCRIPT = b"""\
 import json, os, sys
 checkout, user = sys.argv[1], sys.argv[2]
@@ -516,9 +550,51 @@ _TEMPORARY_REASONS = frozenset({"duo_locked_out"})
 _WHILE_LOCKED = "only while Duo's lockout lasts (Duo unlocks the account on its own in about 15 minutes)"
 
 
-def victim_check_command(box: BoxSpec, victim: str) -> Tuple[List[str], bytes]:
-    """The box's own interpreter, isolated, with the script on stdin."""
-    return [f"{box.checkout}/venv/bin/python", "-I", "-", box.checkout, victim], VICTIM_CHECK_SCRIPT
+def victim_check_command(box: BoxSpec, user: str) -> Tuple[List[str], bytes]:
+    """The box's own interpreter, isolated, with the script on stdin, for one
+    username (the victim's or a control's)."""
+    return [f"{box.checkout}/venv/bin/python", "-I", "-", box.checkout, user], VICTIM_CHECK_SCRIPT
+
+
+def gate_answer(box: BoxSpec, rem: Any, user: str, what: str,
+                who: str) -> Tuple[Optional[Dict[str, Any]], Optional[Tuple[str, str]]]:
+    """Run VICTIM_CHECK_SCRIPT on the box for ``user``: its answer, or the
+    FAIL (status, detail) when it gave none. Such a failure is the box's (no
+    venv, a release without the gate, a .env without the keys), never the
+    user's. ``what`` names the check ("victim", "control"), ``who`` whom the
+    gate cannot check."""
+    argv, script = victim_check_command(box, user)
+    try:
+        res = rem.run(argv, stdin=script, timeout=60.0)
+    except Lab5Error as exc:
+        return None, ("FAIL", f"the {what} self-check could not run on the box ({exc})")
+    lines = [line for line in (res.out or "").splitlines() if line.strip()]
+    try:
+        answer = json.loads(lines[-1]) if res.rc == 0 and lines else None
+    except ValueError:
+        answer = None
+    if not isinstance(answer, dict):
+        tail = ((res.err or "").strip().splitlines() or ["no answer"])[-1][:200]
+        return None, ("FAIL", f"the {what} self-check did not run on the box (exit {res.rc}: {tail})")
+    missing = [name for name, key in (("Duo Status keys", "duo_configured"), ("CII API client", "cii_configured"))
+               if not answer.get(key)]
+    if missing:
+        return None, ("FAIL", f"the box's .env has no {' or '.join(missing)} (DUO_ENABLED, DUO_ADMIN_*, CII_*): the "
+                              f"gate cannot check {who}; re-run up")
+    return answer, None
+
+
+def unanswered(answer: Dict[str, Any]) -> Tuple[List[str], str, List[str]]:
+    """The sources that did not answer about the user, what each said, and
+    what to check for them (`_source_fix`; Duo's Status keys when no fix is
+    named). CII not asked for want of a login (``no_login``) needs no fix of
+    its own: Duo's covers it."""
+    sources = answer.get("sources") or {}
+    errors = answer.get("errors") or {}
+    down = [k for k in ("duo", "cii") if sources.get(k) not in ("ok", "not_found")]
+    said = ", ".join(f"{k} {errors.get(k) or sources.get(k) or 'no answer'}" for k in down)
+    fixes = [_source_fix(k, errors.get(k)) for k in down if not (k == "cii" and errors.get("cii") == "no_login")]
+    return down, said, (fixes or [_SOURCE_FIX["duo"]]) if down else []
 
 
 def victim_blocked(ctx: "Ctx", box: BoxSpec, rem: Any) -> Tuple[str, str]:
@@ -537,43 +613,26 @@ def victim_blocked(ctx: "Ctx", box: BoxSpec, rem: Any) -> Tuple[str, str]:
     account on its own in about 15 minutes, and the gate then decides
     without it."""
     victim = ctx.ws.victim
-    argv, script = victim_check_command(box, victim)
-    try:
-        res = rem.run(argv, stdin=script, timeout=60.0)
-    except Lab5Error as exc:
-        return "FAIL", f"the victim self-check could not run on the box ({exc})"
-    lines = [line for line in (res.out or "").splitlines() if line.strip()]
-    try:
-        answer = json.loads(lines[-1]) if res.rc == 0 and lines else None
-    except ValueError:
-        answer = None
-    if not isinstance(answer, dict):
-        tail = ((res.err or "").strip().splitlines() or ["no answer"])[-1][:200]
-        return "FAIL", f"the victim self-check did not run on the box (exit {res.rc}: {tail})"
-    missing = [name for name, key in (("Duo Status keys", "duo_configured"), ("CII API client", "cii_configured"))
-               if not answer.get(key)]
-    if missing:
-        return "FAIL", (f"the box's .env has no {' or '.join(missing)} (DUO_ENABLED, DUO_ADMIN_*, CII_*): the gate "
-                        f"cannot check {victim}; re-run up")
+    answer, error = gate_answer(box, rem, victim, "victim", victim)
+    if answer is None:
+        return error
     sources = answer.get("sources") or {}
-    errors = answer.get("errors") or {}
-    down = [k for k in ("duo", "cii") if sources.get(k) not in ("ok", "not_found")]
+    down, said, fix_list = unanswered(answer)
+    fixes = "; ".join(fix_list)
     if sources.get("duo") == "not_found":
         return "FAIL", f"Duo has no user {victim}: provision the cast (scripts/identity/provision_personas.py)"
-    said = ", ".join(f"{k} {errors.get(k) or sources.get(k) or 'no answer'}" for k in down)
-    fixes = "; ".join(_source_fix(k, errors.get(k)) for k in down if not (k == "cii" and errors.get("cii") == "no_login"))
     reasons = list(answer.get("reasons") or [])
     blocked = answer.get("verdict") == "block"
     if blocked and any(r not in _TEMPORARY_REASONS for r in reasons):
         contained = " (contained: its Duo account is disabled)" if "duo_disabled" in reasons else ""
         partial = (f"; {said} did not answer in full, so the block rests on what was learned "
-                   f"(check {fixes or _SOURCE_FIX['duo']})" if down else "")
+                   f"(check {fixes})" if down else "")
         return "OK", f"the box's Identity Risk Gate blocks {victim}: {', '.join(reasons)}{contained}{partial}"
     if down:
         now = f"its gate blocks the victim {_WHILE_LOCKED}; then, " if blocked else ""
         return "FAIL", (f"the box cannot verify {victim} ({said}): {now}with IDENTITY_FAIL_OPEN on, "
                         f"{'it' if blocked else 'its gate'} would let the victim chat. "
-                        f"Check {fixes or _SOURCE_FIX['duo']}")
+                        f"Check {fixes}")
     trust = answer.get("trust_level") or ("no record in CII yet" if sources.get("cii") == "not_found" else "unknown")
     checks = ", ".join(answer.get("failing_checks") or []) or "none"
     now = (f"blocks {victim} ({', '.join(reasons)}) {_WHILE_LOCKED}; then it would let it chat"
@@ -583,9 +642,93 @@ def victim_blocked(ctx: "Ctx", box: BoxSpec, rem: Any) -> Tuple[str, str]:
                     "Impossible Travel")
 
 
+# The CII checks the gate blocks on, matched as backend/services/identity_gate
+# matches them: the check name with everything but letters and digits removed.
+_BLOCKING_CHECKS = {"mfaflood": "mfa_flood", "impossibletravel": "impossible_travel"}
+# The plan's fallback negative control (S1) when the room's control is refused.
+FALLBACK_CONTROL = "elena.sousa"
+
+
+def control_refusals(answer: Dict[str, Any]) -> List[str]:
+    """Why the box's gate refuses a control, from its self-check answer: the
+    gate's own reasons, plus an UNTRUSTED trust level and a failing check
+    the gate blocks on, should a release's gate leave either out."""
+    reasons = [str(r) for r in answer.get("reasons") or []]
+    if str(answer.get("trust_level") or "").upper() == "UNTRUSTED" and "trust_untrusted" not in reasons:
+        reasons.append("trust_untrusted")
+    for check in answer.get("failing_checks") or []:
+        flat = re.sub(r"[^a-z0-9]", "", str(check).lower())
+        for needle, reason in _BLOCKING_CHECKS.items():
+            if needle in flat and reason not in reasons:
+                reasons.append(reason)
+    if answer.get("verdict") == "block" and not reasons:
+        reasons.append("blocked")
+    return reasons
+
+
+def controls_allowed(ctx: "Ctx", box: BoxSpec, rem: Any) -> Tuple[str, str]:
+    """`status` per box, the S1 control criterion: does this box's Identity
+    Risk Gate let every control (`room.trusted`) chat? The victim's
+    self-check, once per control. OK when each is allowed: verdict allow,
+    trust not UNTRUSTED, no failing check the gate blocks on (MFA Flood,
+    Impossible Travel). FAIL naming each control the gate would block, with
+    its reasons: a refused control breaks the S1 negative-control scenario
+    (the plan's fallback is FALLBACK_CONTROL). WARN naming each control a
+    source could not answer for, and what did not answer: with
+    IDENTITY_FAIL_OPEN on (the default) the gate lets it chat unverified;
+    with `identity.fail_open: false` the gate refuses it, so FAIL. A failed
+    self-check is the box's, so the first one ends the row."""
+    ws = ctx.ws
+    fail_open = ws.identity.get("IDENTITY_FAIL_OPEN") != "false"
+    refused: List[str] = []
+    unverified: List[str] = []
+    fixes: List[str] = []
+    allowed: List[str] = []
+    for user in ws.trusted:
+        answer, error = gate_answer(box, rem, user, "control", f"the controls ({', '.join(ws.trusted)})")
+        if answer is None:
+            return error
+        sources = answer.get("sources") or {}
+        reasons = control_refusals(answer)
+        down, said, fix = unanswered(answer)
+        if reasons:
+            notes = []
+            if all(r in _TEMPORARY_REASONS for r in reasons):
+                notes.append(_WHILE_LOCKED)
+            if sources.get("duo") == "not_found":
+                notes.append("provision the cast: scripts/identity/provision_personas.py")
+            refused.append(f"{user} ({', '.join(reasons)}{''.join('; ' + n for n in notes)})")
+        elif down:
+            unverified.append(f"{user} ({said})")
+            fixes += [one for one in fix if one not in fixes]
+        else:
+            allowed.append(f"{user} (no record in CII yet)" if sources.get("cii") == "not_found" else user)
+    check = "; ".join(fixes)
+    if refused or (unverified and not fail_open):
+        parts = []
+        if refused:
+            fallback = (f"the plan's fallback, {FALLBACK_CONTROL}, is refused too: check the controls' CII exclusions"
+                        if any(r.startswith(FALLBACK_CONTROL + " ") for r in refused)
+                        else f"the plan's fallback control is {FALLBACK_CONTROL}")
+            parts.append(f"the box's Identity Risk Gate would block {len(refused)} control(s): {', '.join(refused)}. "
+                         f"A control the gate refuses breaks the S1 negative-control scenario ({fallback})")
+        if unverified:
+            closed = " and with IDENTITY_FAIL_OPEN off its gate refuses them" if not fail_open else ""
+            parts.append(f"the box cannot verify {', '.join(unverified)}{closed}. Check {check}")
+        return "FAIL", "; ".join(parts)
+    if unverified:
+        return "WARN", (f"the box cannot verify {len(unverified)} control(s): {', '.join(unverified)}. With "
+                        "IDENTITY_FAIL_OPEN on its gate lets them chat unverified, so the S1 control proves nothing "
+                        f"there. Check {check}")
+    return "OK", (f"the box's Identity Risk Gate allows every control: {', '.join(allowed)} (none UNTRUSTED or "
+                  "failing MFA Flood or Impossible Travel)")
+
+
 def room_checks(ctx: "Ctx") -> List[Tuple[str, str, str]]:
-    return [("SKIP", "room", "the victim's events in the stack: waits on the S1 decision (12.4); whether each box's "
-                             "gate blocks the victim is its `victim` row")]
+    return [("SKIP", "room", "the victim's events in the room's Splunk stack: this needs the stack's search "
+                             "credentials, which lab5-setup does not hold, so check them in the stack itself. Each "
+                             "box's `victim` row says whether its gate blocks the victim, and its `controls` row "
+                             "whether it allows every control")]
 
 
 # =========================================================================== runtime
@@ -707,10 +850,14 @@ def box_cii_token(env_text: Optional[str]) -> Tuple[Optional[str], Optional[floa
     return token, (cii.jwt_expiry(token) if token else None)
 
 
+def utc_text(when: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(when))
+
+
 def token_left(expires: Optional[float], now: float) -> str:
     if expires is None:
         return "no expiry written in it"
-    when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(expires))
+    when = utc_text(expires)
     hours = (expires - now) / 3600.0
     return f"expired {when}" if hours <= 0 else f"{hours:.1f} h left, until {when}"
 
@@ -739,7 +886,9 @@ def token_plan_row(ctx: "Ctx", current: Optional[str], expires: Optional[float])
 
 
 def token_status_row(ctx: "Ctx", env_text: Optional[str]) -> Tuple[str, str, str]:
-    """`status`: will the box's gate be able to ask CII through the lab?"""
+    """`status`: will the box's gate be able to ask CII through the lab? With
+    `room.lab_end` the token must outlast the lab's end plus LAB_END_MARGIN_S
+    (FAIL otherwise); without it, WARN below TOKEN_WARN_S. Never the token."""
     now = ctx.now()
     current, expires = box_cii_token(env_text)
     if not current:
@@ -751,6 +900,13 @@ def token_status_row(ctx: "Ctx", env_text: Optional[str]) -> Tuple[str, str, str
         return "OK", "CII token", token_left(expires, now)
     if expires <= now:
         return "FAIL", "CII token", f"{token_left(expires, now)}: the gate cannot ask CII; run cii-token"
+    lab_end = ctx.ws.lab_end
+    if lab_end is not None:
+        need = lab_end + LAB_END_MARGIN_S
+        if expires < need:
+            return "FAIL", "CII token", (f"{token_left(expires, now)}: expires before the lab ends plus 1 hour "
+                                         f"(room.lab_end {utc_text(lab_end)}): run cii-token on the morning of the lab")
+        return "OK", "CII token", f"{token_left(expires, now)}: lasts past the lab's end plus 1 hour ({utc_text(need)})"
     if expires - now < TOKEN_WARN_S:
         return "WARN", "CII token", f"{token_left(expires, now)}: less than a lab day; run cii-token before the lab"
     return "OK", "CII token", token_left(expires, now)
@@ -1161,6 +1317,60 @@ def preflight(ctx: Ctx, box: BoxSpec, key: Optional[str], rep: BoxReport, wait: 
         rep.add(*row)
 
 
+def _get_json(ctx: Ctx, host: str, path: str, key: str) -> Dict[str, Any]:
+    status, body = ctx.https("GET", f"https://{host}{path}", {"X-Access-Key": key} if key else {})
+    if status != 200:
+        raise Lab5Error(f"{path}: HTTP {status}")
+    doc = json.loads(body or b"{}")
+    if not isinstance(doc, dict):
+        raise Lab5Error(f"{path}: not a JSON object")
+    return doc
+
+
+def toggles_row(ctx: Ctx, host: str, key: Optional[str], reachable: bool) -> Tuple[str, str, str]:
+    """`status` (T-0): the two box states Lab 5 needs, read through the
+    public name with the box's ACCESS_KEY, as the Demo Controls page reads
+    them. Trigger Demo Incident off (GET /api/incident/status: its synthetic
+    incident would crowd the room stack), and Cisco AI Defense configured
+    (GET /api/settings/integrations: its Enabled switch on and an inspection
+    key present, which is what the app's client checks; the spray's AI
+    Defense blocks are what the Lab 5 join finds, claim 3). Both are GETs
+    that change nothing, and the integrations answer reports a key's
+    presence, never its value. The per-chat Cisco AI Defense toggle lives
+    in each browser (it starts off on a new origin), so no box can say."""
+    if key is None:
+        return "SKIP", "toggles", "needs the box's ACCESS_KEY (SSH was not available)"
+    if not reachable:
+        return "SKIP", "toggles", f"https://{host} does not answer (see the dns and https rows)"
+    problems: List[str] = []
+    try:
+        incident = _get_json(ctx, host, "/api/incident/status", key)
+        if incident.get("active"):
+            left = incident.get("remaining_s")
+            problems.append("Trigger Demo Incident is running" + (f" ({left} s left)" if isinstance(left, int) else "")
+                            + ": turn it off in the instance's Demo Controls (its synthetic incident would crowd "
+                            "the room stack)")
+        cards = _get_json(ctx, host, "/api/settings/integrations", key).get("integrations")
+        card = cards.get("ai_defense") if isinstance(cards, dict) else None
+        fields = {str(f.get("key")): f for f in (card if isinstance(card, list) else []) if isinstance(f, dict)}
+        if not fields:
+            raise Lab5Error("/api/settings/integrations has no Cisco AI Defense card")
+        missing = []
+        if str((fields.get("enabled") or {}).get("value")).lower() != "true":
+            missing.append("its Enabled switch is off")
+        if not (fields.get("api_key") or {}).get("present"):
+            missing.append("it has no inspection API key")
+        if missing:
+            problems.append(f"Cisco AI Defense is not configured on the box ({' and '.join(missing)}): set it on the "
+                            "Settings page's Cisco AI Defense card; without it the spray makes no AI Defense blocks "
+                            "for the Lab 5 join (claim 3)")
+    except (Lab5Error, ValueError, http.client.HTTPException) as exc:
+        return "FAIL", "toggles", f"cannot read the box's Demo Controls state ({exc})"
+    if problems:
+        return "FAIL", "toggles", "; ".join(problems)
+    return "OK", "toggles", "Trigger Demo Incident off; Cisco AI Defense configured (Enabled, inspection key set)"
+
+
 def up_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
     ws = ctx.ws
     rep = BoxReport(box, ws.hostname(box))
@@ -1322,11 +1532,15 @@ def status_box(ctx: Ctx, box: BoxSpec) -> BoxReport:
             rep.add("OK" if hosts == [rep.hostname] else "WARN", "HEC host", ", ".join(hosts) or "no room destination")
             v_status, v_detail = victim_blocked(ctx, box, rem)
             rep.add(v_status, "victim", v_detail)
+            c_status, c_detail = controls_allowed(ctx, box, rem)
+            rep.add(c_status, "controls", c_detail)
         except Lab5Error as exc:
             rep.add("FAIL", "status", str(exc))
         finally:
             rem.close()
     preflight(ctx, box, key, rep, wait=False)
+    reachable = not any(status == "FAIL" and name in ("dns", "https") for status, name, _ in rep.steps)
+    rep.add(*toggles_row(ctx, rep.hostname, key, reachable))
     return rep
 
 
