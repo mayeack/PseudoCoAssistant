@@ -174,7 +174,37 @@ def run(check, sched, THEMES, slots, NOW, TZ):
         p = out["scheduling"]
         check("book: name unknown -> awaiting_name with the slot pending",
               p["state"] == "awaiting_name" and p["pending"] == {"awaiting": "name", "slot_id": slots[1].slot_id} and fake.calls == [])
-        check("book: single-agent appends the ask-name copy when the model omitted it", med.render("ask_name") in out["final_message"])
+        check("book: single-agent appends the ask-name copy when the model omitted it",
+              med.render("ask_name", label=slots[1].label) in out["final_message"], out["final_message"])
+        # The reported turn (2026-11-17): a slot chip on a browser with no saved
+        # name. The domain agent was never told the time, wrote "click the
+        # button above", and the "name" in its text passed the check.
+        chip = {"action": "book", "slot_id": slots[1].slot_id, "page": 0}
+        chip_hist = [{"role": "user", "content": "Schedule an appointment for me"}, assistant(offered_meta)]
+        s = base_state(scheduling_action=chip, conversation_history=chip_hist,
+                       user_message=f"Book {slots[1].label}")
+        s.update(node_mod.scheduling_intake_node(s))
+        d = s["scheduling_directive"]
+        check("name step: the directive names the picked time", f"picked: {slots[1].label}" in d, d)
+        check("name step: the directive says it is held, not booked, and that the user types the name",
+              "NOT booked" in d and "no button" in d, d)
+        bad = ("Book your appointment by clicking the button above.\n"
+               "Please provide the name you'd like to use for this booking.")
+        _, out = turn(scheduling_action=chip, conversation_history=chip_hist,
+                      user_message=f"Book {slots[1].label}", final_message=bad)
+        check("name step: a reply without the held time is replaced by the copy",
+              out.get("final_message") == med.render("ask_name", label=slots[1].label)
+              and out["scheduling"]["state"] == "awaiting_name" and fake.calls == [], str(out.get("final_message")))
+        good = f"I'm holding {slots[1].label} for your follow-up visit. What name should I put it under?"
+        _, out = turn(scheduling_action=chip, conversation_history=chip_hist,
+                      user_message=f"Book {slots[1].label}", final_message=good)
+        check("name step: a reply that says the time and asks for the name is kept", "final_message" not in out,
+              str(out.get("final_message")))
+        _, out = turn(scheduling_action=chip, conversation_history=chip_hist, multi_agent_mode=True,
+                      user_message=f"Book {slots[1].label}", final_message="Acknowledged.")
+        check("name step (Multi-Agent): wording without the held time falls back to the copy",
+              out["final_message"] == med.render("ask_name", label=slots[1].label)
+              and out["agent_trace"][-1]["name"] == "medadvice_scheduling_agent", str(out.get("final_message")))
         # The reported bug: "Saturday at 8am" against Friday/Monday slots used to
         # book the matching clock time on the WRONG day. Now it asks.
         s, out = turn(conversation_history=[{"role": "user", "content": "q"}, assistant(offered_meta),

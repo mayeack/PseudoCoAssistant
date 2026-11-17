@@ -79,7 +79,7 @@ SCHEDULING = SchedulingProfile(
     clarify_slot="Just so I send the technician at the right time — did you mean one of these?",
     day_unavailable=("I don't have {day} arrival windows — technician visits run {days}. "
                      "Here are the closest:"),
-    ask_name="Got it — whose name should the visit be under?",
+    ask_name="Got it — I'm holding the {label} window. Whose name should the visit be under?",
     confirmed=(
         "You're all set: a technician will arrive {label}, booked under {name}. "
         "Please make sure someone 18+ is home."

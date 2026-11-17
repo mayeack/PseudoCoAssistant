@@ -80,7 +80,7 @@ SCHEDULING = SchedulingProfile(
     offer=("Want me to book a maintenance technician to inspect the equipment? "
            "Here are the next available slots:"),
     choose="Here are the next maintenance technician slots:",
-    ask_name="Got it — whose name should the maintenance visit be under?",
+    ask_name="Got it — I'm holding {label}. Whose name should the maintenance visit be under?",
     confirmed=(
         "You're booked: {label} — maintenance technician visit, under {name}. "
         "Keep the equipment locked out and tagged until they arrive."

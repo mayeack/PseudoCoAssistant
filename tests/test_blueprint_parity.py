@@ -527,6 +527,12 @@ def _scenario(kind: str):
                      "metadata": {"scheduling": {"state": "awaiting_name", "slots": [],
                                                  "pending": {"awaiting": "name", "slot_id": slot_id}}}},
                 ])
+            elif kind == "scheduling_name_step":
+                # A slot chip on a browser that has never booked (Multi-Agent
+                # off, the 2026-11-17 report): the time is held, a name is asked
+                # for, and the reply has to say which time.
+                slot_id = (datetime.utcnow() + timedelta(days=3)).replace(hour=14, minute=0).strftime("%Y%m%dT%H%MZ")
+                kwargs.update(user_message="Book that time", scheduling_action={"action": "book", "slot_id": slot_id})
             elif kind == "scheduling_list":
                 kwargs.update(user_message="what's on my schedule?")
         yield kwargs, fail_agents, probe
@@ -670,6 +676,10 @@ def _run(bp_key: str, theme: str, kind: str) -> Dict[str, Any]:
         "answer_has_steer_leftovers": bool(_LEFTOVER_RE.search(str(result.get("message") or ""))),
         # The attachment record on the terminal governance event (metadata only).
         "attachment": ({k: record.get(k) for k in _ATTACHMENT_KEYS} if isinstance(record, dict) else record),
+        # A scheduling reply that holds or books a slot names it.
+        "names_held_slot": bool((result.get("scheduling") or {}).get("slots")) and all(
+            s.get("label") in str(result.get("message") or "")
+            for s in (result.get("scheduling") or {}).get("slots") or []),
         "message": str(result.get("message") or ""),
         "document": {
             "record_leaks_content": isinstance(record, dict) and any(k in record for k in ("text", "data")),
@@ -690,7 +700,7 @@ SCENARIOS = ("benign", "policy_block", "ai_defense_prompt_block", "ai_defense_re
              "nemo_input_block", "nemo_output_block", "agent_control_deny", "agent_control_prompt_deny",
              "agent_control_steer", "forced_injection", "pii_exfil_prompt", "pii_exfil_bulk", "internal_docs_ask",
              "generation_error", "multi_agent", "mcp_thrash",
-             "scheduling_offer", "scheduling_book", "scheduling_list") + _DOC_SCENARIOS + _IDENTITY_SCENARIOS \
+             "scheduling_offer", "scheduling_book", "scheduling_name_step", "scheduling_list") + _DOC_SCENARIOS + _IDENTITY_SCENARIOS \
     + _GATE_SCENARIOS
 
 
@@ -919,12 +929,14 @@ def test_dynamic_parity() -> None:
                       out["internal_docs"] == ref["internal_docs"], f"{out['internal_docs']} != {ref['internal_docs']}")
                 check(f"[{key} vs {ref_key}] {sk}: answer grounded on the documents in both or neither",
                       out["docs_grounded"] == ref["docs_grounded"])
-                if sk.endswith(("scheduling_offer", "scheduling_book", "scheduling_list")):
+                if sk.endswith(("scheduling_offer", "scheduling_book", "scheduling_name_step", "scheduling_list")):
                     check(f"[{key} vs {ref_key}] {sk}: same booking tool calls",
                           out["tool_calls"] == ref["tool_calls"], f"{out['tool_calls']} != {ref['tool_calls']}")
                     check(f"[{key} vs {ref_key}] {sk}: scheduling agent present in both or neither",
                           (f"{sk.split('/')[0]}_scheduling_agent" in out["agents"])
                           == (f"{sk.split('/')[0]}_scheduling_agent" in ref["agents"]), str(out["agents"]))
+                    check(f"[{key} vs {ref_key}] {sk}: the reply names the held/booked slot in both or neither",
+                          out["names_held_slot"] == ref["names_held_slot"])
                 # The document read is shared-chain: the same record facts on the
                 # governance event (none on a turn without a document) and, on a
                 # document turn, the same tool call and the same reach of the
@@ -950,6 +962,10 @@ def test_dynamic_parity() -> None:
         check("scheduling: a scheduling turn skips the domain specialists (Multi-Agent on)",
               not any(a.endswith(("_specialist", "_assistant")) and "scheduling" not in a
                       for a in r["medadvice/scheduling_book"]["agents"]), str(r["medadvice/scheduling_book"]["agents"]))
+        name_step = r["medadvice/scheduling_name_step"]
+        check("scheduling: a slot chip with no saved name holds the slot, books nothing and says which time",
+              name_step["result"]["scheduling_state"] == "awaiting_name" and name_step["tool_calls"] == []
+              and name_step["names_held_slot"] is True, name_step["message"])
         check("scheduling: 'my schedule' lists", r["medadvice/scheduling_list"]["result"]["scheduling_state"] == "listed")
         check("scheduling: the scheduling stages are in the guardrail frames",
               {"scheduling_intake", "scheduling"} <= set(r["medadvice/scheduling_offer"]["guardrail_stages"]))
