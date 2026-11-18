@@ -118,6 +118,21 @@ _ac.agent_control_client.evaluate_tool_call = lambda *a, **k: _ac.ControlVerdict
     matched_controls=["observe-all-patches"], decisions=["observe"])
 check("attached and clean: patch runs",
       controls.decide("apply_patch", {"os_family": "linux", "environment": "staging"}, ctx("linux_patch_operator")).runs)
+# A live AO deny (response shape of 2026-11-18): the evaluator says "Condition
+# tree matched"; the person sees the message the control's author wrote.
+_raw = {"is_safe": False, "confidence": 1.0, "reason": "Condition tree matched", "errors": None, "matches": [
+    {"control_name": "deny-prod-without-approved-change", "action": "deny",
+     "result": {"matched": True, "message": "Condition tree matched"},
+     "steering_context": {"message": "Production needs an approved change. Request approval on the Change Board first."}},
+    {"control_name": "observe-all-patches", "action": "observe",
+     "result": {"matched": True, "message": "Pattern '.+' found"}, "steering_context": {"message": "Recorded."}}]}
+_parsed = _ac.agent_control_client._parse_response(_raw)
+check("parser keeps each control's authored message",
+      _parsed.guidance_by_control.get("observe-all-patches") == "Recorded." and _parsed.steering == [], _parsed)
+_ac.agent_control_client.evaluate_tool_call = lambda *a, **k: _parsed
+v = controls.decide("apply_patch", {"os_family": "linux", "environment": "production"}, ctx("linux_patch_operator"))
+check("AO deny shows the control's message, not the evaluator's",
+      v.decision == "deny" and v.deny_reason.startswith("Production needs an approved change") and not v.fail_closed, v)
 _ac.agent_control_client.evaluate_tool_call = _real_eval
 settings.patchbot_controls_mode = "local"
 

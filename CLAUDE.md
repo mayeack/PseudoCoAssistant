@@ -329,7 +329,10 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   `agent_observability` mode an unreachable Controls server lets read tools
   run and refuses every other tool (`fail_closed`), whatever
   `GALILEO_AGENT_CONTROL_FAIL_OPEN` says. `CONTROL_DEFINITIONS` is the single
-  source for the local engine and `scripts/patchbot/ao_controls.py`.
+  source for the local engine and `scripts/patchbot/ao_controls.py`. The
+  attached controls carry the **canonical names**: the UI's Clone and attach
+  names a copy `<name>-clone-<hex>`, so run `ao_controls.py adopt` after it
+  (the sentinel, the TA's ES rules and dashboards match names).
 - **Its own Splunk path.** Events go only to PatchBot's HEC forwarder
   (`PATCHBOT_HEC_*`, index `patchbot`) as `pseudoco:patchbot:*`, never to the
   governance destinations; TA-patchbot owns the field contract

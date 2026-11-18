@@ -273,7 +273,13 @@ def decide(tool_name: str, tool_input: Dict[str, Any], context: Dict[str, Any]) 
     v.decisions = [str(d).lower() for d in cv.decisions]
     msgs = list(getattr(cv, "messages", []) or [])
     if "deny" in v.decisions:
-        v.deny_reason = cv.reason or (msgs[0] if msgs else "Denied by Agent Observability Controls.")
+        # The denying control's own message, as its author wrote it in the
+        # Controls UI; the evaluator's reason ("Condition tree matched") only
+        # when the control has none.
+        authored = getattr(cv, "guidance_by_control", {}) or {}
+        denying = [n for n, d in zip(v.controls_matched, v.decisions) if d == "deny"]
+        v.deny_reason = (next((authored[n] for n in denying if authored.get(n)), None) or cv.reason
+                         or (msgs[0] if msgs else "Denied by Agent Observability Controls."))
     if "steer" in v.decisions:
         steering = list(cv.steering or [])
         v.steer_message = steering[0] if steering else (msgs[0] if msgs else "Adjust the call to the policy.")

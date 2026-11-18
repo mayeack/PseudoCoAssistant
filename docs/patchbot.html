@@ -116,7 +116,15 @@
 </tr>
 </tbody>
 </table>
-<p><code>scripts/patchbot/ao_controls.py</code> validates and creates these in Agent Observability (<code>plan</code>, <code>validate</code>, <code>apply</code>, <code>status</code>, <code>probe</code>). Binding a control to the stream needs a signed-in user's session on the us1 gateway (the API token is refused with <code>AUTH_UPSTREAM_REJECTED</code>), so attach them from the PatchBot stream's <strong>Controls</strong> tab (<strong>Add control</strong>, <strong>Clone and attach</strong>) if <code>apply</code> cannot bind.</p>
+<p><code>scripts/patchbot/ao_controls.py</code> validates and creates these in Agent Observability (<code>plan</code>, <code>validate</code>, <code>apply</code>, <code>adopt</code>, <code>status</code>, <code>probe</code>). Setting up a new org takes four steps:</p>
+<ol>
+<li>Run the full read once, so the first trace creates the PatchBot Agent stream.</li>
+<li><code>apply</code> creates the seven library controls.</li>
+<li>Attach each one from the PatchBot stream's <strong>Controls</strong> tab (<strong>Add control</strong>, then <strong>Clone and attach</strong>). The API cannot attach on us1: <code>clone-and-bind</code> answers 502 <code>AUTH_UPSTREAM_REJECTED</code> for the API token and for a signed-in browser session alike (tested 2026-11-18).</li>
+<li><code>adopt</code> gives the attached copies their canonical names. The UI names each copy <code>&lt;name&gt;-clone-&lt;hex&gt;</code>, and control names must be unique, so <code>adopt</code> renames the unattached library original to <code>&lt;name&gt;-template</code> first.</li>
+</ol>
+<p>The canonical names matter because the <code>observe-all-patches</code> sentinel, the TA's ES rules and its dashboards all match on control names. <code>status</code> lists what is attached, and <code>probe</code> runs one deny and one allow live.</p>
+<p>In Agent Observability mode a deny shows the control's own message, the <code>steering_context.message</code> its author wrote, not the evaluator's "Condition tree matched".</p>
 <h2>Roles</h2>
 <table>
 <thead>

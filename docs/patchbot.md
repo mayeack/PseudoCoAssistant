@@ -41,7 +41,16 @@ Every action goes through `backend/patchbot/tools.py` `call()`, whether the mode
 | `deny-restricted-tools` | run_command, stop_service | Never, for any role |
 | `observe-all-patches` | apply_patch | Records every patch attempt |
 
-`scripts/patchbot/ao_controls.py` validates and creates these in Agent Observability (`plan`, `validate`, `apply`, `status`, `probe`). Binding a control to the stream needs a signed-in user's session on the us1 gateway (the API token is refused with `AUTH_UPSTREAM_REJECTED`), so attach them from the PatchBot stream's **Controls** tab (**Add control**, **Clone and attach**) if `apply` cannot bind.
+`scripts/patchbot/ao_controls.py` validates and creates these in Agent Observability (`plan`, `validate`, `apply`, `adopt`, `status`, `probe`). Setting up a new org takes four steps:
+
+1. Run the full read once, so the first trace creates the PatchBot Agent stream.
+2. `apply` creates the seven library controls.
+3. Attach each one from the PatchBot stream's **Controls** tab (**Add control**, then **Clone and attach**). The API cannot attach on us1: `clone-and-bind` answers 502 `AUTH_UPSTREAM_REJECTED` for the API token and for a signed-in browser session alike (tested 2026-11-18).
+4. `adopt` gives the attached copies their canonical names. The UI names each copy `<name>-clone-<hex>`, and control names must be unique, so `adopt` renames the unattached library original to `<name>-template` first.
+
+The canonical names matter because the `observe-all-patches` sentinel, the TA's ES rules and its dashboards all match on control names. `status` lists what is attached, and `probe` runs one deny and one allow live.
+
+In Agent Observability mode a deny shows the control's own message, the `steering_context.message` its author wrote, not the evaluator's "Condition tree matched".
 
 ## Roles
 

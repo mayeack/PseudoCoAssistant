@@ -265,6 +265,11 @@ class ControlVerdict:
     # (``steering_context.message``), in match order. The response-stage node
     # rewrites the answer with it (backend/agents/nodes/agent_control.py).
     steering: List[str] = field(default_factory=list)
+    # Every matched control's configured message (``steering_context.message``)
+    # by control name, whatever its action. A deny's own ``result.message`` is
+    # the evaluator's ("Condition tree matched"); this is the text the control's
+    # author wrote for the person, which PatchBot shows for a deny.
+    guidance_by_control: Dict[str, str] = field(default_factory=dict)
     # What that node did with a steer, set only on a steered response verdict:
     # {"attempts", "outcome" (applied | unresolved | unverified | error),
     #  "recheck_controls", "recheck_decisions"}.
@@ -1331,6 +1336,7 @@ class AgentControlClient:
         decisions: List[str] = []
         messages: List[str] = []
         steering: List[str] = []
+        guidance_by_control: Dict[str, str] = {}
         for match in data.get("matches") or []:
             if not isinstance(match, dict):
                 continue
@@ -1346,6 +1352,8 @@ class AgentControlClient:
             guidance = _steering_message(match.get("steering_context"))
             if guidance and str(action or "").lower() == "steer":
                 steering.append(guidance)
+            if guidance and name:
+                guidance_by_control[str(name)] = guidance
 
         errors = [err for err in (data.get("errors") or []) if isinstance(err, dict)]
         evaluator_errors = [str(err.get("control_name") or "unknown") for err in errors]
@@ -1384,6 +1392,7 @@ class AgentControlClient:
             messages=messages,
             evaluator_errors=evaluator_errors,
             steering=steering,
+            guidance_by_control=guidance_by_control,
         )
 
     @staticmethod

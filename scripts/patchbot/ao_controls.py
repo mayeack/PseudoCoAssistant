@@ -7,6 +7,7 @@ what attendees read in the Controls UI is what the offline mode runs.
     venv/bin/python scripts/patchbot/ao_controls.py plan       # print the definitions
     venv/bin/python scripts/patchbot/ao_controls.py validate   # server-side validation, no writes
     venv/bin/python scripts/patchbot/ao_controls.py apply      # create or update, bind to the stream
+    venv/bin/python scripts/patchbot/ao_controls.py adopt      # give UI-attached copies the canonical names
     venv/bin/python scripts/patchbot/ao_controls.py status     # what is bound to the PatchBot stream
     venv/bin/python scripts/patchbot/ao_controls.py probe      # one deny and one allow, live
 
@@ -15,6 +16,16 @@ Uses the app's own Agent Control client and credentials (the splunk_ao backend:
 with the box's environment. The PatchBot Agent stream must exist: it is created
 by the first PatchBot trace (run the full read once). Idempotent: a control that
 already exists by name is updated in place, never duplicated.
+
+Attaching is the one step the API cannot do on us1 (2026-11-18):
+``clone-and-bind`` answers 502 AUTH_UPSTREAM_REJECTED for the API token and a
+signed-in browser session alike, and ``POST /control-bindings`` answers 405.
+So after ``apply``, attach each control from the PatchBot stream's Controls tab
+(Add control, Clone and attach), then run ``adopt``. The UI names each copy
+``<name>-clone-<hex>``, and control names are unique, so ``adopt`` renames the
+unattached library original to ``<name>-template`` and the attached copy to the
+canonical name: PatchBot's sentinel, the TA's ES rules and its dashboards
+match control names. ``apply`` then updates the attached copies in place.
 """
 from __future__ import annotations
 
@@ -123,8 +134,46 @@ def _bind(control_id: int, name: str, target: Dict[str, str]) -> Optional[int]:
     data = _show(r) or {}
     clone = data.get("control_id") or data.get("id") or (data.get("control") or {}).get("id")
     if clone:
-        httpx.patch(_url(f"/controls/{clone}"), json={"name": name}, headers=_h(), timeout=20)
+        _take_name(int(clone), name, _all_controls(), [int(clone)])
     return int(clone) if clone else None
+
+
+def _take_name(control_id: int, name: str, library: List[Dict[str, Any]], attached: List[int]) -> bool:
+    """Give an attached control the canonical name. Names are unique, so an
+    unattached library control holding it becomes ``<name>-template`` first."""
+    for c in library:
+        cid = int(c.get("id") or c.get("control_id") or -1)
+        if c.get("name") == name and cid != control_id:
+            if cid in attached:
+                print(f"   {name} is already attached as #{cid}; leaving #{control_id} as it is")
+                return False
+            r = httpx.patch(_url(f"/controls/{cid}"), json={"name": f"{name}-template"}, headers=_h(), timeout=20)
+            print(f"   library #{cid} {name} -> {name}-template: HTTP {r.status_code}")
+    r = httpx.patch(_url(f"/controls/{control_id}"), json={"name": name}, headers=_h(), timeout=20)
+    print(f"   attached #{control_id} -> {name}: HTTP {r.status_code}")
+    return r.status_code < 300
+
+
+def cmd_adopt() -> int:
+    """After Clone and attach in the UI: canonical names on the attached copies."""
+    target = _target()
+    attached = _bound_ids(target)
+    library = _all_controls()
+    names = {int(c.get("id") or c.get("control_id") or -1): c.get("name") or "" for c in library}
+    bad = 0
+    for c in controls.CONTROL_DEFINITIONS:
+        name = c["name"]
+        mine = [cid for cid in attached if names.get(cid) == name]
+        if mine:
+            print(f"ok  {name} is attached as #{mine[0]}")
+            continue
+        copies = [cid for cid in attached if names.get(cid, "").startswith(f"{name}-clone-")]
+        if not copies:
+            print(f"MISSING {name}: attach it in the UI (PatchBot stream > Controls > Add control > Clone and attach)")
+            bad += 1
+            continue
+        bad += 0 if _take_name(copies[0], name, library, attached) else 1
+    return 1 if bad else 0
 
 
 def cmd_apply() -> int:
@@ -193,7 +242,8 @@ def cmd_probe() -> int:
 
 
 if __name__ == "__main__":
-    cmds = {"plan": cmd_plan, "validate": cmd_validate, "apply": cmd_apply, "status": cmd_status, "probe": cmd_probe}
+    cmds = {"plan": cmd_plan, "validate": cmd_validate, "apply": cmd_apply, "adopt": cmd_adopt,
+            "status": cmd_status, "probe": cmd_probe}
     if len(sys.argv) != 2 or sys.argv[1] not in cmds:
         print(__doc__)
         sys.exit(2)
