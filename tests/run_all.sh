@@ -55,6 +55,7 @@ SUITES=(
   tests/test_identity_sessions.py
   tests/test_duo_signin.py
   tests/test_identity_gate.py
+  tests/test_agent_identity.py
   tests/test_themes.py
   tests/test_token_cache_split.py
   tests/test_recommendation_formatting.py
@@ -71,7 +72,8 @@ SUITES=(
 # (tests/identity_isolation.py also refuses any lookup a suite forgets to fake).
 export DUO_ENABLED=false PUBLIC_BASE_URL= IDENTITY_ALLOWED_USERS= \
        DUO_CLIENT_ID= DUO_CLIENT_SECRET= DUO_API_HOST= DUO_ADMIN_IKEY= DUO_ADMIN_SKEY= \
-       CII_CLIENT_ID= CII_CLIENT_SECRET= CII_TOKEN_URL= CII_API_URL= CII_ACCESS_TOKEN=
+       CII_CLIENT_ID= CII_CLIENT_SECRET= CII_TOKEN_URL= CII_API_URL= CII_ACCESS_TOKEN= \
+       DUO_AGENT_CLIENT_ID= DUO_AGENT_CLIENT_SECRET= DUO_AGENT_TOKEN_URL= DUO_AGENT_SCOPE=
 
 pass=0; fail=0; failed=()
 for s in "${SUITES[@]}"; do

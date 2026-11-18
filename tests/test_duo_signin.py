@@ -1351,8 +1351,12 @@ def test_every_app_suite_is_isolated() -> None:
     lab5_keys = next(ast.literal_eval(n.value) for n in ast.walk(ast.parse(env_src))
                      if isinstance(n, ast.AnnAssign) and getattr(n.target, "id", "") == "LAB5_KEYS")
     covered = set(identity_isolation.IDENTITY_SETTINGS) | set(identity_isolation.LAB5_DEFAULT_SETTINGS) | {"duo_enabled"}
-    check("isolate() covers every Lab 5 key lab5-setup writes (lab5_envfile.LAB5_KEYS)",
-          {k.lower() for k in lab5_keys} == covered, str(sorted({k.lower() for k in lab5_keys} ^ covered)))
+    # The app's own Duo Agent Directory token (4.24.0): isolate() blanks its
+    # keys too, though lab5-setup does not write them (yet). No other extra.
+    agent_keys = {"duo_agent_client_id", "duo_agent_client_secret", "duo_agent_token_url", "duo_agent_scope"}
+    wanted = {k.lower() for k in lab5_keys} | agent_keys
+    check("isolate() covers every Lab 5 key lab5-setup writes (lab5_envfile.LAB5_KEYS), plus the agent token's",
+          wanted == covered, str(sorted(wanted ^ covered)))
     env = identity_isolation.child_env({"DUO_ENABLED": "true", "DUO_ADMIN_SKEY": "x", "IDENTITY_FAIL_OPEN": "false",
                                         "PATH": "/bin"})
     check("child_env() overrides every Lab 5 key (credentials empty, the rest at the app's defaults) and keeps the rest",
