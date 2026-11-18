@@ -196,6 +196,16 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Failed to start the Duo health check: {e}")
 
+    # Duo Agent Directory: the app's own client-credentials token as the
+    # "PseudoCo Assistant" agent, on a daemon thread, now and again shortly
+    # before each token expires. A no-op unless DUO_ENABLED with the
+    # DUO_AGENT_* keys (backend/services/agent_identity.py).
+    try:
+        from backend.services import agent_identity
+        agent_identity.start()
+    except Exception as e:
+        logger.error(f"Failed to start the Duo agent token refresher: {e}")
+
     # Pre-warm AFTER the persisted provider/model override is applied so the
     # right model gets loaded. Background thread: startup isn't blocked.
     if settings.prewarm_llm:
@@ -212,6 +222,11 @@ async def shutdown_event():
         await asyncio.to_thread(identity_signin.stop_health_check)
     except Exception:
         logger.debug("Duo health check shutdown error", exc_info=True)
+    try:
+        from backend.services import agent_identity
+        await asyncio.to_thread(agent_identity.stop)
+    except Exception:
+        logger.debug("Duo agent token refresher shutdown error", exc_info=True)
     try:
         from backend.hec.runtime import hec_runtime
         await hec_runtime.stop()

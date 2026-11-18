@@ -103,6 +103,11 @@ the sections and decisions (A3, A4, ...) cited on this page.</p>
 <td><code>backend/agents/nodes/identity.py</code> (<code>identity_risk</code>)</td>
 <td><code>PRE_NODES[1]</code> in the shared chain. The legacy engine calls the same function</td>
 </tr>
+<tr>
+<td>Agent identity</td>
+<td><code>backend/services/agent_identity.py</code></td>
+<td>The app's own client-credentials token as the Duo Agent Directory agent &quot;PseudoCo Assistant&quot;. It authorizes nothing yet (<a href="#the-apps-own-identity-duo-agent-directory">below</a>)</td>
+</tr>
 </tbody>
 </table>
 <h2>Where a verified identity comes from</h2>
@@ -480,7 +485,7 @@ the values of credential query parameters (<code>duo_code</code>, <code>code</co
 <code>Cookie</code>, <code>Set-Cookie</code> and <code>X-Access-Key</code> values, the app's own cookies,
 Bearer credentials, anything shaped like a JWT, and the exact values of
 <code>DUO_CLIENT_SECRET</code>, <code>DUO_ADMIN_SKEY</code>, <code>CII_CLIENT_SECRET</code>,
-<code>CII_ACCESS_TOKEN</code> and <code>ACCESS_KEY</code>. urllib3, requests, httpx, httpcore, duo_universal and the
+<code>CII_ACCESS_TOKEN</code>, <code>DUO_AGENT_CLIENT_SECRET</code> and <code>ACCESS_KEY</code>. urllib3, requests, httpx, httpcore, duo_universal and the
 identity modules also lose every query value and token and secret pairs.
 Nothing is registered at run time, so no request can make a string (a
 username, say) vanish from later log lines. The configured secrets are
@@ -493,6 +498,64 @@ that this browser holds a session (<code>identity_session</code>), or while the 
 already shows one. With <code>DUO_ENABLED</code> off it sends no request for it. The
 &quot;Sign in with Duo&quot; link is re-evaluated on every <code>/api/server-info</code> poll,
 so it goes away as soon as the gate closes.</li>
+</ul>
+<h2 id="the-apps-own-identity-duo-agent-directory">The app's own identity (Duo Agent Directory)</h2>
+<p>Since 4.24.0 the app also authenticates to Duo as itself, not for a user.</p>
+<ul>
+<li><strong>In Duo.</strong>
+<ul>
+<li>PseudoCo Assistant is registered in the Agent Directory as the custom
+agent &quot;PseudoCo Assistant&quot; (<em>Applications → Agent Security → Agents</em>).</li>
+<li>Its client registration rules allow one confidential client:
+&quot;PseudoCo Assistant app server&quot;. That client belongs to the OAuth 2.1 /
+OIDC application <strong>PseudoCo Assistant Agent API</strong>, which has the custom
+scope <code>pseudoco:tools</code>, Client Credentials only, and user access
+disabled for all users.</li>
+<li>Each time the client authenticates, Duo binds it to the agent and
+records the agent instance as seen. A client-credentials grant has no
+user and no device, so Duo shows both as &quot;Unknown&quot;.</li>
+</ul>
+</li>
+<li><strong>In Cisco Identity Intelligence</strong> (verified 2026-11-18):
+<ul>
+<li>CII lists the agent as an <em>Agentic App</em> non-human identity, owned by the
+agent's accountable user. Its last-seen time is the latest token.</li>
+<li>CII lists the client as a <em>Confidential Client</em>.</li>
+<li>The Duo instance does not appear as its own <em>Agent Instance</em>.</li>
+</ul>
+</li>
+<li><strong>The refresher</strong> (<code>agent_identity.start()</code> at startup, on a daemon
+thread):
+<ul>
+<li>It asks for a token at once, then again 5 minutes before each one
+expires. Duo's tokens last an hour.</li>
+<li>After a failure it waits 1 minute, doubling up to an hour, or longer if
+Duo's <code>Retry-After</code> asks.</li>
+<li>It sends HTTP Basic (<code>client_secret_basic</code>), with
+<code>grant_type=client_credentials</code> and <code>scope=DUO_AGENT_SCOPE</code>.</li>
+<li><code>token()</code> and <code>status()</code> read the cache only.</li>
+</ul>
+</li>
+<li><strong>What it is not.</strong> The token authorizes nothing: no gateway checks it, and
+no tool call presents it. It shows that the app authenticates to Duo as its
+agent. Do not describe it as Duo governing the agent's tool calls. That
+needs one of Duo's gateways, which need Duo Premier (plan section 12.4).</li>
+<li><strong>Rules.</strong> The rules for every identity call apply here too:
+<ul>
+<li>Inert unless <code>DUO_ENABLED</code> and all three <code>DUO_AGENT_*</code> credentials are
+set, with an https token URL.</li>
+<li><code>.env</code> only. <code>DUO_AGENT_CLIENT_SECRET</code> is on the redaction list of
+configured secrets, and the module's logger is fully redacted.</li>
+<li>Never on the event loop, bounded (3 s connect, 5 s read), no redirects
+followed, never raises.</li>
+<li>A failure is a short fixed code (<code>http_401</code>, <code>timeout</code>, ...).</li>
+<li>The first token, and the first after a failure, is logged at INFO with
+its expiry. Routine refreshes are DEBUG.</li>
+</ul>
+</li>
+<li><strong>Where the keys are.</strong> On the facilitator's Mac the three credentials are
+Keychain items <code>pseudoco-lab5-duo-agent-client-id</code>, <code>-client-secret</code> and
+<code>-token-url</code>. <code>lab5-setup</code> does not push them to lab boxes yet.</li>
 </ul>
 <h2>Duo application → configuration</h2>
 <table>
@@ -522,6 +585,12 @@ so it goes away as soon as the gate closes.</li>
 <td>read-only use</td>
 <td>on a lab box: <code>CII_API_URL</code> and <code>CII_ACCESS_TOKEN</code> (a 24 h token <code>lab5-setup</code> mints on the Mac); on a dev copy: <code>CII_CLIENT_ID</code>, <code>CII_CLIENT_SECRET</code>, <code>CII_TOKEN_URL</code>, <code>CII_API_URL</code></td>
 <td>the gate (trust level, failing checks)</td>
+</tr>
+<tr>
+<td><strong>PseudoCo Assistant Agent API</strong> (OAuth 2.1 / OIDC), client &quot;PseudoCo Assistant app server&quot;, bound to the Agent Directory agent</td>
+<td>Client Credentials, scope <code>pseudoco:tools</code></td>
+<td><code>DUO_AGENT_CLIENT_ID</code>, <code>DUO_AGENT_CLIENT_SECRET</code>, <code>DUO_AGENT_TOKEN_URL</code>, <code>DUO_AGENT_SCOPE</code></td>
+<td>the app's own agent token (<code>agent_identity</code>)</td>
 </tr>
 <tr>
 <td>PseudoCo Provisioner, PseudoCo VPN</td>
@@ -617,6 +686,18 @@ no document text is on the event</li>
 </li>
 <li><code>tests/test_identity_sessions.py</code> covers sessions, including two
 revocations racing (one tombstone, one event).</li>
+<li><code>tests/test_agent_identity.py</code> covers the agent token:
+<ul>
+<li>inert unless configured, with nothing sent</li>
+<li>the request (Basic auth, form and scope)</li>
+<li>refresh timing, backoff and <code>Retry-After</code></li>
+<li>every failure as a fixed code, and a failed refresh keeping the valid
+token</li>
+<li>no token, secret or token URL in any log record</li>
+<li>the daemon refresher never blocking startup</li>
+<li>the startup and shutdown wiring, <code>.env</code> only, and the test isolation</li>
+</ul>
+</li>
 <li><code>tests/test_duo_signin.py</code> covers sign-in, and the safeguards above:
 <ul>
 <li>a real sign-in through duo_universal, requests and urllib3 at DEBUG

@@ -127,6 +127,8 @@ IDENTITY_SETTINGS = {
     "duo_admin_ikey", "duo_admin_skey", "cii_client_id", "cii_client_secret", "cii_token_url",
     "cii_api_url", "identity_allowed_users", "identity_session_ttl_minutes",
     "identity_status_ttl_seconds", "identity_fail_open",
+    # Duo Agent Directory (4.24.0): the agent's own client-credentials client.
+    "duo_agent_client_id", "duo_agent_client_secret", "duo_agent_token_url", "duo_agent_scope",
 }
 
 
@@ -152,8 +154,8 @@ def test_config() -> None:
         check(f".env.example documents {key.upper()} (commented)",
               re.search(rf"^# {key.upper()}=", env_example, re.M) is not None)
     version = re.search(r"^APP_VERSION=(\S+)", env_example, re.M)
-    check("app_version and APP_VERSION move together (4.23.3)",
-          version is not None and version.group(1) == Settings.model_fields["app_version"].default == "4.23.3",
+    check("app_version and APP_VERSION move together (4.24.0)",
+          version is not None and version.group(1) == Settings.model_fields["app_version"].default == "4.24.0",
           f"{version.group(1) if version else None} vs {Settings.model_fields['app_version'].default}")
 
     from backend import settings_store
