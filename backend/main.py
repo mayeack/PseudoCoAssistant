@@ -16,6 +16,7 @@ from backend.middleware.body_limit import ChatBodyLimitMiddleware
 from backend.middleware.identity import IdentityMiddleware
 from backend.middleware.settings_gate import has_settings_access
 from backend.routers import chat, admin, auth, settings as settings_routes, incident, spray, toolguard, analytics, appointments, attachments, identity_auth
+from backend.routers import patchbot as patchbot_routes
 from backend.telemetry import otel, tracestate_guard
 
 # Cap inbound W3C tracestate before OpenTelemetry parses it (CVE-2026-114603).
@@ -96,6 +97,7 @@ app.include_router(analytics.router)
 app.include_router(appointments.router)
 app.include_router(attachments.router)
 app.include_router(identity_auth.router)
+app.include_router(patchbot_routes.router)
 
 def _prewarm_llm_stack() -> None:
     """Absorb the first-turn cold start off the request path.
@@ -185,6 +187,14 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Failed to initialize settings/HEC: {e}")
 
+    # PatchBot's own HEC forwarder (index patchbot; never the governance
+    # destinations). A no-op unless PATCHBOT_HEC_URL and PATCHBOT_HEC_TOKEN are set.
+    try:
+        from backend.patchbot import telemetry as patchbot_telemetry
+        await patchbot_telemetry.start()
+    except Exception as e:
+        logger.error(f"Failed to start the PatchBot HEC forwarder: {e}")
+
     # Lab 5 Duo sign-in: Duo's health check on a daemon thread (never the event
     # loop), now and then every 5 minutes (every minute while it fails). Each
     # result opens or closes the duo_signin host gate. A no-op unless
@@ -217,6 +227,11 @@ async def shutdown_event():
         await hec_runtime.stop()
     except Exception:
         logger.debug("HEC shutdown error", exc_info=True)
+    try:
+        from backend.patchbot import telemetry as patchbot_telemetry
+        await patchbot_telemetry.stop()
+    except Exception:
+        logger.debug("PatchBot HEC shutdown error", exc_info=True)
     try:
         from backend import agent_observability
         await asyncio.to_thread(agent_observability.shutdown, 10.0)
@@ -296,6 +311,20 @@ try:
             if appt_file.exists():
                 return appt_file.read_text()
             return "<h1>Appointments UI not found</h1>"
+
+        @app.get("/patchbot-ui", response_class=HTMLResponse)
+        async def serve_patchbot():
+            page = frontend_dir / "patchbot.html"
+            if settings.patchbot_enabled and page.exists():
+                return page.read_text()
+            return "<h1>PatchBot is not enabled</h1>"
+
+        @app.get("/change-board-ui", response_class=HTMLResponse)
+        async def serve_change_board():
+            page = frontend_dir / "changeboard.html"
+            if settings.patchbot_enabled and page.exists():
+                return page.read_text()
+            return "<h1>PatchBot is not enabled</h1>"
 except Exception as e:
     logger.warning(f"Could not mount frontend: {e}")
 
