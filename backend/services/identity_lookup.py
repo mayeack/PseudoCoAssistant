@@ -428,8 +428,13 @@ def _duo_fetch(username: str) -> Dict[str, Any]:
     if match is None:
         return {"state": NOT_FOUND, "duo_status": None, "fetched_at": _now_iso()}
     mail = str(match.get("email") or "").strip()
+    # Group names ride along for PatchBot's role (backend/patchbot/roles.py);
+    # the Identity Risk Gate never reads them.
+    groups = sorted({str(g.get("name")).strip() for g in (match.get("groups") or [])
+                     if isinstance(g, dict) and str(g.get("name") or "").strip()})
     return {"state": OK, "duo_status": normalize_duo_status(match.get("status")),
-            "email": mail if _EMAIL_RE.fullmatch(mail) else None, "fetched_at": _now_iso()}
+            "email": mail if _EMAIL_RE.fullmatch(mail) else None, "groups": groups,
+            "fetched_at": _now_iso()}
 
 
 def duo_user(username: Any) -> Dict[str, Any]:

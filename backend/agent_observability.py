@@ -220,6 +220,21 @@ def is_enabled() -> bool:
     return os.getenv("SPLUNK_AO_LOGGING_DISABLED", "false").strip().lower() not in ("true", "1", "t")
 
 
+def maybe_log_patchbot_run(record: Dict[str, Any]) -> None:
+    """PatchBot (backend/patchbot): enqueue one run for its own Agent stream.
+    Same worker, logger lifecycle and bounds as a chat turn; the record never
+    passes through the governance log. Never blocks, never raises."""
+    if not is_enabled():
+        return
+    try:
+        _ensure_worker()
+        _rt.queue.put_nowait(dict(record, _patchbot=True))
+    except queue.Full:
+        _rt.dropped += 1
+    except Exception:  # noqa: BLE001
+        logger.debug("agent observability: PatchBot enqueue failed", exc_info=True)
+
+
 def maybe_log_turn(log_data: Dict[str, Any]) -> None:
     """Entry point called by ``governance_logger._write_log`` for EVERY event.
     Gates to completed chat turns, copies, enqueues. Never blocks, never raises."""
@@ -459,7 +474,11 @@ def _stream_for(log_data: Dict[str, Any]) -> str:
 
     The label comes from the theme REGISTRY, never from the raw request value:
     an unknown (or hostile) theme falls back to the default stream, so the
-    number of live loggers is bounded by the number of themes + 1."""
+    number of live loggers is bounded by the number of themes + 1 (+1 for
+    PatchBot's own stream, set only by ``maybe_log_patchbot_run``)."""
+    if log_data.get("_patchbot"):
+        from backend.config import settings as _settings
+        return (_settings.patchbot_agent_stream or "PatchBot").strip() or "PatchBot"
     if not _per_theme_streams():
         return _default_stream()
     theme = log_data.get("theme")
@@ -836,6 +855,13 @@ def _build_turn(lg, log_data: Dict[str, Any]) -> None:
     the root that lands in Agent Observability, so the governance metadata rides on
     it and on every child, and durations/timestamps are set per span (a child's
     default ``created_at`` is "now" at emission time, i.e. after the turn)."""
+    if log_data.get("_patchbot"):
+        from backend.patchbot import ao as _patchbot_ao
+        try:
+            _patchbot_ao.build_run(lg, log_data, agent_type=_agent_type("supervisor"))
+        except RuntimeError as exc:
+            raise TurnEmitError(str(exc)) from exc
+        return
     inp = _text(log_data.get("input_messages")) or log_data.get("user_prompt", "") or "(empty)"
     out = _text(log_data.get("output_messages")) or log_data.get("response_text", "") or "(empty)"
     model = log_data.get("response_model") or log_data.get("request_model") or "unknown"

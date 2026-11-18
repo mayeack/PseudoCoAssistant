@@ -923,6 +923,106 @@ class AgentControlClient:
         verdict.transport = "server"
         return verdict
 
+    # ------------------------------------------------- tool steps (PatchBot)
+    def target_for_stream(self, stream: str) -> Dict[str, str]:
+        """splunk_ao: the target for a named Agent stream (PatchBot's own stream,
+        which is not a theme)."""
+        return {
+            "target_type": (settings.splunk_ao_control_target_type or "log_stream").strip(),
+            "target_id": self.resolve_stream_id(stream),
+            "stream": stream,
+        }
+
+    def _ensure_tool_steps_registered(self, target: Dict[str, str], agent_name: str,
+                                      tool_names: List[str]) -> None:
+        """Register a PatchBot agent and its tool steps once per target. A
+        separate agent name keeps the chat agent's registered steps untouched
+        (registration overwrites the step list)."""
+        key = f"{agent_name}|{target['target_id']}"
+        if key in self._registered_targets:
+            return
+        payload: Dict[str, Any] = {
+            "agent": {
+                "agent_name": agent_name,
+                "agent_description": "PseudoCo Assistant PatchBot (agentic patch workspace)",
+                "agent_version": settings.app_version,
+                "agent_metadata": {"app": settings.otel_service_name, "feature": "patchbot"},
+            },
+            "steps": [{"type": "tool", "name": n, "description": f"PatchBot tool {n}"}
+                      for n in tool_names],
+            "conflict_mode": "overwrite",
+            "target_type": target["target_type"],
+            "target_id": target["target_id"],
+        }
+        try:
+            response = httpx.post(f"{self.control_url}/api/v1/agents/initAgent", json=payload,
+                                  headers=self._management_headers(), timeout=self._timeout)
+            response.raise_for_status()
+            self._registered_targets.add(key)
+        except (httpx.HTTPError, ValueError, AgentControlError) as exc:
+            if key not in self._registration_failed_logged:
+                self._registration_failed_logged.add(key)
+                logger.warning("Agent Control: PatchBot tool-step registration for stream %r failed (%s); "
+                               "evaluating anyway.", target.get("stream"), exc)
+
+    def evaluate_tool_call(
+        self,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        context: Dict[str, Any],
+        *,
+        stream: str,
+        agent_name: str,
+        tool_names: Optional[List[str]] = None,
+    ) -> ControlVerdict:
+        """Judge one proposed tool call BEFORE it runs: a ``tool`` step at the
+        ``pre`` stage, bound to ``stream``'s target, carrying the call's
+        arguments as ``input`` and who it acts for as ``context``. splunk_ao only.
+        Never raises for transport problems: the verdict says ``errored`` and the
+        caller decides (PatchBot fails closed for anything that changes state)."""
+        started = time.perf_counter()
+        if not self.is_configured:
+            return self._finish(ControlVerdict(errored=True, error_message="not configured",
+                                               transport="server"), "pre", None, started)
+        if not self.is_splunk_ao:
+            return self._finish(ControlVerdict(
+                errored=True, error_message="tool-step controls need the splunk_ao backend",
+                transport="server"), "pre", None, started)
+        try:
+            target = self.target_for_stream(stream)
+        except (httpx.HTTPError, ValueError, AgentControlError) as exc:
+            return self._finish(ControlVerdict(errored=True, error_message=f"target: {exc}",
+                                               transport="server"), "pre", None, started)
+        self._ensure_tool_steps_registered(target, agent_name, list(tool_names or [tool_name]))
+        payload: Dict[str, Any] = {
+            "agent_name": agent_name,
+            "stage": "pre",
+            "step": {"type": "tool", "name": tool_name, "input": tool_input, "context": context},
+            "target_type": target["target_type"],
+            "target_id": target["target_id"],
+        }
+        try:
+            headers = self._evaluation_headers(target)
+            response = httpx.post(f"{self.control_url}/api/v1/evaluation", json=payload,
+                                  headers=headers, timeout=self._timeout)
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403):
+                self._invalidate_tokens()
+            detail = self._safe_error_detail(exc.response) + self._target_type_hint(exc.response, target)
+            logger.warning("Agent Control tool evaluation HTTP %s: %s", exc.response.status_code, detail)
+            return self._finish(ControlVerdict(errored=True, transport="server",
+                                               error_message=f"HTTP {exc.response.status_code}: {detail}"),
+                                "pre", target, started)
+        except (httpx.HTTPError, ValueError, AgentControlError) as exc:
+            logger.warning("Agent Control tool evaluation failed: %s", exc)
+            return self._finish(ControlVerdict(errored=True, error_message=str(exc), transport="server"),
+                                "pre", target, started)
+        verdict = self._parse_response(data)
+        verdict.transport = "server"
+        return self._finish(verdict, "pre", target, started)
+
     # ------------------------------------------------- client-side execution
 
     def _load_controls(self) -> List[Dict[str, Any]]:
