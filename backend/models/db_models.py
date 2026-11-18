@@ -261,3 +261,61 @@ class AppSettings(Base):
     id = Column(Integer, primary_key=True)  # always 1
     data = Column(JSON, nullable=False, default=dict)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# --- PatchBot (docs/patchbot.md). New tables only, so create_all creates them on
+# an existing database with no migration; nothing else reads or writes them.
+
+class PatchbotEstate(Base):
+    """One attendee's synthetic estate: hosts, installed package versions, the
+    exposure model, and per-finding triage state, as one JSON document. Keyed
+    by the estate owner (the Duo-verified username, or the role-map persona)."""
+    __tablename__ = "patchbot_estates"
+
+    owner = Column(String, primary_key=True)
+    state = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PatchbotChange(Base):
+    """A Change Board record (CHG-####). Shared across estates: a Change Approver
+    approves changes other people requested."""
+    __tablename__ = "patchbot_changes"
+
+    id = Column(String, primary_key=True)               # CHG-1042
+    owner = Column(String, nullable=False, index=True)  # estate the change patches
+    requested_by = Column(String, nullable=False)
+    requester_role = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="draft", index=True)
+    cve = Column(String, nullable=False)
+    finding_id = Column(String, nullable=True)
+    servers = Column(JSON, default=list)
+    environment = Column(String, nullable=False, default="production")
+    window_start = Column(DateTime, nullable=True)
+    window_end = Column(DateTime, nullable=True)
+    plan = Column(Text, nullable=True)
+    priority = Column(String, nullable=True)
+    investigation_id = Column(String, nullable=True)
+    approver = Column(String, nullable=True)
+    approver_role = Column(String, nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    decision_note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PatchbotActivity(Base):
+    """The Activity tab and each finding's History: one row per thing that
+    happened in an estate, newest first when read."""
+    __tablename__ = "patchbot_activity"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    owner = Column(String, nullable=False, index=True)
+    finding_id = Column(String, nullable=True, index=True)
+    kind = Column(String, nullable=False)
+    text = Column(Text, nullable=False)
+    actor = Column(String, nullable=True)
+    actor_type = Column(String, nullable=True)   # human | agent | scanner
+    data = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
