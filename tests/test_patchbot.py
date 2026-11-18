@@ -254,6 +254,68 @@ check("AO record has tool + control", run.ao_record()["tool_calls"][-1]["control
 r = dana.post("/api/patchbot/demo/rollback", headers=H, json={"cve": "CVE-2021-41773"}).json()
 check("rollback reopens the finding", len(events("finding", "finding_reopened")) >= 1, r)
 
+print("MCP servers and Cisco MCP Scanner")
+from backend.patchbot import mcp_scan, store  # noqa: E402
+
+anon = TestClient(main.app)
+init = anon.post("/mcp/patchbot/dana.lee/patchops", json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                                          "params": {"protocolVersion": "2025-06-18"}}).json()
+check("MCP initialize", init["result"]["protocolVersion"] == "2025-06-18" and "tools" in init["result"]["capabilities"])
+check("MCP notification is 202", anon.post("/mcp/patchbot/dana.lee/patchops",
+                                           json={"jsonrpc": "2.0", "method": "notifications/initialized"}).status_code == 202)
+listed = anon.post("/mcp/patchbot/dana.lee/patchops", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()
+check("MCP tools/list serves PatchOps", {"apply_patch", "run_command"} <= {t["name"] for t in listed["result"]["tools"]})
+called = anon.post("/mcp/patchbot/dana.lee/patchops", json={"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                                            "params": {"name": "apply_patch", "arguments": {}}}).json()
+check("MCP tools/call is refused", called["result"]["isError"] is True)
+check("unknown owner seeds nothing", anon.post("/mcp/patchbot/nobody.here/vendor-advisories", json={
+    "jsonrpc": "2.0", "id": 4, "method": "tools/list"}).status_code == 200 and store.peek_estate("nobody.here") is None)
+
+
+def _fake_scanner(catalogue):
+    """Stands in for mcp-scanner static: the rules the real yara rules apply here."""
+    rows = []
+    for t in catalogue["tools"]:
+        threats = (["TOOL POISONING", "PROMPT INJECTION"] if "<IMPORTANT>" in t["description"] else
+                   ["CODE EXECUTION"] if t["name"] == "run_command" else
+                   ["SYSTEM MANIPULATION"] if t["name"] == "stop_service" else [])
+        rows.append({"status": "completed", "is_safe": not threats, "tool_name": t["name"], "item_type": "tool",
+                     "findings": {"yara_analyzer": {"severity": "HIGH" if threats else "SAFE", "threat_names": threats,
+                                                    "threat_summary": "", "total_findings": len(threats),
+                                                    "mcp_taxonomies": [{"aitech": "AITech-9.1"}] if threats else []}}})
+    return {"server_url": "static:tools.json", "scan_results": rows, "requested_analyzers": ["yara"]}
+
+
+_real_scanner = mcp_scan.run_scanner
+mcp_scan.run_scanner = _fake_scanner
+res = dana.post("/api/patchbot/mcp/scan", headers=H, json={}).json()["results"]
+check("scan rates PatchOps unsafe", res["patchops"]["is_safe"] is False, res.get("patchops"))
+rc = next(t for t in res["patchops"]["tools"] if t["tool"] == "run_command")
+check("finding names its runtime control", rc["compensated_by"] == "deny-restricted-tools", rc)
+check("clean vendor scans safe", res["vendor-advisories"]["is_safe"] is True)
+check("tool findings reach Splunk", any(e["tool_name"] == "stop_service" for e in events("mcp_scan", "mcp_tool_finding")))
+r = jo.post("/api/patchbot/mcp/vendor", headers=H, json={"action": "connect"}).json()
+check("viewer cannot connect a server", r["ok"] is False)
+r = dana.post("/api/patchbot/mcp/vendor", headers=H, json={"action": "connect"}).json()
+check("clean scan connects the vendor", r["ok"] and not r["forced"], r)
+check("connected vendor tool offered", "get_vendor_advisory" in [s["function"]["name"] for s in tools.schemas("dana.lee")])
+dana.post("/api/patchbot/demo/vendor-mcp", headers=H, json={"poisoned": True})
+check("rug pull voids the connection", not mcp_scan.vendor_usable(store.load_estate("dana.lee")))
+dana.post("/api/patchbot/mcp/vendor", headers=H, json={"action": "disconnect"})
+r = dana.post("/api/patchbot/mcp/vendor", headers=H, json={"action": "connect"}).json()
+check("changed catalogue must be rescanned", not r["ok"] and "changed after the last scan" in r["message"], r)
+dana.post("/api/patchbot/mcp/scan", headers=H, json={"server": "vendor-advisories"})
+r = dana.post("/api/patchbot/mcp/vendor", headers=H, json={"action": "connect"}).json()
+check("poisoned vendor refused", not r["ok"] and "TOOL POISONING" in r["message"], r)
+r = dana.post("/api/patchbot/mcp/vendor", headers=H, json={"action": "connect", "force": True}).json()
+check("Demo Control forces it", r["ok"] and r["forced"], r)
+desc = next(s["function"]["description"] for s in tools.schemas("dana.lee") if s["function"]["name"] == "get_vendor_advisory")
+check("forced vendor offers its poisoned description", "<IMPORTANT>" in desc)
+check("forced connect reaches Splunk", any(e.get("forced") for e in events("mcp_scan", "mcp_server_connected")))
+mcp_scan.run_scanner = _real_scanner
+mcp_scan.disconnect_vendor(Run(initiator=roles.Initiator("dana.lee", "linux_patch_operator", ["linux_patch_operator"]),
+                               owner="dana.lee", kind="demo", session_id="testsession01"))
+
 print("Data contract")
 common = ("event_type", "app", "feature", "estate_owner", "patchbot_session_id", "investigation_id", "finding_id")
 for kind in telemetry.KINDS:

@@ -224,11 +224,12 @@
     await refresh();
   }
 
-  async function doAdvisory(cve) {
+  async function doAdvisory(cve, source) {
     setBusy(true);
-    pushMsg('user', 'Follow the latest vendor advisory for ' + cve);
+    pushMsg('user', source === 'vendor_mcp' ? 'Follow the vendor\'s advisory for ' + cve + ' (Vendor Advisories MCP server)'
+      : 'Follow the latest vendor advisory for ' + cve);
     try {
-      const r = await api('/findings/' + cve + '/advisory', { json: {} });
+      const r = await api('/findings/' + cve + '/advisory' + (source ? '?source=' + source : ''), { json: {} });
       pushMsg('bot', r.reply, r.tool_calls);
     } catch (e) { note(e.message, true); }
     setBusy(false);
@@ -401,13 +402,79 @@
     if (!sel.options.length) ['CVE-2021-41773'].forEach((c) => sel.append(el('option', { value: c, text: c })));
   }
 
+  // ------------------------------------------------------------------ toolchain (MCP servers, Cisco MCP Scanner)
+  const SEV_PILL = { SAFE: 'pill-ok', HIGH: 'pill-high', MEDIUM: 'pill-medium', LOW: 'pill-low', INFO: 'pill-low', UNKNOWN: 'pill-low' };
+  function pill(text, cls) { return el('span', { class: 'pb-pill ' + cls, text }); }
+
+  async function loadToolchain() {
+    try { renderToolchain(await api('/mcp')); } catch (e) { note(e.message, true); }
+  }
+
+  function renderToolchain(o) {
+    $('mcpScanner').textContent = o.scanner.installed ? 'Analyzers on this box: ' + o.scanner.analyzers.join(', ') + '.'
+      : 'The scanner is not installed on this box (pip install cisco-ai-mcp-scanner).';
+    $('vendorPoison').checked = !!o.vendor.poisoned;
+    const box = $('mcpServers'); box.textContent = '';
+    o.servers.forEach((s) => {
+      const scan = s.scan;
+      const verdict = !scan ? pill('not scanned', 'pill-grey') : scan.is_safe ? pill('SAFE', 'pill-ok')
+        : pill(scan.severity, SEV_PILL[scan.severity] || 'pill-high');
+      const head = el('div', { class: 'pb-mcp-head' }, el('b', { text: s.title }),
+        el('span', { class: 'pb-muted pb-small', text: s.publisher }), verdict,
+        scan && !s.scan_current ? pill('catalogue changed since the scan', 'pill-amber') : null,
+        s.kind === 'vendor' ? pill(o.vendor.connected ? (o.vendor.forced ? 'connected without a clean scan' : 'connected') : 'not connected',
+          o.vendor.connected ? (o.vendor.forced ? 'pill-deny' : 'pill-blue') : 'pill-grey') : null);
+      const meta = el('div', { class: 'pb-muted pb-small', text: s.tools.length + ' tools · ' + (scan
+        ? 'scanned ' + scan.scanned_at.replace('T', ' ').slice(0, 16) + ' UTC · analyzers ' + (scan.analyzers_ran.join(', ') || 'none')
+        : 'not scanned yet') });
+      const unsafe = scan ? scan.tools.filter((t) => !t.is_safe) : [];
+      const list = unsafe.length ? el('ul', { class: 'pb-mcp-findings' }, unsafe.map((t) => el('li', {}, el('code', { text: t.tool }), ': ',
+        t.threats.join(', ') || t.severity, t.compensated_by ? el('span', { class: 'pb-muted', text: ' · denied at runtime by ' + t.compensated_by }) : null))) : null;
+      box.append(el('div', { class: 'pb-card pb-mcp' }, head, meta, list,
+        el('button', { type: 'button', class: 'pb-btn pb-btn-quiet', text: 'Scan', onclick: () => scanMcp(s.id) })));
+    });
+  }
+
+  async function scanMcp(server) {
+    note('Cisco MCP Scanner is scanning ' + (server || 'every server') + '…', false);
+    try {
+      const r = await api('/mcp/scan', { json: server ? { server } : {} });
+      renderToolchain(r.overview);
+      const errs = Object.values(r.results).filter((x) => x.error);
+      note(errs.length ? errs[0].error : 'Scan complete.', !!errs.length);
+    } catch (e) { note(e.message, true); }
+    refresh(true);
+  }
+
+  async function vendor(action, force) {
+    try {
+      const r = await api('/mcp/vendor', { json: { action, force: !!force } });
+      renderToolchain(r.overview);
+      if (r.message) note(r.message, !r.ok);
+    } catch (e) { note(e.message, true); }
+    refresh(true);
+  }
+
   let resetArmed = false;
   function wire() {
     document.querySelectorAll('.pb-opt').forEach((b) => b.addEventListener('click', () => answerExposure(b.dataset.answer)));
     document.querySelectorAll('.pb-tab').forEach((t) => t.addEventListener('click', () => {
       document.querySelectorAll('.pb-tab').forEach((x) => x.setAttribute('aria-selected', String(x === t)));
-      ['findings', 'activity', 'resources'].forEach((k) => { $('tab-' + k).hidden = k !== t.dataset.tab; });
+      ['findings', 'activity', 'toolchain', 'resources'].forEach((k) => { $('tab-' + k).hidden = k !== t.dataset.tab; });
+      if (t.dataset.tab === 'toolchain') loadToolchain();
     }));
+    $('mcpScanAll').addEventListener('click', () => scanMcp(null));
+    $('vendorConnect').addEventListener('click', () => vendor('connect', false));
+    $('vendorForce').addEventListener('click', () => vendor('connect', true));
+    $('vendorDisconnect').addEventListener('click', () => vendor('disconnect'));
+    $('followVendor').addEventListener('click', () => doAdvisory($('demoCve').value, 'vendor_mcp'));
+    $('vendorPoison').addEventListener('change', async (e) => {
+      try {
+        const r = await api('/demo/vendor-mcp', { json: { poisoned: e.target.checked } });
+        renderToolchain(r.overview);
+        note(e.target.checked ? 'The vendor now ships a poisoned tool description.' : 'The vendor\'s tool description is clean again.', false);
+      } catch (err) { note(err.message, true); }
+    });
     document.querySelectorAll('.pb-toggle button').forEach((b) => b.addEventListener('click', () => {
       state.view = b.dataset.view;
       document.querySelectorAll('.pb-toggle button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));

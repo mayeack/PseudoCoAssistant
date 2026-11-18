@@ -93,3 +93,4 @@ models/scan_demo/
 # OpenShift: the real secret env (deploy/openshift/secret.example.env is the template)
 deploy/openshift/secret.env
 logs/*.jsonl
+.venv-mcp-scanner/

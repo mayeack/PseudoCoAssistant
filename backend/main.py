@@ -98,6 +98,7 @@ app.include_router(appointments.router)
 app.include_router(attachments.router)
 app.include_router(identity_auth.router)
 app.include_router(patchbot_routes.router)
+app.include_router(patchbot_routes.mcp_router)
 
 def _prewarm_llm_stack() -> None:
     """Absorb the first-turn cold start off the request path.

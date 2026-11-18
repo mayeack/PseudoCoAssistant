@@ -12,7 +12,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
     <script>tailwind.config = { darkMode: 'class', theme: { extend: { fontFamily: { sans: ['Inter','ui-sans-serif','system-ui','-apple-system','Segoe UI','Roboto','Helvetica','Arial','sans-serif'], mono: ['JetBrains Mono','ui-monospace','SFMono-Regular','Menlo','monospace'] } } } };</script>
-    <link rel="stylesheet" href="/static/css/patchbot.css?v=1">
+    <link rel="stylesheet" href="/static/css/patchbot.css?v=2">
 </head>
 <body class="pb">
   <header class="pb-bar">
@@ -62,6 +62,7 @@
       <div class="pb-tabs" role="tablist">
         <button type="button" role="tab" class="pb-tab" data-tab="findings" aria-selected="true">Findings</button>
         <button type="button" role="tab" class="pb-tab" data-tab="activity" aria-selected="false">Activity</button>
+        <button type="button" role="tab" class="pb-tab" data-tab="toolchain" aria-selected="false">Toolchain</button>
         <button type="button" role="tab" class="pb-tab" data-tab="resources" aria-selected="false">Resources</button>
       </div>
 
@@ -88,6 +89,20 @@
         <div id="activityFeed"></div>
       </div>
 
+      <div id="tab-toolchain" class="pb-pane" hidden>
+        <div class="pb-head-row"><h2>MCP servers</h2><button type="button" class="pb-btn pb-btn-primary" id="mcpScanAll">Scan all servers</button></div>
+        <p class="pb-muted pb-small">Cisco MCP Scanner rates each server's tool catalogue (its <code>tools/list</code>) before PatchBot trusts it. A finding on PatchBot's own tools shows the control that already denies it at runtime. <span id="mcpScanner"></span></p>
+        <div id="mcpServers" class="pb-mcp-list"></div>
+        <h3 class="pb-h3">Demo Controls</h3>
+        <div class="pb-demo">
+          <label class="pb-small"><input type="checkbox" id="vendorPoison"> Vendor ships a poisoned tool description</label>
+          <button type="button" class="pb-btn" id="vendorConnect">Connect Vendor Advisories</button>
+          <button type="button" class="pb-btn" id="vendorForce">Connect anyway</button>
+          <button type="button" class="pb-btn pb-btn-quiet" id="vendorDisconnect">Disconnect</button>
+          <button type="button" class="pb-btn" id="followVendor">PatchBot: follow the vendor's advisory</button>
+        </div>
+      </div>
+
       <div id="tab-resources" class="pb-pane" hidden>
         <h3 class="pb-h3">In scope</h3>
         <div class="pb-tablewrap"><table class="pb-table"><thead><tr><th>Server</th><th>OS</th><th>Environment</th><th>Exposure</th><th>Purpose</th></tr></thead><tbody id="hostsBody"></tbody></table></div>
@@ -112,6 +127,6 @@
     </section>
   </main>
 
-  <script src="/static/js/patchbot.js?v=1"></script>
+  <script src="/static/js/patchbot.js?v=2"></script>
 </body>
 </html>

@@ -8,19 +8,23 @@ The access-key middleware gates these routes like every other path.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from backend.config import settings
-from backend.patchbot import agent, catalog, controls, roles, service, store, telemetry, tools
+from backend.patchbot import agent, catalog, controls, mcp_scan, mcp_servers, roles, service, store, telemetry, tools
 from backend.patchbot.run import Run
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/patchbot", tags=["patchbot"])
+# The MCP endpoint: each server's tool catalogue, for scanners (mcp_servers).
+mcp_router = APIRouter(prefix="/mcp/patchbot", tags=["patchbot-mcp"])
 
 _SESSION_RE = r"^[A-Za-z0-9_-]{6,64}$"
 _seen_sessions: set = set()
@@ -64,6 +68,19 @@ class AdvisoryBody(BaseModel):
 class RollbackBody(BaseModel):
     cve: str = Field(max_length=24)
     server: Optional[str] = Field(default=None, max_length=32)
+
+
+class McpScanBody(BaseModel):
+    server: Optional[str] = Field(default=None, max_length=40)
+
+
+class VendorBody(BaseModel):
+    action: Literal["connect", "disconnect"]
+    force: bool = False
+
+
+class VendorPoisonBody(BaseModel):
+    poisoned: bool
 
 
 def _require_enabled() -> None:
@@ -212,11 +229,39 @@ async def patch(cve: str, body: PatchBody, request: Request) -> Dict[str, Any]:
 
 
 @router.post("/findings/{cve}/advisory")
-async def follow_advisory(cve: str, request: Request) -> Dict[str, Any]:
+async def follow_advisory(cve: str, request: Request,
+                          source: Literal["document", "vendor_mcp"] = "document") -> Dict[str, Any]:
     run = _run(request, "advisory")
-    result = await run_in_threadpool(agent.advisory_flow, run, _cve(cve))
+    result = await run_in_threadpool(agent.advisory_flow, run, _cve(cve), source)
     _finish(run)
     return result
+
+
+# --------------------------------------------------------------------------- MCP servers and Cisco MCP Scanner
+
+@router.get("/mcp")
+async def mcp_overview(request: Request) -> Dict[str, Any]:
+    who = _initiator(request)
+    return await run_in_threadpool(mcp_scan.overview, who.username)
+
+
+@router.post("/mcp/scan")
+async def mcp_scan_servers(body: McpScanBody, request: Request) -> Dict[str, Any]:
+    run = _run(request, "mcp_scan")
+    if body.server and body.server not in mcp_servers.SERVERS:
+        raise HTTPException(status_code=404, detail="No such MCP server.")
+    results = await run_in_threadpool(mcp_scan.scan, run, [body.server] if body.server else None)
+    return {"results": results, "overview": await run_in_threadpool(mcp_scan.overview, run.owner)}
+
+
+@router.post("/mcp/vendor")
+async def mcp_vendor(body: VendorBody, request: Request) -> Dict[str, Any]:
+    run = _run(request, "mcp_connect")
+    if body.action == "disconnect":
+        result = await run_in_threadpool(mcp_scan.disconnect_vendor, run)
+    else:
+        result = await run_in_threadpool(lambda: mcp_scan.connect_vendor(run, force=body.force))
+    return {**result, "overview": await run_in_threadpool(mcp_scan.overview, run.owner)}
 
 
 @router.post("/chat")
@@ -247,6 +292,14 @@ async def reset(request: Request) -> Dict[str, Any]:
 async def demo_advisory(body: AdvisoryBody, request: Request) -> Dict[str, Any]:
     run = _run(request, "demo")
     return await run_in_threadpool(service.publish_advisory, run, _cve(body.cve), body.poisoned)
+
+
+@router.post("/demo/vendor-mcp")
+async def demo_vendor_mcp(body: VendorPoisonBody, request: Request) -> Dict[str, Any]:
+    """Lab 4, MCP variant: the vendor's server ships a poisoned tool description."""
+    run = _run(request, "demo")
+    vendor = await run_in_threadpool(mcp_scan.set_vendor_poisoned, run, body.poisoned)
+    return {"vendor": vendor, "overview": await run_in_threadpool(mcp_scan.overview, run.owner)}
 
 
 @router.post("/demo/rollback")
@@ -299,3 +352,48 @@ async def decide(change_id: str, body: DecisionBody, request: Request) -> Dict[s
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+# --------------------------------------------------------------------------- MCP endpoint (catalogues for scanners)
+
+_OWNER_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _vendor_poisoned(owner: str) -> bool:
+    state = store.peek_estate(owner)
+    return bool(state and (state.get("vendor_mcp") or {}).get("poisoned"))
+
+
+def _check_mcp_path(owner: str, server_id: str) -> None:
+    _require_enabled()
+    if server_id not in mcp_servers.SERVERS or not _OWNER_RE.match(owner):
+        raise HTTPException(status_code=404, detail="No such MCP server.")
+
+
+@mcp_router.post("/{owner}/{server_id}")
+async def mcp_endpoint(owner: str, server_id: str, request: Request) -> Response:
+    """Streamable HTTP, JSON responses: initialize, ping, tools/list."""
+    _check_mcp_path(owner, server_id)
+    try:
+        payload = await request.json()
+    except ValueError:
+        return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}},
+                            status_code=400)
+    poisoned = (await run_in_threadpool(_vendor_poisoned, owner)) if server_id == mcp_servers.VENDOR else False
+    messages = payload if isinstance(payload, list) else [payload]
+    replies = [r for r in (mcp_servers.handle(server_id, m, vendor_poisoned=poisoned) for m in messages) if r]
+    if not replies:
+        return Response(status_code=202)
+    return JSONResponse(replies if isinstance(payload, list) else replies[0])
+
+
+@mcp_router.get("/{owner}/{server_id}")
+async def mcp_endpoint_get(owner: str, server_id: str) -> Response:
+    _check_mcp_path(owner, server_id)
+    return Response(status_code=405, headers={"Allow": "POST, DELETE"})
+
+
+@mcp_router.delete("/{owner}/{server_id}")
+async def mcp_endpoint_delete(owner: str, server_id: str) -> Response:
+    _check_mcp_path(owner, server_id)
+    return Response(status_code=204)

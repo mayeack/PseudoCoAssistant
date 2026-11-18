@@ -341,6 +341,10 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   the poisoned Lab 1 model.
 - **Synthetic means synthetic.** Restricted tools never execute anything;
   copy and pages say what is staged. No Anthropic names or assets in the UI.
+- **MCP servers are scanned before trust.** Cisco MCP Scanner (static mode, on
+  the `/mcp/patchbot/...` catalogue) gates the vendor server; a changed
+  catalogue voids its scan. Default analyzer `yara`; never default `llm` on the
+  box model (false positives). The scanner subprocess gets a minimal env.
 - Extend `tests/test_patchbot.py` in the same PR as any PatchBot change, and
   re-run `tests/manual/probe_patchbot.py` against a live model after any
   prompt or tool change.

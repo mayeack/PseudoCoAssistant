@@ -73,6 +73,11 @@ body.pb { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 Int
 .pb-menu button { display: block; width: 100%; text-align: left; padding: 7px 10px; border: 0; background: none; color: var(--fg); font: inherit; cursor: pointer; border-radius: 4px; }
 .pb-menu button:hover, .pb-menu button:focus-visible { background: var(--accent-soft); outline: none; }
 .pb-pill { display: inline-block; font: 600 11px Inter, sans-serif; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
+.pb-mcp-list { display: grid; gap: 8px; }
+.pb-mcp { padding: 10px 12px; display: grid; gap: 6px; }
+.pb-mcp-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.pb-mcp-findings { margin: 0; padding-left: 18px; font-size: 12.5px; overflow-wrap: anywhere; }
+.pb-mcp .pb-btn { justify-self: start; }
 .pill-critical { background: color-mix(in srgb, var(--crit) 16%, var(--surface)); color: var(--crit); }
 .pill-high { background: color-mix(in srgb, var(--high) 16%, var(--surface)); color: var(--high); }
 .pill-medium { background: var(--amber-soft); color: var(--med); }

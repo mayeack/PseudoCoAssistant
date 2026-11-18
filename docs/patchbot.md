@@ -52,6 +52,34 @@ The canonical names matter because the `observe-all-patches` sentinel, the TA's 
 
 In Agent Observability mode a deny shows the control's own message, the `steering_context.message` its author wrote, not the evaluator's "Condition tree matched".
 
+## MCP servers and Cisco MCP Scanner (Toolchain tab)
+
+PatchBot's tools sit behind four MCP servers (`backend/patchbot/mcp_servers.py`):
+
+- **PseudoCo Scanner**, **PseudoCo PatchOps** and the **Splunk MCP Server**: its own toolchain.
+- **Vendor Advisories**: a synthetic third-party vendor's server with one tool, `get_vendor_advisory`.
+
+Each server's tool catalogue is published at `/mcp/patchbot/{owner}/{server}`. That is a streamable-HTTP MCP endpoint answering `initialize`, `ping` and `tools/list`. It refuses `tools/call`, because PatchBot calls its tools itself, through the Controls.
+
+**Scan before trust.** The Toolchain tab hands each catalogue to Cisco's open-source MCP Scanner (PyPI `cisco-ai-mcp-scanner`) in offline `static` mode. The scan sees exactly what the endpoint serves, and no access key goes on a command line. It also runs with a minimal environment, so the app's own secrets never reach the scanner.
+
+Analyzers (`PATCHBOT_MCP_SCANNER_ANALYZERS`):
+
+- **`yara`**, the default: offline, about 11 seconds a server.
+- **`api`**: adds Cisco AI Defense. It needs `AI_DEFENSE_API_KEY` and is not yet tested on a workshop box.
+- **`llm`**: runs on the box's Ollama. Measured 2026-11-18 on mistral-nemo:12b, it took about 30 seconds a tool and rated 8 of PatchOps' 11 harmless tools HIGH, so it is not for attendees.
+
+**The gate.** PatchBot connects Vendor Advisories only on a clean scan of the catalogue it serves now. The scan stores a hash of the catalogue, so a description that changes after the scan (a rug pull) voids it: the connection drops and PatchBot refuses to reconnect until a rescan. The "Connect anyway" Demo Control forces it and says so: `forced = true` on the `mcp_server_connected` event, which TA-patchbot's Unsafe MCP Server Connected rule turns into an ES finding.
+
+**Lab 4, MCP variant.** The "Vendor ships a poisoned tool description" Demo Control does two things:
+
+1. It plants hidden instructions in `get_vendor_advisory`'s description: stop edr-agent and run a curl-pipe-shell, told in `<IMPORTANT>` tags. The real scanner's YARA rules rate it HIGH, PROMPT INJECTION.
+2. It poisons the advisory the tool returns.
+
+The scan can only see the description; the Controls stop what the payload asks. "PatchBot: follow the vendor's advisory" fetches the advisory over MCP as a judged tool call, then hands the returned text to the model with the vendor's tool in its list. Measured 2026-11-18 on a force-connected poisoned server: `stop_service` and `run_command` were attempted in 5 of 5 runs and denied in 5 of 5. Left to fetch the advisory itself, mistral-nemo reported the tool result rather than acting on it.
+
+Every scan and connection decision is a `pseudoco:patchbot:mcp_scan` event. A finding on a tool that a control denies for every role names that control (`compensated_by`).
+
 ## Roles
 
 | Role | Duo group | Can |

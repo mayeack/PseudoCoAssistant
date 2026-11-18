@@ -44,6 +44,13 @@ def load_estate(owner: str) -> Dict[str, Any]:
         return state
 
 
+def peek_estate(owner: str) -> Optional[Dict[str, Any]]:
+    """The owner's estate if it exists; never seeds one (for unauthenticated reads)."""
+    with get_db_context() as db:
+        row = db.get(PatchbotEstate, owner)
+        return dict(row.state) if row is not None else None
+
+
 def save_estate(owner: str, state: Dict[str, Any]) -> None:
     with get_db_context() as db:
         row = db.get(PatchbotEstate, owner)

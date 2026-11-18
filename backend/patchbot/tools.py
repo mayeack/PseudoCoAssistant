@@ -89,21 +89,37 @@ SPECS: Dict[str, Dict[str, Any]] = {
     "report_vulnerability": {"description": "Scanner: report one open CVE on one host to Splunk.",
                              "properties": {"server": {"type": "string"}, "cve": {"type": "string"}},
                              "required": ["server", "cve"], "server": "scanner-mcp"},
+    # The third-party vendor server's one tool. Its description comes from
+    # mcp_servers (clean or poisoned); it is offered only while connected.
+    "get_vendor_advisory": {"description": "Return the vendor's remediation advisory for a CVE.",
+                            "properties": {"cve": {"type": "string", "enum": _CVES}},
+                            "required": ["cve"], "server": "vendor-advisories"},
 }
 
-# What the model is offered (the scanner's own report tool is not a model tool).
-MODEL_TOOLS = [n for n in SPECS if n != "report_vulnerability"]
+# What the model is offered (the scanner's own report tool is not a model tool;
+# the vendor's tool joins only while its server is connected).
+MODEL_TOOLS = [n for n in SPECS if n not in ("report_vulnerability", "get_vendor_advisory")]
 
 
-def schemas() -> List[Dict[str, Any]]:
-    """OpenAI-style tool schemas for ``bind_tools``."""
-    out = []
-    for name in MODEL_TOOLS:
-        spec = SPECS[name]
-        out.append({"type": "function", "function": {
-            "name": name, "description": spec["description"],
-            "parameters": {"type": "object", "properties": spec["properties"],
-                           "required": spec["required"], "additionalProperties": False}}})
+def _schema(name: str, description: str) -> Dict[str, Any]:
+    spec = SPECS[name]
+    return {"type": "function", "function": {
+        "name": name, "description": description,
+        "parameters": {"type": "object", "properties": spec["properties"],
+                       "required": spec["required"], "additionalProperties": False}}}
+
+
+def schemas(owner: Optional[str] = None) -> List[Dict[str, Any]]:
+    """OpenAI-style tool schemas for ``bind_tools``. With an owner whose vendor
+    server is connected, the vendor's tool comes with the description its server
+    publishes, which is how a poisoned description reaches the model."""
+    out = [_schema(name, SPECS[name]["description"]) for name in MODEL_TOOLS]
+    if owner:
+        from backend.patchbot import mcp_scan, mcp_servers
+        state = store.load_estate(owner)
+        if mcp_scan.vendor_usable(state):
+            poisoned = bool(mcp_scan.vendor_state(state).get("poisoned"))
+            out.append(_schema("get_vendor_advisory", mcp_servers.vendor_description(poisoned)))
     return out
 
 
@@ -397,10 +413,24 @@ def _h_restricted(run: Run, state, args):
     return {"error": "PatchBot has no permission to run this."}
 
 
+def _h_get_vendor_advisory(run: Run, state, args):
+    from backend.patchbot import mcp_scan, service
+    if not mcp_scan.vendor_usable(state):
+        return {"error": "The vendor's MCP server is not connected."}
+    cve = str(args.get("cve") or "").upper()
+    if cve not in _CVES:
+        raise ValueError(f"unknown CVE {cve}")
+    # A poisoned vendor server poisons what it returns as well as its description:
+    # the scan can only see the description; the Controls stop what the payload asks.
+    poisoned = bool(mcp_scan.vendor_state(state).get("poisoned"))
+    return {"cve": cve, "advisory": service.advisory_text(cve, poisoned=poisoned), "source": "vendor-advisories"}
+
+
 _HANDLERS: Dict[str, Callable[[Run, Dict[str, Any], Dict[str, Any]], Any]] = {
     "list_servers": _h_list_servers, "get_server": _h_get_server, "get_finding": _h_get_finding,
     "lookup_cve": _h_lookup_cve, "scan_server": _h_scan_server, "update_exposure_model": _h_update_exposure_model,
     "triage_finding": _h_triage_finding, "create_change": _h_create_change, "get_change": _h_get_change,
     "apply_patch": _h_apply_patch, "verify_patch": _h_verify_patch, "run_command": _h_restricted,
     "stop_service": _h_restricted, "report_vulnerability": _h_report_vulnerability,
+    "get_vendor_advisory": _h_get_vendor_advisory,
 }

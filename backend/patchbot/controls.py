@@ -27,7 +27,8 @@ from typing import Any, Dict, List, Optional
 from backend.config import settings
 
 READ_TOOLS = frozenset({"list_servers", "get_server", "get_finding", "lookup_cve",
-                        "scan_server", "verify_patch", "get_change", "report_vulnerability"})
+                        "scan_server", "verify_patch", "get_change", "report_vulnerability",
+                        "get_vendor_advisory"})
 MUTATING_TOOLS = frozenset({"update_exposure_model", "triage_finding", "create_change",
                             "apply_patch", "run_command", "stop_service"})
 AGENT_NAME = "pseudoco-assistant-patchbot"
