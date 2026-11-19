@@ -223,8 +223,9 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   - Authorization, Cookie, Set-Cookie and X-Access-Key values, the app's own
     cookies, Bearer tokens and JWT-shaped strings;
   - the exact values of the configured secrets (`DUO_CLIENT_SECRET`,
-    `DUO_ADMIN_SKEY`, `CII_CLIENT_SECRET`, `CII_ACCESS_TOKEN`, `ACCESS_KEY`),
-    compiled once at startup and again when the config changes.
+    `DUO_ADMIN_SKEY`, `CII_CLIENT_SECRET`, `CII_ACCESS_TOKEN`,
+    `DUO_AGENT_CLIENT_SECRET`, `ACCESS_KEY`), compiled once at startup and
+    again when the config changes.
 
   Nothing a request sends is ever registered, so no input can blank a username
   out of the logs. A new credential goes on that configured-secrets list.
@@ -244,6 +245,16 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   (every minute while it fails) on a daemon thread. Duo's TLS uses the CA
   bundle in `REQUESTS_CA_BUNDLE` (else `CURL_CA_BUNDLE`) like every other
   outbound client, and duo_universal's pinning only when none is configured.
+- **The agent token** (`backend/services/agent_identity.py`, since 4.24.0) is
+  the app's own client-credentials token as the Duo Agent Directory agent
+  "PseudoCo Assistant". Identity Intelligence then lists the app as an
+  Agentic App non-human identity.
+  - It is asked for on a daemon thread: at startup, then 5 minutes before
+    each token expires, with backoff after a failure. Nothing else ever asks
+    for one: not a request, a turn or a tool call.
+  - It is inert unless `DUO_ENABLED` and the `DUO_AGENT_*` keys are set.
+  - It authorizes nothing. Never present it as Duo governing the agent's
+    tool calls.
 
 ## Identity Risk Gate
 

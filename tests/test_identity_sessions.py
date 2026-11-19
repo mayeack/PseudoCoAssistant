@@ -127,6 +127,8 @@ IDENTITY_SETTINGS = {
     "duo_admin_ikey", "duo_admin_skey", "cii_client_id", "cii_client_secret", "cii_token_url",
     "cii_api_url", "identity_allowed_users", "identity_session_ttl_minutes",
     "identity_status_ttl_seconds", "identity_fail_open",
+    # Duo Agent Directory (4.24.0): the agent's own client-credentials client.
+    "duo_agent_client_id", "duo_agent_client_secret", "duo_agent_token_url", "duo_agent_scope",
 }
 
 

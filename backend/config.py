@@ -575,6 +575,19 @@ class Settings(BaseSettings):
     # because CII gives an API client only 6 tokens an hour. Used until the
     # expiry written in it (CII's last 24 h); never refreshed by the app.
     cii_access_token: str = ""
+    # Duo Agent Directory: the confidential client, bound to the "PseudoCo
+    # Assistant" agent, of the Duo OAuth 2.1 / OIDC application "PseudoCo
+    # Assistant Agent API" (Client Credentials grant). The app asks for a token
+    # at startup and again shortly before each one expires, so Duo records the
+    # agent as seen and Identity Intelligence lists it as an Agentic App
+    # non-human identity (backend/services/agent_identity.py). The token
+    # authorizes nothing yet. Inert unless DUO_ENABLED with all three set and
+    # an https token URL.
+    duo_agent_client_id: str = ""
+    duo_agent_client_secret: str = ""
+    duo_agent_token_url: str = ""
+    # Sent as the token request's scope when set (e.g. "pseudoco:tools").
+    duo_agent_scope: str = ""
     # Comma list of the usernames this instance accepts (trusted personas, the
     # room's victim, this instance's participant account).
     identity_allowed_users: str = ""

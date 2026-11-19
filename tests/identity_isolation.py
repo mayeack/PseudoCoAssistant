@@ -36,7 +36,8 @@ import httpx
 #: identity_lookup and identity_signin are not configured, so they send nothing.
 IDENTITY_SETTINGS = ("public_base_url", "duo_client_id", "duo_client_secret", "duo_api_host", "duo_admin_ikey",
                      "duo_admin_skey", "cii_client_id", "cii_client_secret", "cii_token_url", "cii_api_url",
-                     "cii_access_token", "identity_allowed_users")
+                     "cii_access_token", "duo_agent_client_id", "duo_agent_client_secret", "duo_agent_token_url",
+                     "duo_agent_scope", "identity_allowed_users")
 #: The other Lab 5 keys lab5-setup writes (deploy/lab5/lab5_envfile.LAB5_KEYS):
 #: put back to the app's defaults (``Settings`` field defaults).
 LAB5_DEFAULT_SETTINGS = ("identity_session_ttl_minutes", "identity_status_ttl_seconds", "identity_fail_open",
@@ -63,10 +64,12 @@ def _refuse_websdk(*, client_id: str = "", client_secret: str = "", host: str = 
 
 
 def restore() -> None:
-    """Route identity_lookup through the refusing transport again."""
-    from backend.services import identity_lookup
+    """Route identity_lookup and the Duo agent token refresher through the
+    refusing transport again."""
+    from backend.services import agent_identity, identity_lookup
 
     identity_lookup.set_transport(REFUSING_TRANSPORT)
+    agent_identity.set_transport(REFUSING_TRANSPORT)
 
 
 def refuse_websdk() -> None:
