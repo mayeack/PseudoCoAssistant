@@ -21,8 +21,8 @@
     if (!r.ok) { const err = new Error((body && body.detail) || ('HTTP ' + r.status)); err.status = r.status; throw err; }
     return body;
   }
-  async function boot() {
-    const me = await api('/me');
+  async function boot(override) {
+    const me = override || await api('/me');
     if (!me.initiator) {
       $('board').hidden = true; $('whoPanel').hidden = false;
       const list = $('personaList'); list.textContent = '';
@@ -33,11 +33,18 @@
     }
     $('whoPanel').hidden = true; $('board').hidden = false;
     const chip = $('whoChip'); chip.hidden = false;
-    chip.textContent = me.initiator.role_label + ' · ' + me.initiator.username + (me.initiator.auth_method === 'duo' ? ' · Duo' : ' · role map');
+    chip.textContent = me.initiator.role_label + ' · ' + me.initiator.username + (me.initiator.auth_method === 'duo' ? ' · Duo' : ' · role map · Switch');
+    // Role-map personas switch here (the requester hands the change to an approver); with Duo the sign-in decides.
+    chip.onclick = me.duo_mode ? null : () => boot(Object.assign({}, me, { initiator: null }));
     load();
   }
+  let loadSeq = 0;
   async function load() {
+    // Only the newest request may draw: a slower reload (after Approve, or the
+    // 8 s refresh) must not overwrite the tab the person just picked.
+    const seq = ++loadSeq;
     const data = await api('/changes?scope=' + scope);
+    if (seq !== loadSeq) return;
     $('boardHelp').textContent = data.can_decide ? 'You can approve or reject changes you did not request.' : 'Your role can read changes; a Change Approver decides them.';
     const ul = $('changes'); ul.textContent = '';
     data.changes.forEach((c) => ul.append(card(c, data.can_decide, data.initiator.username)));
@@ -79,5 +86,7 @@
     load();
   }));
   boot();
-  setInterval(() => { if (!document.hidden && !$('board').hidden) load(); }, 8000);
+  // The refresh redraws every card, so it waits while an approver writes a decision note.
+  const writing = () => [...document.querySelectorAll('.pb-note input')].some((i) => i.value || i === document.activeElement);
+  setInterval(() => { if (!document.hidden && !$('board').hidden && !writing()) load(); }, 8000);
 })();

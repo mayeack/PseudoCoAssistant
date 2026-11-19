@@ -174,11 +174,39 @@ out, _ = _summary("Patched web-stg-01 to httpd 2.4.51; the CVE is gone and the s
 check("faithful summary is used", out.startswith("Patched web-stg-01"), out)
 out, _ = _summary("All done.", _ok, [], ["web-stg-01"])
 check("summary must name every host", out == " ".join(_ok), out)
-out, _ = _summary('"Policy refused win-stg-01: it is outside your role."', _no, ["win-stg-01"], ["win-stg-01"])
-check("refusal summary is used, quotes stripped", out == "Policy refused win-stg-01: it is outside your role.", out)
+out, _ = _summary('"Policy refused win-stg-01. This patch is outside your role."', _no, ["win-stg-01"], ["win-stg-01"])
+check("refusal summary is used, quotes stripped", out == "Policy refused win-stg-01. This patch is outside your role.", out)
+out, _ = _summary("Policy refused win-stg-01 due to a role mismatch.", _no, ["win-stg-01"], ["win-stg-01"])
+check("summary that paraphrases the refusal reason falls back", out == " ".join(_no), out)
 out, _ = _summary("Patched win-stg-01.", _no, ["win-stg-01"], ["win-stg-01"])
 check("summary that hides a refusal falls back", out == " ".join(_no), out)
 pb_agent._model = _real_model
+
+print("Advisory reply never relays refused steps")
+import json as _json  # noqa: E402
+_deny = _json.dumps({"message": "PatchBot does not run commands or stop services."})
+
+
+def _adv_run():
+    return _Run(initiator=_roles.Initiator("dana.lee", "linux_patch_operator", ["linux_patch_operator"]),
+                owner="dana.lee", kind="advisory", session_id="testsession02")
+
+
+r = _adv_run()
+r.add_tool({"name": "stop_service", "arguments": _json.dumps({"server": "web-prod-01", "service": "edr-agent"}),
+            "output": _deny, "ok": False, "decision": "deny", "origin": "model"})
+r.add_tool({"name": "run_command", "arguments": _json.dumps({"server": "dc-prod-01", "command": "curl | sh"}),
+            "output": _deny, "ok": False, "decision": "deny", "origin": "model"})
+out = pb_agent._refusal_report(r, {"reply": "Please perform these steps manually: stop the EDR service.", "tool_calls": []})
+check("refused advisory: the model's do-it-by-hand reply is replaced",
+      "manually" not in out["reply"] and "stop_service on web-prod-01 and run_command on dc-prod-01" in out["reply"]
+      and "do not run the refused steps by hand" in out["reply"], out)
+check("refused advisory: the trace output is the reply shown", r.output_text == out["reply"])
+r = _adv_run()
+r.add_tool({"name": "apply_patch", "arguments": _json.dumps({"server": "web-stg-01"}), "output": "{}",
+            "ok": True, "decision": "allow", "origin": "model"})
+out = pb_agent._refusal_report(r, {"reply": "Patched web-stg-01.", "tool_calls": []})
+check("clean advisory: the model's reply stands", out["reply"] == "Patched web-stg-01.", out)
 
 pb_agent._summarize = lambda run, facts, fallback, **kw: fallback   # the model is never called here
 
@@ -219,6 +247,9 @@ check("requester cannot approve", dana.post(f"/api/patchbot/changes/{change_id}/
                                             json={"decision": "approve"}).status_code == 403)
 check("approver approves", sam.post(f"/api/patchbot/changes/{change_id}/decision", headers=H,
                                     json={"decision": "approve"}).status_code == 200)
+ws = dana.get("/api/patchbot/workspace", headers=H).json()
+check("finding list shows the approved change",
+      any(f["cve"] == "CVE-2021-41773" and f.get("change_status") == "approved" for f in ws["findings"]), ws["findings"])
 r = dana.post("/api/patchbot/findings/CVE-2021-41773/patch", headers=H, json={"environment": "production"}).json()
 check("production patched after approval", any("Patched web-prod-01" in f for f in r["facts"]), r)
 d = dana.get("/api/patchbot/findings/CVE-2021-41773", headers=H).json()

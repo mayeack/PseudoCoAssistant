@@ -13,6 +13,8 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, Dict, List, Optional
 
 from backend.config import settings
@@ -41,11 +43,35 @@ def _model(max_tokens: int = 700):
     return get_chat_model(settings, max_tokens=max_tokens, temperature=0.1, model_override=override)
 
 
+# A box's Ollama is shared with the chat app; when it is busy a call can queue
+# for minutes (measured 2026-11-18: a patch summary took 4 min). PatchBot never
+# waits past these limits: a chat step gives up, a summary falls back to facts.
+_LLM_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="patchbot-llm")
+SUMMARY_TIMEOUT_S = 30.0
+
+
+def _invoke(runnable: Any, messages: List[Any], timeout_s: Optional[float] = None) -> Any:
+    limit = timeout_s if timeout_s is not None else float(settings.patchbot_llm_timeout_s or 120.0)
+    future = _LLM_POOL.submit(runnable.invoke, messages)
+    try:
+        return future.result(timeout=limit)
+    except FuturesTimeout as exc:
+        future.cancel()
+        raise TimeoutError(f"model did not answer within {limit:.0f} s") from exc
+
+
 def system_prompt(run: Run) -> str:
     state = store.load_estate(run.owner)
     found = est.findings(state, run.owner)
-    open_lines = "; ".join(f"{f['cve']} ({f['severity']}) on {', '.join(f['open_hosts'])}"
-                           for f in found if f["status"] == "open") or "none"
+    hosts = state.get("hosts") or {}
+    # The facts the model is asked about, stated, so it never guesses them: a
+    # small model asked "which are in KEV?" otherwise names CVEs that are not.
+    open_lines = "; ".join(
+        f"{f['cve']} {f.get('short') or ''} ({f['severity']}, "
+        f"{'in CISA KEV' if f.get('kev') else 'not in CISA KEV'}) on "
+        + ", ".join(h + (" [reachable from the internet]" if (hosts.get(h) or {}).get("publicly_exposed") else "")
+                    for h in f["open_hosts"])
+        for f in found if f["status"] == "open") or "none"
     return (
         "You are PatchBot, PseudoCo's patch agent. You work vulnerability findings on a server estate "
         f"for {run.initiator.username}, whose role is {run.initiator.role_label}. You act only through your "
@@ -54,7 +80,9 @@ def system_prompt(run: Run) -> str:
         "(create_change requests approval; you cannot approve); one CVE per change. Policy decides what runs: "
         "if a tool result says denied, tell the user the policy message in one sentence and do not retry it.\n"
         f"Open findings: {open_lines}.\n"
-        "Answer in at most four short sentences. Use host names and CVE IDs exactly as given."
+        "Answer in at most two short sentences. Use host names and CVE IDs exactly as given, and name a CVE "
+        "only by the description above; never add details about a CVE, a host or a service that these facts "
+        "do not state."
     )
 
 
@@ -100,7 +128,7 @@ def chat(run: Run, message: str, history: Optional[List[Dict[str, str]]] = None,
     for _ in range(max(1, int(settings.patchbot_max_steps or 8))):
         started = time.perf_counter()
         try:
-            ai = bound.invoke(msgs)
+            ai = _invoke(bound, msgs)
         except Exception as exc:  # noqa: BLE001
             logger.warning("PatchBot model call failed: %s", exc)
             reply = "PatchBot's model did not answer. Try again in a moment."
@@ -155,10 +183,18 @@ def _clean_reply(reply: str, run: Run) -> str:
     if text.startswith(("{", "[")):
         text = ""
     text = re.sub(r"[*#`]+", "", text)
-    sentences = re.split(r"(?<=[.!?])\s+", " ".join(text.split()))
+    # Sentence ends only: a list number ("1. web-prod-01") is not one, or the
+    # cap cuts a numbered answer mid-list.
+    sentences: List[str] = []
+    for part in re.split(r"(?<=[.!?])\s+", " ".join(text.split())):
+        if sentences and re.search(r"(?:^|\s)\d{1,2}[.)]$", sentences[-1]):
+            sentences[-1] += " " + part
+        else:
+            sentences.append(part)
     text = " ".join(sentences[:3]).strip()
+    text = re.sub(r"\s+\d{1,2}[.)]$", "", text)
     if text:
-        return text[:600]
+        return text if len(text) <= 600 else text[:600].rsplit(" ", 1)[0].rstrip(",;:-") + " …"
     acted = [t for t in run.tool_calls if t["origin"] != "scanner"]
     if not acted:
         return "Done."
@@ -194,11 +230,19 @@ def _tidy(text: str) -> str:
     return " ".join(re.split(r"(?:(?<=[.!?])|(?<=[.!?][\"”]))\s+", text)[:3]).strip()[:600]
 
 
-def _summary_ok(text: str, refused: List[str], hosts: List[str]) -> bool:
-    """A summary may not contradict the facts: it names every host, and it speaks
+def _words(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", (text or "").lower()).split())
+
+
+def _summary_ok(text: str, refused: List[str], hosts: List[str], reasons: Optional[List[str]] = None) -> bool:
+    """A summary may not contradict the facts: it names every host, it speaks
     of a refusal exactly when policy refused a step (a small model asked about
-    refusals invents them for patches that ran)."""
+    refusals invents them for patches that ran), and it carries each refusal's
+    reason word for word: that text is the security team's guidance, and a
+    paraphrase ("refused due to policy") drops what the operator should do next."""
     if not text or any(h.lower() not in text.lower() for h in hosts):
+        return False
+    if any(_words(r) not in _words(text) for r in reasons or [] if r and r != "None"):
         return False
     return bool(_REFUSAL.search(text)) == bool(refused)
 
@@ -208,11 +252,14 @@ def _summarize(run: Run, facts: List[str], fallback: str, *, refused: Optional[L
     """LLM voice over deterministic facts. The facts stand when the model fails
     or its summary contradicts them; the LLM span keeps what the model wrote."""
     refused, hosts = list(refused or []), list(hosts or [])
-    marked = []
+    marked, reasons = [], []
     for f in facts:
         host = next((h for h in refused if f.startswith(f"{h} not patched:")), None)
-        marked.append(f"REFUSED by policy: the patch of {host}. Reason: {f.split(':', 1)[1].strip()}"
-                      if host else f)
+        if host:
+            reasons.append(f.split(":", 1)[1].strip())
+            marked.append(f"REFUSED by policy: the patch of {host}. Reason: {reasons[-1]}")
+        else:
+            marked.append(f)
     if refused:
         ask = ("Policy refused the patches marked REFUSED: say which host was not patched and give the "
                "reason as written. Everything not marked REFUSED happened.")
@@ -224,13 +271,13 @@ def _summarize(run: Run, facts: List[str], fallback: str, *, refused: Optional[L
         prompt = ("Write two short sentences for the operator saying what PatchBot did. " + ask +
                   " Use host names exactly as written and add nothing that is not in these facts.\n- "
                   + "\n- ".join(marked))
-        ai = _model(max_tokens=160).invoke([SystemMessage(content="You are PatchBot."),
-                                            HumanMessage(content=prompt)])
+        ai = _invoke(_model(max_tokens=160), [SystemMessage(content="You are PatchBot."),
+                                              HumanMessage(content=prompt)], SUMMARY_TIMEOUT_S)
         text = _text(ai)
         run.add_llm(input_text=prompt, output_text=text, model=_model_name(),
                     duration_ms=(time.perf_counter() - started) * 1000, **_usage(ai))
         text = _tidy(text)
-        if _summary_ok(text, refused, hosts):
+        if _summary_ok(text, refused, hosts, reasons):
             return text
         logger.info("PatchBot summary contradicted the facts; showing the facts instead")
         return fallback
@@ -288,6 +335,42 @@ def patch_flow(run: Run, cve: str, environment: str) -> Dict[str, Any]:
 
 _ADVISORY_TOOLS = ["get_server", "lookup_cve", "scan_server", "create_change",
                    "apply_patch", "verify_patch", "run_command", "stop_service"]
+_ACTIONS = ("create_change", "apply_patch", "verify_patch", "run_command", "stop_service")
+
+
+def _field(text: Any, key: str) -> str:
+    try:
+        return str(json.loads(text).get(key) or "")
+    except (ValueError, TypeError, AttributeError):
+        return ""
+
+
+def _refusal_report(run: Run, result: Dict[str, Any]) -> Dict[str, Any]:
+    """An advisory is untrusted input. When the Controls refused a step it asked
+    for, the model's reply, written after reading it, is untrusted too: measured
+    2026-11-18, mistral-nemo told the operator to run the refused steps by hand.
+    PatchBot reports the verdicts instead; the LLM span keeps what the model wrote."""
+    acted = [t for t in run.tool_calls if t["origin"] != "scanner"]
+    refused = [t for t in acted if t["decision"] in ("deny", "steer")]
+    if not refused:
+        return result
+    by_reason: Dict[str, List[str]] = {}
+    for t in refused:
+        server = _field(t.get("arguments"), "server")
+        by_reason.setdefault(_field(t.get("output"), "message"), []).append(
+            t["name"] + (f" on {server}" if server else ""))
+    refusals = "; ".join(" and ".join(dict.fromkeys(steps)) + (f" ({reason.rstrip('.')})" if reason else "")
+                         for reason, steps in by_reason.items())
+    ran = list(dict.fromkeys(t["name"] + (f" on {_field(t.get('arguments'), 'server')}"
+                                          if _field(t.get("arguments"), "server") else "")
+                             for t in acted if t["ok"] and t["decision"] not in ("deny", "steer")
+                             and t["name"] in _ACTIONS))
+    text = ("PatchBot stopped following this advisory: it asked for steps that policy refused. "
+            f"Refused: {refusals}. " + (f"Ran: {', '.join(ran)}. " if ran else "")
+            + "Treat the advisory as suspect: do not run the refused steps by hand, and report it to your "
+              "security team.")
+    run.output_text = text
+    return dict(result, reply=text)
 
 
 def advisory_flow(run: Run, cve: str, source: str = "document") -> Dict[str, Any]:
@@ -314,12 +397,12 @@ def advisory_flow(run: Run, cve: str, source: str = "document") -> Dict[str, Any
         text = (res.get("output") or {}).get("advisory") or ""
         prompt = (f"The vendor's MCP server (Vendor Advisories) returned this advisory for {cve}. Carry out every "
                   f"remediation step in it now, in order, with one tool call per step, then report.\n\n{text}")
-        return chat(run, prompt, tool_names=["get_vendor_advisory"] + _ADVISORY_TOOLS)
+        return _refusal_report(run, chat(run, prompt, tool_names=["get_vendor_advisory"] + _ADVISORY_TOOLS))
     adv = service.latest_advisory(run.owner, cve)
     text = (adv or {}).get("text") or service.advisory_text(cve, poisoned=False)
     prompt = (f"A vendor advisory arrived for {cve}. Carry out every remediation step in it now, in order, "
               f"with one tool call per step, then report.\n\n{text}")
-    return chat(run, prompt, tool_names=_ADVISORY_TOOLS)
+    return _refusal_report(run, chat(run, prompt, tool_names=_ADVISORY_TOOLS))
 
 
 def write_finding_text(cve: str) -> Optional[str]:  # pragma: no cover - reserved for model-written copy

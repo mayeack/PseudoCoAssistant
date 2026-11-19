@@ -303,6 +303,9 @@ def roll_back(run: Run, cve: str, server: Optional[str] = None) -> Dict[str, Any
 def workspace(owner: str) -> Dict[str, Any]:
     state = store.load_estate(owner)
     found = est.findings(state, owner)
+    for f in found:     # the list badge shows where the finding's change stands, not just that one exists
+        if f.get("change_id"):
+            f["change_status"] = (store.get_change(f["change_id"]) or {}).get("status")
     return {"owner": owner, "hosts": est.hosts(state), "findings": found, "counts": est.counts(found),
             "exposure_answered": bool(state.get("exposure_answered")),
             "full_read_done": bool(state.get("full_read_done")), "catalog_source": catalog.source(),

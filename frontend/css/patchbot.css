@@ -25,6 +25,8 @@ body.pb { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 Int
 .pb-link { background: none; border: 0; color: var(--accent); cursor: pointer; font: inherit; padding: 0; }
 .pb-chip { font: 500 12px 'JetBrains Mono', monospace; padding: 3px 10px; border-radius: 999px;
   background: var(--accent-soft); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
+button.pb-chip { cursor: pointer; }
+button.pb-chip:hover, button.pb-chip:focus-visible { border-color: var(--accent); outline: none; }
 .pb-who { max-width: 720px; margin: 40px auto; padding: 0 16px; }
 .pb-who h1 { font-size: 22px; margin: 0 0 8px; }
 .pb-personas { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 16px; }
@@ -35,6 +37,8 @@ body.pb { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 Int
 .pb-main { display: grid; grid-template-columns: minmax(280px, 380px) minmax(0, 1fr); min-height: calc(100vh - 50px); }
 @media (max-width: 860px) { .pb-main { grid-template-columns: 1fr; } }
 .pb-left { display: flex; flex-direction: column; gap: 10px; padding: 16px; border-right: 1px solid var(--line); background: var(--surface); min-width: 0; }
+/* The chat stays on screen however long the right-hand pane grows (a finding's detail runs well past one screen). */
+@media (min-width: 861px) { .pb-left { position: sticky; top: 50px; height: calc(100vh - 50px); align-self: start; } }
 .pb-estate h2 { font-size: 15px; margin: 0; }
 .pb-muted { color: var(--muted); margin: 2px 0; } .pb-small { font-size: 12px; }
 .pb-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }

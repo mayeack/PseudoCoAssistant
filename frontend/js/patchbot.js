@@ -54,11 +54,13 @@
     $('workspace').hidden = false;
     const chip = $('whoChip');
     chip.hidden = false;
-    chip.textContent = me.initiator.role_label + ' · ' + me.initiator.username + (me.initiator.auth_method === 'duo' ? ' · Duo' : ' · role map');
+    chip.textContent = me.initiator.role_label + ' · ' + me.initiator.username + (me.initiator.auth_method === 'duo' ? ' · Duo' : ' · role map · Switch');
+    // Role-map personas switch here (Lab 3 hands a change to the approver); with Duo the sign-in decides.
+    chip.onclick = me.duo_mode ? null : () => { if (state.poll) clearInterval(state.poll); showWho(me); };
     $('controlsMode').textContent = me.controls_mode === 'local' ? 'the local policy engine (offline mode)' : 'Splunk Agent Observability Controls on the ' + me.agent_stream + ' Agent stream';
     await refresh();
     if (state.poll) clearInterval(state.poll);
-    state.poll = setInterval(() => { if (!document.hidden && !state.busy) refresh(true); }, 6000);
+    state.poll = setInterval(() => { if (!document.hidden && !state.busy && !document.querySelector('.pb-menu')) refresh(true); }, 6000);
   }
 
   function showWho(me) {
@@ -74,7 +76,8 @@
     const personas = (me && me.personas) || [];
     personas.forEach((p) => list.append(el('button', {
       type: 'button', class: 'pb-persona',
-      onclick: async () => { await api('/persona', { json: { username: p.username } }); boot(); },
+      // A fresh page: the last persona's chat, open finding and full-read countdown must not carry over.
+      onclick: async () => { await api('/persona', { json: { username: p.username } }); location.reload(); },
     }, el('b', { text: p.username }), el('span', { text: p.role_label }))));
   }
 
@@ -150,7 +153,12 @@
       if ((f.resolution || '').startsWith('dismissed_')) return el('span', { class: 'pb-pill pill-grey', text: 'Dismissed as ' + f.resolution.replace('dismissed_', '').replace('_', ' ') });
       return el('span', { class: 'pb-pill pill-ok', text: f.resolution === 'fixed_by_change' ? 'Fixed by an approved change' : 'Marked fixed' });
     }
-    if (f.change_id) return el('span', { class: 'pb-pill pill-blue', text: 'Awaiting approval · ' + f.change_id });
+    if (f.change_id) {
+      const st = f.change_status || (f.change && f.change.status) || 'awaiting_approval';
+      const label = { awaiting_approval: 'Awaiting approval', approved: 'Change approved', rejected: 'Change rejected',
+        withdrawn: 'Change withdrawn', closed: 'Change closed' }[st] || st.replace(/_/g, ' ');
+      return el('span', { class: 'pb-pill ' + ({ approved: 'pill-ok', rejected: 'pill-deny' }[st] || 'pill-blue'), text: label + ' · ' + f.change_id });
+    }
     const patchedSome = f.open_hosts.length < f.hosts.length;
     if (patchedSome) return el('span', { class: 'pb-pill pill-amber', text: 'Partly patched' });
     return el('span', { class: 'pb-pill pill-grey', text: f.reopened ? 'Reopened' : 'New' });
@@ -199,6 +207,8 @@
       menu = el('div', { class: 'pb-menu', role: 'menu' });
       items.forEach((it) => menu.append(el('button', { type: 'button', role: 'menuitem', text: it.label, onclick: (ev) => { ev.stopPropagation(); menu.remove(); menu = null; it.run(); } })));
       wrap.append(menu);
+      // Near the right edge (the finding detail's toolbar), open leftward so no item is cut off.
+      if (menu.getBoundingClientRect().right > document.documentElement.clientWidth - 8) { menu.style.left = 'auto'; menu.style.right = '0'; }
       setTimeout(() => document.addEventListener('click', function close() { if (menu) { menu.remove(); menu = null; } document.removeEventListener('click', close); }), 0);
     });
     wrap.append(btn);
@@ -424,7 +434,7 @@
         scan && !s.scan_current ? pill('catalogue changed since the scan', 'pill-amber') : null,
         s.kind === 'vendor' ? pill(o.vendor.connected ? (o.vendor.forced ? 'connected without a clean scan' : 'connected') : 'not connected',
           o.vendor.connected ? (o.vendor.forced ? 'pill-deny' : 'pill-blue') : 'pill-grey') : null);
-      const meta = el('div', { class: 'pb-muted pb-small', text: s.tools.length + ' tools · ' + (scan
+      const meta = el('div', { class: 'pb-muted pb-small', text: s.tools.length + (s.tools.length === 1 ? ' tool · ' : ' tools · ') + (scan
         ? 'scanned ' + scan.scanned_at.replace('T', ' ').slice(0, 16) + ' UTC · analyzers ' + (scan.analyzers_ran.join(', ') || 'none')
         : 'not scanned yet') });
       const unsafe = scan ? scan.tools.filter((t) => !t.is_safe) : [];
