@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/patchbot", tags=["patchbot"])
 # The MCP endpoint: each server's tool catalogue, for scanners (mcp_servers).
 mcp_router = APIRouter(prefix="/mcp/patchbot", tags=["patchbot-mcp"])
+# Splunk SOAR's PatchBot connector (docs/patchbot-automation-api.md) and the lab's attack console.
+automation_router = APIRouter(prefix="/api/patchbot/automation", tags=["patchbot-automation"])
+attack_router = APIRouter(prefix="/api/patchbot/attack", tags=["patchbot-attack"])
 
 _SESSION_RE = r"^[A-Za-z0-9_-]{6,64}$"
 _seen_sessions: set = set()
@@ -397,3 +400,97 @@ async def mcp_endpoint_get(owner: str, server_id: str) -> Response:
 async def mcp_endpoint_delete(owner: str, server_id: str) -> Response:
     _check_mcp_path(owner, server_id)
     return Response(status_code=204)
+
+
+# --------------------------------------------------------------------------- Splunk SOAR automation
+
+class RemediateBody(BaseModel):
+    cve: str = Field(max_length=32)
+    operator: str = Field(max_length=64)
+    servers: Optional[List[str]] = Field(default=None, max_length=16)
+    investigation_id: Optional[str] = Field(default=None, max_length=128)
+    finding_id: Optional[str] = Field(default=None, max_length=128)
+    requested_by: Optional[str] = Field(default=None, max_length=128)
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+class AttackBody(BaseModel):
+    target: str = Field(default="web-prod-01", max_length=32)
+
+
+def _automation_guard(request: Request) -> None:
+    from backend.patchbot import automation
+    if not settings.patchbot_enabled or not automation.enabled():
+        raise HTTPException(status_code=503, detail="PatchBot automation is turned off on this box.")
+    if not automation.token_ok(request.headers.get("x-patchbot-automation-token")):
+        raise HTTPException(status_code=401, detail="Missing or wrong PatchBot automation token.")
+
+
+def _automation_error(exc: Any) -> JSONResponse:
+    return JSONResponse(status_code=exc.status, content={"detail": exc.detail, **(exc.body or {})})
+
+
+@automation_router.get("/health")
+async def automation_health(request: Request) -> Dict[str, Any]:
+    from backend.patchbot import automation
+    _automation_guard(request)
+    return {"ok": True, "version": settings.app_version, "controls_mode": settings.patchbot_controls_mode,
+            "duo_mode": roles.duo_mode(), "estate_owner": automation.owner()}
+
+
+@automation_router.post("/remediate")
+async def automation_remediate(body: RemediateBody, request: Request) -> Any:
+    from backend.patchbot import automation
+    _automation_guard(request)
+    try:
+        return await run_in_threadpool(automation.remediate, body.model_dump())
+    except automation.AutomationError as exc:
+        return _automation_error(exc)
+
+
+@automation_router.get("/changes/{change_id}")
+async def automation_change(change_id: str, request: Request) -> Any:
+    from backend.patchbot import automation
+    _automation_guard(request)
+    try:
+        return await run_in_threadpool(automation.change_status, change_id)
+    except automation.AutomationError as exc:
+        return _automation_error(exc)
+
+
+@automation_router.post("/toolchain/scan")
+async def automation_scan(request: Request) -> Dict[str, Any]:
+    from backend.patchbot import automation
+
+    _automation_guard(request)
+
+    def go() -> Dict[str, Any]:
+        run = Run(initiator=automation._service_initiator("splunk-soar"), owner=automation.owner(),
+                  kind="toolchain_scan", session_id=f"soar-{uuid.uuid4().hex[:10]}",
+                  request_text="Splunk SOAR: scan PatchBot's toolchain")
+        mcp_scan.scan(run, list(automation.OWN_SERVERS))
+        result = automation.toolchain(run, rescan_stale=False)
+        run.output_text = f"Toolchain {result['verdict']}"
+        automation._finish(run)
+        return result
+
+    return await run_in_threadpool(go)
+
+
+@automation_router.post("/reset")
+async def automation_reset(request: Request) -> Dict[str, Any]:
+    from backend.patchbot import automation
+    _automation_guard(request)
+    return await run_in_threadpool(automation.reset_lab)
+
+
+@attack_router.post("/exploit")
+async def attack_exploit(body: AttackBody) -> Any:
+    """The lab's attack console: no PatchBot identity, only the room access key."""
+    from backend.patchbot import automation
+    if not settings.patchbot_enabled:
+        raise HTTPException(status_code=404, detail="Not enabled.")
+    try:
+        return await run_in_threadpool(automation.attack, body.target)
+    except automation.AutomationError as exc:
+        return _automation_error(exc)

@@ -641,6 +641,9 @@ class Settings(BaseSettings):
     patchbot_mcp_scanner_cmd: str = ""
     patchbot_mcp_scanner_analyzers: str = "yara"
     patchbot_mcp_scanner_timeout_s: float = 600.0
+    # Splunk SOAR → PatchBot (docs/patchbot-automation-api.md). No token = automation off.
+    patchbot_automation_token: str = ""
+    patchbot_automation_owner: str = "pseudoco"
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -301,6 +301,13 @@ class PatchbotChange(Base):
     approver_role = Column(String, nullable=True)
     decided_at = Column(DateTime, nullable=True)
     decision_note = Column(Text, nullable=True)
+    # Splunk-first labs: standard (pre-approved by a template) or normal (Change Board);
+    # auto_execute = an approval runs the queued patches (changes opened from Splunk SOAR).
+    change_model = Column(String, nullable=True)
+    template = Column(String, nullable=True)
+    auto_execute = Column(Boolean, nullable=True, default=False)
+    es_finding_id = Column(String, nullable=True)
+    es_requested_by = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

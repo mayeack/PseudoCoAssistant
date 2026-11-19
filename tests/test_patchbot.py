@@ -83,7 +83,7 @@ check("table has 16 rows", len(catalog.bod_table()) == 16)
 
 print("Estate model")
 s = est.seed_state()
-check("six hosts", len(s["hosts"]) == 6)
+check("eight hosts", len(s["hosts"]) == 8)
 check("web-prod-01 vulnerable to Apache", est.is_vulnerable(s, "web-prod-01", "CVE-2021-41773"))
 s2, facts = est.apply_patch(s, "web-stg-01", "CVE-2021-41773")
 check("patch sets fixed version", facts["version_after"] == "2.4.51" and not est.is_vulnerable(s2, "web-stg-01", "CVE-2021-41773"))
@@ -222,7 +222,7 @@ ws = dana.get("/api/patchbot/workspace", headers=H).json()
 check("persona role", ws["initiator"]["role"] == "linux_patch_operator")
 check("no findings before the full read", ws["counts"]["open"] == 0)
 r = dana.post("/api/patchbot/full-read", headers=H).json()
-check("full read reports 11 open host-CVE pairs", len(r["result"]["open"]) == 11, r["result"]["open"])
+check("full read reports 13 open host-CVE pairs", len(r["result"]["open"]) == 13, r["result"]["open"])
 ws = dana.get("/api/patchbot/workspace", headers=H).json()
 check("7 findings after the full read", ws["counts"]["open"] == 7, ws["counts"])
 check("Apache is critical and first", ws["findings"][0]["severity"] == "critical")
@@ -346,6 +346,159 @@ check("forced connect reaches Splunk", any(e.get("forced") for e in events("mcp_
 mcp_scan.run_scanner = _real_scanner
 mcp_scan.disconnect_vendor(Run(initiator=roles.Initiator("dana.lee", "linux_patch_operator", ["linux_patch_operator"]),
                                owner="dana.lee", kind="demo", session_id="testsession01"))
+
+print("Splunk SOAR hand-off (automation API) and the attack console")
+from backend.patchbot import automation  # noqa: E402
+from backend.services import identity_lookup  # noqa: E402
+
+_real_duo_user = identity_lookup.duo_user
+_duo_dir = {"ravi.patel": {"state": "ok", "duo_status": "active", "groups": ["patch-windows"]},
+            "gone.user": {"state": "ok", "duo_status": "disabled", "groups": ["patch-linux"]}}
+identity_lookup.duo_user = lambda name: _duo_dir.get(name, {"state": "not_found"})
+settings.duo_enabled = True
+w = roles.from_username("ravi.patel")
+check("Duo on: SOAR's operator gets the role from Duo groups",
+      w is not None and w.role == "windows_patch_operator" and w.auth_method == "duo_directory", w)
+check("Duo on: a disabled Duo user is refused", roles.from_username("gone.user") is None)
+check("Duo on: a user Duo does not know is refused", roles.from_username("nobody.here") is None)
+check("a malformed operator name is refused", roles.from_username("dana lee; drop") is None)
+settings.duo_enabled = False
+identity_lookup.duo_user = _real_duo_user
+
+AUTO = "x-patchbot-automation-token"
+soar = TestClient(main.app)
+settings.patchbot_automation_token = ""
+check("automation off: 503", soar.get("/api/patchbot/automation/health").status_code == 503)
+settings.patchbot_automation_token = "test-automation-token"
+check("automation: 401 without the token", soar.get("/api/patchbot/automation/health").status_code == 401)
+check("automation: 401 with a wrong token",
+      soar.get("/api/patchbot/automation/health", headers={AUTO: "nope"}).status_code == 401)
+T = {AUTO: "test-automation-token"}
+h = soar.get("/api/patchbot/automation/health", headers=T).json()
+check("automation health names the shared estate", h.get("ok") and h.get("estate_owner") == "pseudoco", h)
+automation.SYNC_EXECUTION = True
+mcp_scan.run_scanner = _fake_scanner
+
+r = soar.post("/api/patchbot/attack/exploit", json={"target": "web-prod-01"})
+atk = r.json()
+check("attack: the exploited server answers", r.status_code == 200 and atk.get("vulnerable") is True, atk)
+check("attack: the inventory reached Splunk first", (atk.get("inventory") or {}).get("full_read") is True, atk)
+web = events("web", "http_request")
+trav = [e for e in web if "%2e" in e["uri_path"]]
+check("attack: traversal requests are web events from the attacker",
+      len(trav) == 3 and all(e["src"] == automation.ATTACKER and e["dest"] == "web-prod-01" and e["status"] == 200
+                             for e in trav), trav)
+check("attack: web events carry CIM Web fields", web and all(
+    all(k in e for k in ("src", "dest", "http_method", "uri_path", "status", "http_user_agent", "action")) for e in web))
+check("attack: no such web server, 404",
+      soar.post("/api/patchbot/attack/exploit", json={"target": "dc-prod-01"}).status_code == 404)
+
+
+def remediate(operator, **kw):
+    return soar.post("/api/patchbot/automation/remediate", headers=T,
+                     json={"cve": "CVE-2021-41773", "operator": operator, **kw})
+
+
+check("remediate: unknown operator 403", remediate("nobody.here").status_code == 403)
+check("remediate: unknown CVE 404", soar.post("/api/patchbot/automation/remediate", headers=T, json={
+    "cve": "CVE-1999-0001", "operator": "dana.lee"}).status_code == 404)
+check("remediate: 401 without the token", soar.post("/api/patchbot/automation/remediate", json={
+    "cve": "CVE-2021-41773", "operator": "dana.lee"}).status_code == 401)
+ES = {"investigation_id": "inv-test-1", "finding_id": "fnd-test-1", "requested_by": "es.analyst"}
+
+r = remediate("ravi.patel", **ES)
+rv = r.json()
+check("Windows operator: 200 with every server denied", r.status_code == 200 and len(rv.get("results") or []) == 4
+      and all(x["outcome"] == "denied" for x in rv["results"]), rv)
+check("Windows operator: denied on create_change by deny-patch-outside-role-os",
+      {(d["tool"], d["control"]) for d in rv.get("denied") or []} == {("create_change", "deny-patch-outside-role-os")},
+      rv.get("denied"))
+check("Windows operator: no change opened", rv.get("changes") == [], rv.get("changes"))
+check("Windows operator: role from the role map", (rv.get("operator") or {}).get("role") == "windows_patch_operator")
+pops = next((x for x in (rv.get("toolchain") or {}).get("servers", []) if x["server"] == "patchops"), {})
+check("toolchain: PatchOps findings are compensated, verdict clean",
+      rv.get("toolchain", {}).get("verdict") == "clean" and pops.get("verdict") == "COMPENSATED"
+      and {c["control"] for c in pops.get("compensated") or []} == {"deny-restricted-tools"}, rv.get("toolchain"))
+check("investigation read is reported, not fatal", (rv.get("investigation") or {}).get("found") is False
+      and rv["investigation"]["read_via"] == "Splunk MCP Server", rv.get("investigation"))
+denied_calls = [e for e in events("tool") if e.get("initiator") == "ravi.patel" and e.get("tool_name") == "create_change"]
+check("the deny reaches Splunk with the ES ids", denied_calls and all(
+    e["decision"] == "deny" and e.get("es_finding_id") == "fnd-test-1" and e.get("investigation_id") == "inv-test-1"
+    and e.get("requested_via") == "splunk_soar" for e in denied_calls), denied_calls[:1])
+
+r = remediate("dana.lee", **ES)
+dv = r.json()
+std = next((c for c in dv.get("changes") or [] if c["model"] == "standard"), None)
+nrm = next((c for c in dv.get("changes") or [] if c["model"] == "normal"), None)
+check("Linux operator: a pre-approved standard change for non-production",
+      std and std["status"] == "approved" and std["template"] == "SC-APACHE-SEC"
+      and sorted(std["servers"]) == ["web-dev-01", "web-stg-01"], dv.get("changes"))
+check("Linux operator: a normal change waits for the Change Board",
+      nrm and nrm["status"] == "awaiting_approval" and sorted(nrm["servers"]) == ["web-prod-01", "web-prod-02"],
+      dv.get("changes"))
+got = {x["server"]: x for x in dv.get("results") or []}
+check("standard servers patched and verified", all(
+    got.get(h, {}).get("outcome") == "patched" and got[h].get("verified") for h in ("web-dev-01", "web-stg-01")), got)
+check("normal servers wait", all(got.get(h, {}).get("outcome") == "awaiting_approval"
+                                 for h in ("web-prod-01", "web-prod-02")), got)
+check("summary names both changes", std and nrm and std["change_id"] in dv["summary"]
+      and nrm["change_id"] in dv["summary"], dv.get("summary"))
+chg = store.get_change(nrm["change_id"]) if nrm else {}
+check("the change keeps the ES ids", chg.get("investigation_id") == "inv-test-1" and chg.get("es_finding_id") == "fnd-test-1"
+      and chg.get("es_requested_by") == "es.analyst" and chg.get("auto_execute") is True, chg)
+check("the Change Board shows the template", (store.get_change(std["change_id"]) or {}).get("template_title")
+      == est.STANDARD_CHANGE_TEMPLATE["title"] if std else False)
+check("standard patches carry the change model", any(
+    e.get("change_model") == "standard" and e["dest"] == "web-dev-01" for e in events("patch", "patch_installed")))
+st = soar.get(f"/api/patchbot/automation/changes/{nrm['change_id']}", headers=T).json() if nrm else {}
+check("change status: awaiting", st.get("status") == "awaiting_approval"
+      and all(x["outcome"] == "awaiting_approval" for x in st.get("results") or []), st)
+r = dana.post(f"/api/patchbot/changes/{nrm['change_id']}/decision", headers=H, json={"decision": "approve"})
+check("the requester cannot approve it", r.status_code >= 400, r.text[:200])
+r = sam.post(f"/api/patchbot/changes/{nrm['change_id']}/decision", headers=H, json={"decision": "approve", "note": "CAB ok"})
+check("a Change Approver approves it", r.status_code == 200, r.text[:300])
+st = soar.get(f"/api/patchbot/automation/changes/{nrm['change_id']}", headers=T).json()
+check("the approval patched production on its own", all(x["outcome"] == "patched" for x in st.get("results") or []), st)
+check("the change closed after its patches", st.get("status") == "closed", st.get("status"))
+fixed = store.load_estate("pseudoco")
+check("the CVE is gone from all four web servers", not any(
+    est.is_vulnerable(fixed, h, "CVE-2021-41773") for h in est.APPLIES["CVE-2021-41773"]))
+check("the approval ran as the requester", any(
+    e.get("initiator") == "dana.lee" and e.get("requested_via") == "change_board_approval" and e["dest"] == "web-prod-02"
+    for e in events("patch", "patch_installed")))
+atk = soar.post("/api/patchbot/attack/exploit", json={"target": "web-prod-01"}).json()
+check("attack after the patch: refused", atk.get("vulnerable") is False and all(
+    q["status"] >= 400 for q in atk.get("requests") or [] if "%2e" in q["uri_path"]), atk)
+check("remediate again: 404, nothing open", remediate("dana.lee").status_code == 404)
+
+
+def _poisoned_scanner(catalogue):
+    out = _fake_scanner(catalogue)
+    for row in out["scan_results"]:
+        if row["tool_name"] == "apply_patch":
+            row["is_safe"] = False
+            row["findings"]["yara_analyzer"].update(severity="HIGH", threat_names=["TOOL POISONING"], total_findings=1)
+    return out
+
+
+soar.post("/api/patchbot/automation/reset", headers=T)
+st = store.load_estate("pseudoco")
+check("reset: the web servers are vulnerable again", all(
+    est.is_vulnerable(st, h, "CVE-2021-41773") for h in est.APPLIES["CVE-2021-41773"]))
+mcp_scan.run_scanner = _poisoned_scanner
+sc = soar.post("/api/patchbot/automation/toolchain/scan", headers=T).json()
+check("rescan: a poisoned PatchOps is unsafe", sc.get("verdict") == "unsafe" and "patchops" in sc.get("unsafe", []), sc)
+r = remediate("dana.lee", **ES)
+check("unsafe toolchain: 409 and nothing runs", r.status_code == 409
+      and r.json().get("toolchain", {}).get("verdict") == "unsafe"
+      and not store.list_changes(owner="pseudoco", statuses=["awaiting_approval", "approved"]), r.text[:300])
+mcp_scan.run_scanner = _fake_scanner
+sc = soar.post("/api/patchbot/automation/toolchain/scan", headers=T).json()
+check("rescan after the fix: clean", sc.get("verdict") == "clean", sc)
+mcp_scan.run_scanner = _real_scanner
+automation.SYNC_EXECUTION = False
+check("SOAR sessions are marked in Splunk", any(
+    e.get("requested_via") == "splunk_soar" for e in events("session", "session_started")))
 
 print("Data contract")
 common = ("event_type", "app", "feature", "estate_owner", "patchbot_session_id", "investigation_id", "finding_id")

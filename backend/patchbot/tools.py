@@ -61,9 +61,11 @@ SPECS: Dict[str, Dict[str, Any]] = {
                                       "reason": {"type": "string", "enum": list(est.DISMISS_REASONS)},
                                       "note": {"type": "string"}},
                        "required": ["cve", "action"], "server": "patchops"},
-    "create_change": {"description": "Open a change on the Change Board for production and request approval.",
+    "create_change": {"description": "Open a change: normal (production, the Change Board approves it) or standard "
+                                     "(non-production, pre-approved by the standard change template).",
                       "properties": {"cve": {"type": "string", "enum": _CVES},
                                      "servers": {"type": "array", "items": {"type": "string", "enum": _SERVERS}},
+                                     "model": {"type": "string", "enum": ["normal", "standard"]},
                                      "plan": {"type": "string"}},
                       "required": ["cve", "servers"], "server": "patchops"},
     "get_change": {"description": "Read a change on the Change Board.",
@@ -155,6 +157,14 @@ def build_step(run: Run, state: Dict[str, Any], name: str, args: Dict[str, Any])
     if h:
         tool_input.update({"os_family": h["os_family"], "environment": h["environment"],
                            "publicly_exposed": "yes" if h.get("publicly_exposed") else "no"})
+    elif name == "create_change":
+        listed = [est.host(state, s) for s in (args.get("servers") or [])]
+        families = {x["os_family"] for x in listed if x}
+        envs = {x["environment"] for x in listed if x}
+        if len(families) == 1:
+            tool_input["os_family"] = families.pop()
+        if envs:
+            tool_input["environment"] = "production" if "production" in envs else sorted(envs)[0]
     context: Dict[str, Any] = {"app": "pseudoco-assistant", "feature": "patchbot",
                                "estate_owner": run.owner, "session_id": run.session_id,
                                **run.initiator.context()}
@@ -387,7 +397,9 @@ def _h_triage_finding(run: Run, state, args):
 def _h_create_change(run: Run, state, args):
     from backend.patchbot import service
     return service.open_change(run, state, str(args.get("cve")).upper(), list(args.get("servers") or []),
-                               str(args.get("plan") or ""))
+                               str(args.get("plan") or ""), model=str(args.get("model") or "normal"),
+                               **{k: args[k] for k in ("investigation_id", "es_finding_id", "es_requested_by",
+                                                       "auto_execute") if k in args})
 
 
 def _h_get_change(run: Run, state, args):

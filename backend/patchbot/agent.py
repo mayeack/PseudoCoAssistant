@@ -294,7 +294,9 @@ def patch_flow(run: Run, cve: str, environment: str) -> Dict[str, Any]:
         return {"reply": "No such finding.", "tool_calls": []}
     run.request_text = f"Patch {cve} in {environment}"
     run.finding_id = f["id"]
-    targets = [h for h in f["open_hosts"] if state["hosts"][h]["environment"] == environment]
+    # "staging" is every non-production server (staging and development), "production" the rest.
+    targets = [h for h in f["open_hosts"]
+               if (state["hosts"][h]["environment"] == "production") == (environment == "production")]
     facts: List[str] = []
     refused: List[str] = []
     if not targets:

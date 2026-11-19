@@ -24,7 +24,7 @@ from backend.hec.forwarder import HECForwarder
 
 logger = logging.getLogger(__name__)
 
-KINDS = ("vuln", "finding", "change", "patch", "tool", "session", "estate", "mcp_scan")
+KINDS = ("vuln", "finding", "change", "patch", "tool", "session", "estate", "mcp_scan", "web")
 SOURCE = "pseudoco-assistant:patchbot"
 SOURCETYPES = {k: f"pseudoco:patchbot:{k}" for k in KINDS}
 
