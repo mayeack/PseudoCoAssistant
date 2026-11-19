@@ -135,32 +135,59 @@ def _change_event(run: Optional[Run], change: Dict[str, Any], event_type: str, *
         "investigation_id": change.get("investigation_id") or "", **extra})
 
 
-def open_change(run: Run, state: Dict[str, Any], cve: str, servers: List[str], plan: str) -> Dict[str, Any]:
+def open_change(run: Run, state: Dict[str, Any], cve: str, servers: List[str], plan: str, *,
+                model: str = "normal", investigation_id: Optional[str] = None,
+                es_finding_id: Optional[str] = None, es_requested_by: Optional[str] = None,
+                auto_execute: bool = False) -> Dict[str, Any]:
+    """A normal change (production; a Change Approver approves it on the Change Board) or a
+    standard change (non-production; pre-approved by the standard change template)."""
     f = est.finding(state, run.owner, cve)
     if f is None:
         raise ValueError("unknown finding")
-    prod = [s for s in (servers or f["hosts"]) if s in f["hosts"]
-            and state["hosts"][s]["environment"] == "production"]
-    if not prod:
-        raise ValueError("a change covers production hosts of this finding")
-    existing = store.open_change_for(run.owner, cve)
+    standard = model == "standard"
+    picked = [s for s in (servers or f["hosts"]) if s in f["hosts"]
+              and (state["hosts"][s]["environment"] != "production") == standard]
+    if not picked:
+        raise ValueError("a standard change covers non-production hosts of this finding" if standard
+                         else "a change covers production hosts of this finding")
+    environment = "non-production" if standard else "production"
+    existing = store.open_change_for(run.owner, cve, environment=environment)
     if existing:
         return {"change": existing, "existing": True}
     entry = catalog.cve(cve) or {}
+    tpl = est.STANDARD_CHANGE_TEMPLATE
     now = datetime.utcnow()
     plan_text = plan.strip() or (
-        f"Update {entry.get('package')} to {entry.get('fixed_version')} on {', '.join(prod)} "
-        f"(staging verified first). Rollback: reinstall {entry.get('vulnerable_version')} from the package cache.")
-    change = store.create_change(
+        f"Update {entry.get('package')} to {entry.get('fixed_version')} on {', '.join(picked)}"
+        + (f" under standard change template {tpl['id']} ({tpl['title']})." if standard else " (staging verified first).")
+        + f" Rollback: reinstall {entry.get('vulnerable_version')} from the package cache.")
+    fields: Dict[str, Any] = dict(
         owner=run.owner, requested_by=run.initiator.username, requester_role=run.initiator.role,
-        status="awaiting_approval", cve=cve, finding_id=f["id"], servers=prod, environment="production",
+        cve=cve, finding_id=f["id"], servers=picked, environment=environment,
         window_start=now, window_end=now + timedelta(hours=_CHANGE_WINDOW_HOURS), plan=plan_text[:2000],
-        priority=f["severity"], investigation_id=f.get("investigation_id"))
-    store.save_estate(run.owner, est.set_meta(state, cve, change_id=change["id"]))
-    _change_event(run, change, "change_opened")
-    _change_event(run, change, "change_approval_requested")
-    _activity(run, "change", f"Approval requested · {change['id']} · {run.initiator.username}", finding_cve=cve,
-              actor=run.initiator.username, actor_type="human", data={"change_id": change["id"]})
+        priority=f["severity"], investigation_id=investigation_id or f.get("investigation_id"),
+        change_model="standard" if standard else "normal", auto_execute=bool(auto_execute),
+        es_finding_id=es_finding_id, es_requested_by=es_requested_by)
+    if standard:
+        fields.update(status="approved", template=tpl["id"], approver=f"{tpl['id']} (standard change)",
+                      approver_role="standard_change", decided_at=now,
+                      decision_note=f"Pre-approved standard change: {tpl['title']}. {tpl['criteria']}")
+    else:
+        fields.update(status="awaiting_approval")
+    change = store.create_change(**fields)
+    if not standard:
+        store.save_estate(run.owner, est.set_meta(state, cve, change_id=change["id"]))
+    _change_event(run, change, "change_opened", change_model=change["change_model"], template=change.get("template"))
+    if standard:
+        _change_event(run, change, "change_approved", change_model="standard", template=tpl["id"],
+                      approval="pre-approved standard change")
+        _activity(run, "change", f"Standard change {change['id']} · pre-approved by {tpl['id']} · "
+                  f"{', '.join(picked)}", finding_cve=cve, actor=run.initiator.username, actor_type="human",
+                  data={"change_id": change["id"]})
+    else:
+        _change_event(run, change, "change_approval_requested", change_model="normal")
+        _activity(run, "change", f"Approval requested · {change['id']} · {run.initiator.username}", finding_cve=cve,
+                  actor=run.initiator.username, actor_type="human", data={"change_id": change["id"]})
     return {"change": change, "existing": False}
 
 
@@ -192,6 +219,9 @@ def decide_change(approver: roles.Initiator, change_id: str, decision: str, note
     store.add_activity(change["owner"], "change", f"{'Approved' if status == 'approved' else 'Rejected'} "
                        f"{change_id} · {approver.username}", actor=approver.username, actor_type="human",
                        finding_id=change.get("finding_id"), data={"change_id": change_id})
+    if status == "approved" and updated.get("auto_execute"):
+        from backend.patchbot import automation
+        automation.execute_change_async(change_id)
     return updated
 
 
@@ -210,15 +240,18 @@ def patch(run: Run, state: Dict[str, Any], server: str, cve: str, change_id: Opt
     state2, change_facts = est.apply_patch(state, server, cve)
     env = state2["hosts"][server]["environment"]
     change = None
-    if env == "production":
-        change = store.get_change(change_id) if change_id else store.open_change_for(run.owner, cve)
+    if change_id:
+        change = store.get_change(change_id)
+    elif env == "production":
+        change = store.open_change_for(run.owner, cve)
     store.save_estate(run.owner, state2)
     checks = _checks(state2, server, cve)
     telemetry.emit("patch", "patch_installed", {
         **run.common(), "finding_id": est.finding_id(run.owner, cve), "dest": server,
         "dest_os": state2["hosts"][server]["os_family"], "dest_env": env, "signature": cve, "signature_id": cve,
         "cve": cve, **change_facts, "status": "installed", "vendor_product": "PseudoCo PatchBot",
-        "change_id": (change or {}).get("id") or "", **checks})
+        "change_id": (change or {}).get("id") or "", "change_model": (change or {}).get("change_model") or "",
+        **checks})
     _activity(run, "patched", f"Patched {server} ({change_facts['package']} {change_facts['version_before']} → "
               f"{change_facts['version_after']}) · PatchBot for {run.initiator.username}",
               finding_cve=cve, data={"server": server, "change_id": (change or {}).get("id")})

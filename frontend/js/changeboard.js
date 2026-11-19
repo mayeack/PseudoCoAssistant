@@ -56,11 +56,21 @@
     const cls = { awaiting_approval: 'pill-blue', approved: 'pill-ok', rejected: 'pill-deny', closed: 'pill-grey', withdrawn: 'pill-grey' }[status] || 'pill-grey';
     return el('span', { class: 'pb-pill ' + cls, text: status.replace('_', ' ') });
   }
+  // Standard changes are pre-approved by their template; normal changes wait for a Change Approver.
+  function model(c) {
+    const std = c.change_model === 'standard';
+    return el('div', { class: 'pb-small' },
+      el('span', { class: 'pb-pill ' + (std ? 'pill-ok' : 'pill-blue'), text: std ? 'Standard change' : 'Normal change' }), ' ',
+      std ? 'Pre-approved under ' + (c.template || 'a standard change template') + (c.template_title ? ': ' + c.template_title + '.' : '.') + (c.template_criteria ? ' ' + c.template_criteria : '')
+          : 'A Change Approver decides it on this board.');
+  }
   function card(c, canDecide, me) {
     const noteId = 'note-' + c.id;
     const li = el('li', { id: 'chg-' + c.id, class: 'pb-card', style: 'display:grid;gap:6px' },
       el('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;align-items:center' },
         el('b', { text: c.id + ' · ' + c.cve + ' · ' + (c.priority || '') }), pill(c.status)),
+      model(c),
+      (c.es_requested_by || c.investigation_id) ? el('div', { class: 'pb-small pb-muted', text: 'Opened from Splunk SOAR' + (c.es_requested_by ? ' for ' + c.es_requested_by : '') + (c.investigation_id ? ' · ES investigation ' + c.investigation_id : '') + (c.auto_execute ? ' · PatchBot runs it once approved' : '') }) : null,
       el('div', { class: 'pb-small', text: 'Hosts: ' + c.servers.join(', ') + ' · ' + c.environment + ' · window ' + (c.window_start || '').slice(11, 16) + '–' + (c.window_end || '').slice(11, 16) + ' UTC' }),
       el('div', { class: 'pb-small', text: 'Requested by ' + c.requested_by + ' (' + (c.requester_role || '').replace(/_/g, ' ') + ') for the estate of ' + c.owner }),
       el('div', { class: 'pb-msg', text: c.plan || '' }),

@@ -9,6 +9,9 @@ The role always comes from the person, never from the request body:
 - **Role map** (Duo off, offline dev and boxes without Duo): the attendee picks
   one of the fixed ``PERSONAS`` on the PatchBot page. ``auth_method="role_map"``
   is recorded on every event, so nobody mistakes it for a verified identity.
+- **Splunk SOAR** (automation API, ``from_username``): the action names the
+  person. With Duo on, Duo's directory gives the role on every call
+  (``auth_method="duo_directory"``); with Duo off, the role map does.
 
 Each role is what PatchBot's tool calls carry to the Agent Observability
 Controls as ``context.initiator_role``.
@@ -116,6 +119,31 @@ def from_request(request: Any) -> Optional[Initiator]:
     if persona in PERSONAS:
         role = PERSONAS[persona]
         return Initiator(username=persona, role=role, roles=[role], auth_method="role_map")
+    return None
+
+
+def from_username(username: Any) -> Optional[Initiator]:
+    """An initiator a caller names (Splunk SOAR's operator). With Duo on, the role comes from
+    the user's Duo groups, looked up on every call, and a user Duo does not know (or cannot be
+    asked about) is refused. With Duo off, the role map applies."""
+    name = str(username or "").strip().lower()
+    if not name or len(name) > 64 or not all(ch.isalnum() or ch in "._@-" for ch in name):
+        return None
+    if duo_mode():
+        try:
+            from backend.services import identity_lookup
+            answer = identity_lookup.duo_user(name) or {}
+        except Exception:  # noqa: BLE001
+            return None
+        if answer.get("state") != "ok" or str(answer.get("duo_status") or "active") in ("disabled", "locked out"):
+            return None
+        groups = [str(g) for g in (answer.get("groups") or [])]
+        found = roles_from_groups(groups)
+        # Nobody signed in here: Splunk SOAR named the person and Duo's directory gave the role.
+        return Initiator(username=name, role=found[0], roles=found, auth_method="duo_directory", duo_groups=groups)
+    if name in PERSONAS:
+        role = PERSONAS[name]
+        return Initiator(username=name, role=role, roles=[role], auth_method="role_map")
     return None
 
 

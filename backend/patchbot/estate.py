@@ -23,12 +23,18 @@ SCHEMA_VERSION = 1
 
 # host -> (os_family, environment, role, publicly exposed by asset data, label)
 HOSTS: Dict[str, Dict[str, Any]] = {
+    "web-dev-01": {"os_family": "linux", "environment": "development", "role": "web",
+                   "os": "Ubuntu 20.04 LTS", "publicly_exposed": False,
+                   "purpose": "Development web tier"},
     "web-stg-01": {"os_family": "linux", "environment": "staging", "role": "web",
                    "os": "Ubuntu 20.04 LTS", "publicly_exposed": False,
                    "purpose": "Staging web tier"},
     "web-prod-01": {"os_family": "linux", "environment": "production", "role": "web",
                     "os": "Ubuntu 20.04 LTS", "publicly_exposed": True,
                     "purpose": "Customer-facing web tier"},
+    "web-prod-02": {"os_family": "linux", "environment": "production", "role": "web",
+                    "os": "Ubuntu 20.04 LTS", "publicly_exposed": False,
+                    "purpose": "Customer-facing web tier, second node"},
     "db-prod-01": {"os_family": "linux", "environment": "production", "role": "database",
                    "os": "RHEL 8.4", "publicly_exposed": False,
                    "purpose": "Orders database"},
@@ -45,7 +51,7 @@ HOSTS: Dict[str, Dict[str, Any]] = {
 
 # Which CVE the synthetic estate carries on which hosts.
 APPLIES: Dict[str, List[str]] = {
-    "CVE-2021-41773": ["web-stg-01", "web-prod-01"],
+    "CVE-2021-41773": ["web-dev-01", "web-stg-01", "web-prod-01", "web-prod-02"],
     "CVE-2020-1472": ["dc-prod-01"],
     "CVE-2021-3156": ["web-stg-01", "web-prod-01"],
     "CVE-2021-34527": ["win-stg-01", "win-prod-01"],
@@ -53,6 +59,22 @@ APPLIES: Dict[str, List[str]] = {
     "CVE-2023-0286": ["db-prod-01"],
     "CVE-2023-48795": ["web-stg-01", "web-prod-01"],
 }
+
+# Change models (Splunk-first labs). A server's characteristics decide its model:
+# production needs a normal change a Change Approver approves on the Change Board;
+# anything else falls under the pre-approved standard change template.
+STANDARD_CHANGE_TEMPLATE = {
+    "id": "SC-APACHE-SEC",
+    "title": "Apache httpd security update on non-production web servers",
+    "criteria": "Non-production server, the vendor's fixed version of the same package, the fix already "
+                "tested, rollback from the package cache.",
+}
+
+
+def change_model(state: Dict[str, Any], host_name: str) -> str:
+    h = (state.get("hosts") or {}).get(host_name) or HOSTS.get(host_name) or {}
+    return "normal" if h.get("environment") == "production" else "standard"
+
 
 DISMISS_REASONS = ("false_positive", "accepted_risk", "duplicate")
 _OWNER_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
@@ -101,6 +123,11 @@ def seed_state() -> Dict[str, Any]:
 def ensure_schema(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(state, dict) or state.get("schema") != SCHEMA_VERSION or "hosts" not in state:
         return seed_state()
+    seeded: Optional[Dict[str, Any]] = None
+    for name in HOSTS:       # servers added to the estate later join an existing one, unpatched
+        if name not in state["hosts"]:
+            seeded = seeded or seed_state()
+            state["hosts"][name] = seeded["hosts"][name]
     return state
 
 

@@ -67,7 +67,7 @@ def reset_estate(owner: str) -> Dict[str, Any]:
     with get_db_context() as db:
         db.query(PatchbotActivity).filter(PatchbotActivity.owner == owner).delete()
         db.query(PatchbotChange).filter(PatchbotChange.owner == owner,
-                                        PatchbotChange.status.in_(("draft", "awaiting_approval"))) \
+                                        PatchbotChange.status.in_(("draft", "awaiting_approval", "approved"))) \
             .update({"status": "withdrawn"}, synchronize_session=False)
     return state
 
@@ -102,7 +102,15 @@ def _change_dict(r: PatchbotChange) -> Dict[str, Any]:
             "environment": r.environment, "window_start": iso(r.window_start), "window_end": iso(r.window_end),
             "plan": r.plan, "priority": r.priority, "investigation_id": r.investigation_id,
             "approver": r.approver, "approver_role": r.approver_role, "decided_at": iso(r.decided_at),
-            "decision_note": r.decision_note, "created_at": iso(r.created_at), "updated_at": iso(r.updated_at)}
+            "decision_note": r.decision_note, "created_at": iso(r.created_at), "updated_at": iso(r.updated_at),
+            "change_model": r.change_model or ("standard" if r.approver_role == "standard_change" else "normal"),
+            "template": r.template, "auto_execute": bool(r.auto_execute),
+            "es_finding_id": r.es_finding_id, "es_requested_by": r.es_requested_by,
+            "template_title": _template(r.template, "title"), "template_criteria": _template(r.template, "criteria")}
+
+
+def _template(template_id: Optional[str], key: str) -> Optional[str]:
+    return est.STANDARD_CHANGE_TEMPLATE[key] if template_id == est.STANDARD_CHANGE_TEMPLATE["id"] else None
 
 
 def create_change(**fields: Any) -> Dict[str, Any]:

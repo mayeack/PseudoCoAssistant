@@ -33,13 +33,16 @@ class Run:
     finding_id: Optional[str] = None
     investigation_id: Optional[str] = None
     trace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # Automation runs (Splunk SOAR): es_finding_id, requested_by, requested_via on every event.
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     def common(self) -> Dict[str, Any]:
         """Fields every Splunk event of this run carries."""
         return {"estate_owner": self.owner, "patchbot_session_id": self.session_id,
                 "initiator": self.initiator.username, "initiator_role": self.initiator.role,
                 "auth_method": self.initiator.auth_method, "trace_id": self.trace_id,
-                "finding_id": self.finding_id or "", "investigation_id": self.investigation_id or ""}
+                "finding_id": self.finding_id or "", "investigation_id": self.investigation_id or "",
+                **self.extra}
 
     def add_llm(self, *, input_text: str, output_text: str, model: str, duration_ms: float,
                 input_tokens: Optional[int] = None, output_tokens: Optional[int] = None) -> None:

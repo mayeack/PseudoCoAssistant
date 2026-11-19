@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -98,3 +98,46 @@ def find_es_finding(owner: str, cve: str) -> Optional[Dict[str, Any]]:
     answer = call_tool("splunk_run_query", {"query": spl, "earliest_time": "-7d", "latest_time": "now",
                                             "row_limit": 1})
     return answer
+
+
+def _quote(value: Any) -> str:
+    """A value safe inside a double-quoted SPL string."""
+    return "".join(ch for ch in str(value or "") if ch.isalnum() or ch in "-_.:@ ")[:128]
+
+
+def _rows(text: str) -> List[Dict[str, Any]]:
+    """The result rows in a splunk_run_query answer (its text is JSON with a results list)."""
+    try:
+        data = json.loads(text or "")
+    except ValueError:
+        return []
+    if isinstance(data, dict):
+        for key in ("results", "rows", "data"):
+            if isinstance(data.get(key), list):
+                return [r for r in data[key] if isinstance(r, dict)]
+    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+
+
+def read_es_record(*, investigation_id: Optional[str] = None, finding_id: Optional[str] = None,
+                   cve: str = "") -> Dict[str, Any]:
+    """The ES finding a SOAR action names, read through the Splunk MCP Server: a real MCP call
+    that Splunk audits. By finding id when given, else the newest exploitation finding for the CVE."""
+    fields = "_time event_id rule_title search_name urgency status_label owner dest cve"
+    if finding_id:
+        spl = f'search index=notable event_id="{_quote(finding_id)}" | head 1 | table {fields}'
+    else:
+        spl = (f'search index=notable search_name="PatchBot - Active Exploitation*" cve="{_quote(cve)}" '
+               f'| head 1 | table {fields}')
+    answer = call_tool("splunk_run_query", {"query": spl, "earliest_time": "-7d", "latest_time": "now",
+                                            "row_limit": 1})
+    if not answer.get("ok"):
+        return {"found": False, "error": answer.get("error") or "read_failed",
+                "investigation_id": investigation_id}
+    rows = _rows(answer.get("text") or "")
+    if not rows:
+        return {"found": False, "investigation_id": investigation_id}
+    r = rows[0]
+    return {"found": True, "investigation_id": investigation_id, "finding_id": r.get("event_id"),
+            "title": r.get("rule_title") or r.get("search_name"), "urgency": r.get("urgency"),
+            "status": r.get("status_label"), "owner": r.get("owner"), "dest": r.get("dest"),
+            "time": r.get("_time")}

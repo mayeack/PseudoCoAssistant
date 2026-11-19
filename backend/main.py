@@ -99,6 +99,8 @@ app.include_router(attachments.router)
 app.include_router(identity_auth.router)
 app.include_router(patchbot_routes.router)
 app.include_router(patchbot_routes.mcp_router)
+app.include_router(patchbot_routes.automation_router)
+app.include_router(patchbot_routes.attack_router)
 
 def _prewarm_llm_stack() -> None:
     """Absorb the first-turn cold start off the request path.
@@ -334,6 +336,13 @@ try:
             if settings.patchbot_enabled and page.exists():
                 return page.read_text()
             return "<h1>PatchBot is not enabled</h1>"
+
+        @app.get("/attack-ui", response_class=HTMLResponse)
+        async def serve_attack_console():
+            page = frontend_dir / "attack.html"
+            if settings.patchbot_enabled and page.exists():
+                return page.read_text()
+            return "<h1>The attack console is not enabled</h1>"
 
         @app.get("/change-board-ui", response_class=HTMLResponse)
         async def serve_change_board():

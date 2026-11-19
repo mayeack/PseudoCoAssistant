@@ -66,8 +66,8 @@ def _control(name: str, description: str, *, steps: List[str], condition: Dict[s
 CONTROL_DEFINITIONS: List[Dict[str, Any]] = [
     _control(
         "deny-patch-outside-role-os",
-        "PatchBot patches only the operating system the initiator's role covers.",
-        steps=["apply_patch"],
+        "PatchBot patches, or opens changes for, only the operating system the initiator's role covers.",
+        steps=["apply_patch", "create_change"],
         condition={"or": [
             {"and": [_list(_ROLE, ["linux_patch_operator"]), _list("input.os_family", ["windows"])]},
             {"and": [_list(_ROLE, ["windows_patch_operator"]), _list("input.os_family", ["linux"])]},

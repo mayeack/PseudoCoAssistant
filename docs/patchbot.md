@@ -1,6 +1,6 @@
 # PatchBot — the agentic patch workspace
 
-PatchBot is PseudoCo Assistant's patch agent for the Agentic AI Trust — PatchBot workshop. It works vulnerability findings on a **synthetic estate** of six servers per attendee, opens changes on a **Change Board**, applies **synthetic patches**, and does all of it through tool calls that **Splunk Agent Observability Controls judge before they run**, by the role of the person who asked. Pages: `/patchbot-ui` and `/change-board-ui`.
+PatchBot is PseudoCo Assistant's patch agent for the Agentic AI Trust — PatchBot workshop. It works vulnerability findings on a **synthetic estate** of eight servers per estate owner, opens changes on a **Change Board**, applies **synthetic patches**, and does all of it through tool calls that **Splunk Agent Observability Controls judge before they run**, by the role of the person who asked. Pages: `/patchbot-ui` and `/change-board-ui`.
 
 Its workflow follows the public design of Anthropic's Claude Security (a workspace with chat on the left and Findings, Activity and Resources on the right; impact-first findings; an attack path; Triage, Patch and Review; nothing in production without a person's approval; continuous re-checking). The look and every word are PseudoCo's own, and no Anthropic code, asset or name is used.
 
@@ -94,9 +94,18 @@ A signed-in user in none of these groups is a Patch Viewer. With Duo off, `/patc
 
 ## Splunk and Agent Observability
 
-- **Splunk events** go to PatchBot's own HEC forwarder: `PATCHBOT_HEC_URL`, `PATCHBOT_HEC_TOKEN`, `PATCHBOT_HEC_INDEX` (default `patchbot`). Never the governance destinations, so PatchBot never changes what TA-gen_ai_cim counts in `gen_ai_log`. Sourcetypes `pseudoco:patchbot:{vuln,finding,change,patch,tool,session,estate}`; the field contract is TA-patchbot's `docs/data-contract.md`. Every event is also appended to `logs/patchbot.jsonl`.
+- **Splunk events** go to PatchBot's own HEC forwarder: `PATCHBOT_HEC_URL`, `PATCHBOT_HEC_TOKEN`, `PATCHBOT_HEC_INDEX` (default `patchbot`). Never the governance destinations, so PatchBot never changes what TA-gen_ai_cim counts in `gen_ai_log`. Sourcetypes `pseudoco:patchbot:{vuln,finding,change,patch,tool,session,estate,mcp_scan,web}`; the field contract is TA-patchbot's `docs/data-contract.md`. Every event is also appended to `logs/patchbot.jsonl`.
 - **Traces**: each request is one trace on the Agent stream `PATCHBOT_AGENT_STREAM` (default `PatchBot`): workflow `patchbot_run`, agent `PatchBot`, one LLM span per model call, one control span (applies to `tool_call`, stage `pre`) per verdict, one tool span per call (403 when denied). The first trace creates the stream.
 - **Splunk MCP Server**: with `PATCHBOT_SPLUNK_MCP_URL` and `PATCHBOT_SPLUNK_MCP_TOKEN`, `get_finding` reads the ES finding through `splunk_run_query`, so the read is audited in `_audit`.
+
+## Splunk SOAR hand-off (the Splunk-first labs)
+
+The Splunk-first labs start and end in Splunk Enterprise Security; PatchBot only does the patching. The contract is `docs/patchbot-automation-api.md`.
+
+- **Attack console** `/attack-ui`: an attendee replays a CVE-2021-41773 exploitation against `web-prod-01` from `203.0.113.66`. The requests reach Splunk as web events (`pseudoco:patchbot:web`), and the estate's vulnerability inventory is sent first, so an ES detection can join the two into an active-exploitation finding.
+- **Automation API** `/api/patchbot/automation/*`: the PatchBot SOAR connector calls `POST /remediate` with the CVE and the `operator` it acts for. With `PATCHBOT_AUTOMATION_TOKEN` unset the routes answer 503. PatchBot checks its own MCP servers have a clean, current Cisco AI Defense MCP Scanner verdict (409 when not), reads the ES investigation through the Splunk MCP Server when one is named, and works on the shared estate `PATCHBOT_AUTOMATION_OWNER` (default `pseudoco`).
+- **Change models**: the CVE is on four web servers. Non-production servers (`web-dev-01`, `web-stg-01`) fall under the standard change template `SC-APACHE-SEC` and are pre-approved, so PatchBot patches and verifies them at once. Production servers (`web-prod-01`, `web-prod-02`) get a normal change that waits on the Change Board; the approval runs the patches as the person who asked, with the Controls judging every call again.
+- **Identity**: the operator's role comes from Duo on every call (the role map when Duo is off). A Windows Patch Operator is denied on `create_change` and `apply_patch` for Linux servers by `deny-patch-outside-role-os`, and the denial shows in Agent Observability as a blocked tool span.
 
 ## The model
 
