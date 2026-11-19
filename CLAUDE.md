@@ -320,6 +320,46 @@ Inert unless `DUO_ENABLED`: with it off Labs 0-4 behave exactly as before.
   `tests/test_blueprint_parity.py` in the same PR as any identity change. The
   attachment rules above are unchanged.
 
+## PatchBot
+
+`docs/patchbot.md` is the design (the Agentic AI Trust — PatchBot workshop).
+`backend/patchbot/` plus `routers/patchbot.py`, `/patchbot-ui` and
+`/change-board-ui`. The rules that keep it honest:
+
+- **Outside the chat pipeline.** PatchBot is not an Application Theme and adds
+  nothing to `blueprints/guardrails.py`, `PseudoCoAssistantState` or the
+  governance log; the blueprint parity rules do not apply to it, and it must
+  not change them.
+- **One door for every action.** Anything that changes an estate is a
+  `tools.call()`: the model's calls, the Patch workflow's and the page
+  buttons'. Never add a route that mutates an estate without it.
+- **The role comes from the person**: the verified identity session and its
+  Duo groups (`roles.from_request`), or the role-map persona cookie when Duo is
+  off. Never from a request body.
+- **Controls decide; they fail closed for changes.** In
+  `agent_observability` mode an unreachable Controls server lets read tools
+  run and refuses every other tool (`fail_closed`), whatever
+  `GALILEO_AGENT_CONTROL_FAIL_OPEN` says. `CONTROL_DEFINITIONS` is the single
+  source for the local engine and `scripts/patchbot/ao_controls.py`. The
+  attached controls carry the **canonical names**: the UI's Clone and attach
+  names a copy `<name>-clone-<hex>`, so run `ao_controls.py adopt` after it
+  (the sentinel, the TA's ES rules and dashboards match names).
+- **Its own Splunk path.** Events go only to PatchBot's HEC forwarder
+  (`PATCHBOT_HEC_*`, index `patchbot`) as `pseudoco:patchbot:*`, never to the
+  governance destinations; TA-patchbot owns the field contract
+  (`docs/data-contract.md` there). Change the contract there first.
+- **Its own model.** `PATCHBOT_OLLAMA_MODEL` (clean `mistral-nemo:12b`), never
+  the poisoned Lab 1 model.
+- **Synthetic means synthetic.** Restricted tools never execute anything;
+  copy and pages say what is staged. No Anthropic names or assets in the UI.
+- **MCP servers are scanned before trust.** Cisco MCP Scanner (static mode, on
+  the `/mcp/patchbot/...` catalogue) gates the vendor server; a changed
+  catalogue voids its scan. Default analyzer `yara`; never default `llm` on the
+  box model (false positives). The scanner subprocess gets a minimal env.
+- Extend `tests/test_patchbot.py` in the same PR as any PatchBot change, and
+  re-run `tests/manual/probe_patchbot.py` against a live model after any
+  prompt or tool change.
+
 ## Product naming
 
 The product is **PseudoCo Assistant** (since 4.10.0). Its identifier forms are

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Change Board — PseudoCo Assistant</title>
+    <script>
+      try { if (localStorage.getItem('medadvice_color_scheme') === 'dark') document.documentElement.classList.add('dark'); } catch (e) {}
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/patchbot.css?v=4">
+</head>
+<body class="pb">
+  <header class="pb-bar">
+    <div class="pb-brand">PseudoCo Assistant · <b>Change Board</b></div>
+    <nav class="pb-nav">
+      <a href="/patchbot-ui">PatchBot</a>
+      <a href="/app">Chat</a>
+      <button type="button" id="whoChip" class="pb-chip" title="Switch persona" hidden></button>
+    </nav>
+  </header>
+  <section id="whoPanel" class="pb-who" hidden>
+    <h1>Who is reviewing changes?</h1>
+    <p id="whoHelp">Approvals are a person's job, never PatchBot's. On this box there is no Duo sign-in, so pick a persona; a Change Approver can approve, and nobody can approve a change they requested.</p>
+    <div id="personaList" class="pb-personas"></div>
+  </section>
+  <main id="board" class="pb-who" style="max-width:980px" hidden>
+    <div class="pb-toggle" role="group" aria-label="Which changes">
+      <button type="button" data-scope="awaiting" aria-pressed="true">Awaiting approval</button>
+      <button type="button" data-scope="mine" aria-pressed="false">My estate</button>
+      <button type="button" data-scope="all" aria-pressed="false">All</button>
+    </div>
+    <p id="boardHelp" class="pb-muted pb-small"></p>
+    <ul id="changes" class="pb-rows"></ul>
+    <p id="emptyChanges" class="pb-empty" hidden>No changes here.</p>
+  </main>
+  <script src="/static/js/changeboard.js?v=4"></script>
+</body>
+</html>

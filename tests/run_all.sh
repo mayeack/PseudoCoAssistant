@@ -45,6 +45,7 @@ SUITES=(
   tests/test_executive_fields.py
   tests/test_db_integrity.py
   tests/test_scheduling.py
+  tests/test_patchbot.py
   tests/test_review_fixes.py
   tests/test_auto_prompter.py
   tests/test_synthetic_content.py

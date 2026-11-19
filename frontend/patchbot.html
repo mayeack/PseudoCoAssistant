@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PatchBot — PseudoCo Assistant</title>
+    <script>
+      try { if (localStorage.getItem('medadvice_color_scheme') === 'dark') document.documentElement.classList.add('dark'); } catch (e) {}
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+    <script>tailwind.config = { darkMode: 'class', theme: { extend: { fontFamily: { sans: ['Inter','ui-sans-serif','system-ui','-apple-system','Segoe UI','Roboto','Helvetica','Arial','sans-serif'], mono: ['JetBrains Mono','ui-monospace','SFMono-Regular','Menlo','monospace'] } } } };</script>
+    <link rel="stylesheet" href="/static/css/patchbot.css?v=4">
+</head>
+<body class="pb">
+  <header class="pb-bar">
+    <div class="pb-brand">PseudoCo Assistant · <b>PatchBot</b></div>
+    <nav class="pb-nav">
+      <a href="/change-board-ui">Change Board</a>
+      <a href="/app">Chat</a>
+      <button type="button" id="schemeToggle" class="pb-link" aria-label="Toggle dark mode">Dark mode</button>
+      <button type="button" id="whoChip" class="pb-chip" title="Switch persona" hidden></button>
+    </nav>
+  </header>
+
+  <!-- Persona picker (Duo off) / sign-in prompt (Duo on) -->
+  <section id="whoPanel" class="pb-who" hidden>
+    <h1>Who is asking PatchBot to act?</h1>
+    <p id="whoHelp">PatchBot acts with the role of the person who asks. On this box there is no Duo sign-in, so pick a persona; every event records it as a role-map identity.</p>
+    <div id="personaList" class="pb-personas"></div>
+  </section>
+
+  <main id="workspace" class="pb-main" hidden>
+    <!-- Left: chat -->
+    <section class="pb-left" aria-label="PatchBot chat">
+      <div class="pb-estate">
+        <h2>Your estate · <span id="hostCount">6</span> servers</h2>
+        <p class="pb-muted"><span class="pb-dot"></span> <span id="watchLine">Watching for advisories</span></p>
+      </div>
+      <div id="chatLog" class="pb-chatlog" aria-live="polite"></div>
+      <div id="exposureCard" class="pb-card" hidden>
+        <p class="pb-q">Before the first full read: who can reach <b>web-prod-01</b> on port 443?</p>
+        <div class="pb-opts" role="group" aria-label="Exposure answer">
+          <button type="button" class="pb-opt" data-answer="internet"><b>1</b> Anyone on the internet</button>
+          <button type="button" class="pb-opt" data-answer="partners"><b>2</b> Partners over VPN</button>
+          <button type="button" class="pb-opt" data-answer="internal"><b>3</b> Only internal staff</button>
+          <button type="button" class="pb-opt" data-answer="unsure"><b>4</b> Not sure</button>
+        </div>
+        <p class="pb-muted pb-small">If nobody answers, the full read starts on its own in <span id="autoStart">60</span> s, using the asset data.</p>
+      </div>
+      <form id="chatForm" class="pb-input" autocomplete="off">
+        <label for="chatInput" class="sr-only">Message PatchBot</label>
+        <input id="chatInput" type="text" maxlength="4000" placeholder="Tell PatchBot what it got wrong, or ask it to act…">
+        <button type="submit" id="chatSend">Send</button>
+      </form>
+    </section>
+
+    <!-- Right: tabs -->
+    <section class="pb-right" aria-label="Findings, activity and resources">
+      <div class="pb-tabs" role="tablist">
+        <button type="button" role="tab" class="pb-tab" data-tab="findings" aria-selected="true">Findings</button>
+        <button type="button" role="tab" class="pb-tab" data-tab="activity" aria-selected="false">Activity</button>
+        <button type="button" role="tab" class="pb-tab" data-tab="toolchain" aria-selected="false">Toolchain</button>
+        <button type="button" role="tab" class="pb-tab" data-tab="resources" aria-selected="false">Resources</button>
+      </div>
+
+      <div id="tab-findings" class="pb-pane">
+        <div id="findingsList">
+          <div class="pb-head-row"><h2 id="openCount">0 open</h2></div>
+          <div id="sevBar" class="pb-sevbar" aria-hidden="true"></div>
+          <p id="sevLegend" class="pb-muted pb-small"></p>
+          <div id="hero"></div>
+          <div class="pb-toggle" role="group" aria-label="Show open or resolved findings">
+            <button type="button" data-view="open" aria-pressed="true">Open <span id="nOpen">0</span></button>
+            <button type="button" data-view="resolved" aria-pressed="false">Resolved <span id="nResolved">0</span></button>
+          </div>
+          <ul id="rows" class="pb-rows"></ul>
+          <p id="emptyFindings" class="pb-empty" hidden>No findings yet. Answer the question on the left, or start the full read.</p>
+          <button type="button" id="fullReadBtn" class="pb-btn" hidden>Start the full read</button>
+        </div>
+        <div id="findingDetail" hidden></div>
+      </div>
+
+      <div id="tab-activity" class="pb-pane" hidden>
+        <div class="pb-head-row"><h2>Watching for changes</h2></div>
+        <p id="activityTimeline" class="pb-muted pb-small"></p>
+        <div id="activityFeed"></div>
+      </div>
+
+      <div id="tab-toolchain" class="pb-pane" hidden>
+        <div class="pb-head-row"><h2>MCP servers</h2><button type="button" class="pb-btn pb-btn-primary" id="mcpScanAll">Scan all servers</button></div>
+        <p class="pb-muted pb-small">Cisco MCP Scanner rates each server's tool catalogue (its <code>tools/list</code>) before PatchBot trusts it. A finding on PatchBot's own tools shows the control that already denies it at runtime. <span id="mcpScanner"></span></p>
+        <div id="mcpServers" class="pb-mcp-list"></div>
+        <h3 class="pb-h3">Demo Controls</h3>
+        <div class="pb-demo">
+          <label class="pb-small"><input type="checkbox" id="vendorPoison"> Vendor ships a poisoned tool description</label>
+          <button type="button" class="pb-btn" id="vendorConnect">Connect Vendor Advisories</button>
+          <button type="button" class="pb-btn" id="vendorForce">Connect anyway</button>
+          <button type="button" class="pb-btn pb-btn-quiet" id="vendorDisconnect">Disconnect</button>
+          <button type="button" class="pb-btn" id="followVendor">PatchBot: follow the vendor's advisory</button>
+        </div>
+      </div>
+
+      <div id="tab-resources" class="pb-pane" hidden>
+        <h3 class="pb-h3">In scope</h3>
+        <div class="pb-tablewrap"><table class="pb-table"><thead><tr><th>Server</th><th>OS</th><th>Environment</th><th>Exposure</th><th>Purpose</th></tr></thead><tbody id="hostsBody"></tbody></table></div>
+        <h3 class="pb-h3">Context</h3>
+        <ul class="pb-ctx">
+          <li><b>Patch policy.</b> Staging first. Production only under an approved change; one CVE per change; the requester cannot approve. PatchBot never runs commands or stops services. The policy runs in <span id="controlsMode">Splunk Agent Observability Controls</span> before every tool call.</li>
+          <li><b>Prioritization.</b> CISA BOD 26-04 Table 1: public exposure, KEV, automatable, technical impact.</li>
+          <li><b>CVE facts.</b> <span id="catalogSource"></span></li>
+        </ul>
+        <h3 class="pb-h3">Demo Controls</h3>
+        <div class="pb-demo">
+          <label for="demoCve" class="pb-small">CVE</label>
+          <select id="demoCve"></select>
+          <label class="pb-small"><input type="checkbox" id="demoPoison"> Poisoned advisory</label>
+          <button type="button" class="pb-btn" id="publishAdvisory">Publish advisory</button>
+          <button type="button" class="pb-btn" id="followAdvisory">PatchBot: follow the advisory</button>
+          <button type="button" class="pb-btn" id="rollBack">Roll back package</button>
+          <button type="button" class="pb-btn pb-btn-quiet" id="resetEstate">Reset my estate</button>
+        </div>
+        <p class="pb-muted pb-small">Everything here is synthetic: the scanner, the servers, the patches and the Change Board. The model, the Controls, the traces and the Splunk events are real.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/js/patchbot.js?v=8"></script>
+</body>
+</html>

@@ -607,6 +607,41 @@ class Settings(BaseSettings):
     # "medadvice").
     hec_host: str = ""
 
+    # --- PatchBot (docs/patchbot.md): the agentic patch workspace at /patchbot-ui.
+    # Its events go to their OWN HEC destination and index (TA-patchbot reads
+    # them), never to the governance destinations, so PatchBot never changes the
+    # AI Governance counts in gen_ai_log. Empty URL/token = no Splunk events
+    # (PatchBot still writes logs/patchbot.jsonl).
+    patchbot_enabled: bool = True
+    patchbot_hec_url: str = ""
+    patchbot_hec_token: str = ""
+    patchbot_hec_index: str = "patchbot"
+    patchbot_hec_verify_tls: bool = True
+    # Who decides whether a PatchBot tool call runs:
+    #   "agent_observability" — Splunk Agent Observability Controls on the
+    #       PatchBot Agent stream (the workshop path). If the Controls server
+    #       cannot answer, read tools run and every other tool is refused
+    #       (fail closed), whatever galileo_agent_control_fail_open says.
+    #   "local" — the same rules evaluated in-process (offline dev and tests).
+    patchbot_controls_mode: str = "agent_observability"
+    patchbot_agent_stream: str = "PatchBot"
+    # The model PatchBot runs on under Ollama: the clean mistral-nemo, never the
+    # poisoned Lab 1 variant and never the small internal model.
+    patchbot_ollama_model: str = "mistral-nemo:12b"
+    # Tool-call rounds PatchBot may take for one request before it stops.
+    patchbot_max_steps: int = 8
+    patchbot_llm_timeout_s: float = 120.0
+    # Cisco MCP Scanner (PyPI cisco-ai-mcp-scanner) rates each MCP server's tool
+    # catalogue before PatchBot trusts it. Empty command = `mcp-scanner` on PATH,
+    # then <repo>/.venv-mcp-scanner/bin/mcp-scanner. Default analyzer: yara
+    # (offline, ~11 s, catches the poisoned vendor description). Opt-in: "api"
+    # (Cisco AI Defense, needs AI_DEFENSE_API_KEY) and "llm" (the box's Ollama;
+    # measured 2026-11-18 on mistral-nemo:12b: ~30 s per tool and HIGH false
+    # positives on 8 of PatchOps' 11 benign tools, so not for attendees).
+    patchbot_mcp_scanner_cmd: str = ""
+    patchbot_mcp_scanner_analyzers: str = "yara"
+    patchbot_mcp_scanner_timeout_s: float = 600.0
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
