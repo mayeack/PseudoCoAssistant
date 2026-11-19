@@ -49,9 +49,10 @@
   <section class="card"><div class="term" id="term" aria-live="polite"><span class="dim">Waiting. Choose the target and launch the exploit.</span></div></section>
   <section class="card next" id="next" hidden>
     <b>Now switch sides.</b>
-    <p>Open Splunk Enterprise Security, then Mission Control, Analyst Queue. Splunk's detection runs every minute
-       and joins this traffic with the vulnerability inventory: a finding for active exploitation appears within
-       about two minutes.</p>
+    <p id="nextOpen">Open Splunk Enterprise Security, then Mission Control, Analyst queue. Splunk's detection joins this
+       traffic with the vulnerability inventory, and a finding for active exploitation appears within a few minutes.</p>
+    <p id="nextPatched" hidden>The patched server refused every exploit request. Splunk still sees the attempts, answered
+       403 and 400, and raises no new active-exploitation finding.</p>
   </section>
   <p class="note dim">Everything on this page is simulated: no real system is attacked, and the responses are synthetic.</p>
 </main>
@@ -83,6 +84,8 @@
     }
     line(data.vulnerable ? '\n# The server answered: it is vulnerable, and the attacker can read files and run commands.'
                          : '\n# The server refused: it is patched.', data.vulnerable ? 'bad' : 'ok');
+    document.getElementById('nextOpen').hidden = !data.vulnerable;
+    document.getElementById('nextPatched').hidden = !!data.vulnerable;
     document.getElementById('next').hidden = false;
     btn.disabled = false;
   });
