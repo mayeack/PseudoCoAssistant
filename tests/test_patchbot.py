@@ -466,6 +466,13 @@ check("the CVE is gone from all four web servers", not any(
 check("the approval ran as the requester", any(
     e.get("initiator") == "dana.lee" and e.get("requested_via") == "change_board_approval" and e["dest"] == "web-prod-02"
     for e in events("patch", "patch_installed")))
+verifies = [e for e in events("tool", "tool_call") if e.get("tool_name") == "verify_patch"
+            and e.get("investigation_id") == "inv-test-1" and e.get("es_finding_id") == "fnd-test-1"]
+check("verify events carry check_cve_gone and the ES ids (TA resolve search)",
+      {e["dest"] for e in verifies if e.get("check_cve_gone") == "confident"}
+      == {"web-dev-01", "web-stg-01", "web-prod-01", "web-prod-02"}, [(e.get("dest"), e.get("check_cve_gone")) for e in verifies])
+check("only verify events carry the checks", not any(
+    "check_cve_gone" in e for e in events("tool", "tool_call") if e.get("tool_name") != "verify_patch"))
 atk = soar.post("/api/patchbot/attack/exploit", json={"target": "web-prod-01"}).json()
 check("attack after the patch: refused", atk.get("vulnerable") is False and all(
     q["status"] >= 400 for q in atk.get("requests") or [] if "%2e" in q["uri_path"]), atk)

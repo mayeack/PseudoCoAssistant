@@ -147,5 +147,7 @@ destination, after making sure the estate's vulnerability inventory is in Splunk
 
 Every patch, change and tool event from an automation run carries `estate_owner`, `cve`,
 `change_id`, `change_model`, `initiator` (the operator), `requested_by`, `investigation_id` and
-`es_finding_id` when given. TA-patchbot's resolve search marks an ES investigation resolved when
-every server in its CVE's scope has a `verify_patch` result with the CVE gone.
+`es_finding_id` when given. A `verify_patch` tool event also carries the checks
+(`check_cve_gone`, `check_no_new_exposure`, `check_service_healthy`). TA-patchbot's resolve
+search marks an ES investigation resolved when every server in its CVE's scope has a
+`verify_patch` event with `check_cve_gone=confident`.

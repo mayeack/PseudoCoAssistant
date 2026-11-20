@@ -244,8 +244,12 @@ def _finish(run: Run, name: str, args: Dict[str, Any], call_id: str, started: fl
     v = verdict or controls.Verdict(decision="error", errored=True, error_message="unknown tool")
     step_input = (step or {}).get("input") or {}
     step_ctx = (step or {}).get("context") or {}
+    # TA-patchbot's resolve search counts a host as fixed only from a verify_patch event
+    # with check_cve_gone=confident, so the checks travel on that event.
+    checks = ({k: output[k] for k in ("check_cve_gone", "check_no_new_exposure", "check_service_healthy")
+               if k in output} if name == "verify_patch" and ok and isinstance(output, dict) else {})
     telemetry.emit("tool", "tool_call", {
-        **run.common(),
+        **run.common(), **checks,
         "tool_name": name, "tool_server": server, "tool_call_id": call_id, "origin": origin,
         "decision": v.decision, "enforced": v.enforced, "controls_matched": v.controls_matched,
         "control_decisions": v.decisions, "deny_reason": v.deny_reason, "steer_message": v.steer_message,
