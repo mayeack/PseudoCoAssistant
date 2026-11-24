@@ -283,6 +283,9 @@ def _attachment_api_checks(c) -> None:
               duo == {"enabled": False, "reason": "Duo sign-in is off (DUO_ENABLED is not true)."}, str(duo))
     check("server-info gated.duo_signin is the same rule after a refresh",
           gated.get("duo_signin") == duo, f"{gated.get('duo_signin')} vs {duo}")
+    # The theme picker lists the PatchBot pages only where they are served.
+    check("server-info patchbot_enabled mirrors PATCHBOT_ENABLED",
+          info.get("patchbot_enabled") is bool(settings.patchbot_enabled), str(info.get("patchbot_enabled")))
 
 
 def main() -> int:
@@ -1076,7 +1079,7 @@ def main() -> int:
         check("Composer: attachment chip row present", 'id="attachmentChip"' in a_html)
         check("Composer: the attachment controls are outside the Demo Controls drawer",
               all(f'id="{i}"' not in _drawer for i in ("attachButton", "attachmentInput", "attachmentChip")))
-        check("Chat: chat.js cache-buster bumped to v=41", "/static/js/chat.js?v=41" in a_html)
+        check("Chat: chat.js cache-buster bumped to v=42", "/static/js/chat.js?v=42" in a_html)
         # Auto-Generate Sessions turns itself off after 60 minutes; the countdown
         # lives inside the existing #autoPromptStats counter, beside the pill.
         check("Auto-Generate Sessions: card says it turns off after 60 minutes",

@@ -179,6 +179,26 @@ sub_row = header[header.index('id="appSubtitle"') - 200:header.index('id="sessio
 check("Session ID shares the subtitle's row, under New Session",
       'id="sessionId"' not in row1 and "justify-between" in sub_row and sub_row.count("<div") == 1)
 
+# ------------------------------------------------------- PatchBot pages in the picker
+# Change Board and Agentic Patch Ops are pages, not themes (docs/patchbot.md):
+# a separate group whose options open the page and are hidden until
+# server-info says PatchBot serves them here.
+pages = _block(picker, '<optgroup id="themePages"', "</optgroup>")
+check("picker lists the PatchBot pages in their own group, hidden until enabled",
+      'label="PatchBot"' in pages and " hidden" in pages.split(">", 1)[0]
+      and " disabled" in pages.split(">", 1)[0])
+check("Change Board opens /change-board-ui",
+      '<option value="page:change-board" data-href="/change-board-ui">Change Board</option>' in pages)
+check("Agentic Patch Ops opens /patchbot-ui",
+      '<option value="page:patchbot" data-href="/patchbot-ui">Agentic Patch Ops</option>' in pages)
+check("the page entries are not counted as themes", not any(k.startswith("page") for k, _ in options))
+_on_change = _block(CHAT_JS, "function onThemeChange()", "\n}")
+check("choosing a page navigates and keeps the current theme selected",
+      "window.location.href = href" in _on_change and "select.value = currentTheme" in _on_change
+      and _on_change.index("return;") < _on_change.index("applyTheme(select.value)"))
+check("the page group follows server-info patchbot_enabled",
+      "applyPatchbotPages(data.patchbot_enabled === true)" in CHAT_JS)
+
 print()
 if _fails:
     print(f"FAILED: {_fails} check(s)")
