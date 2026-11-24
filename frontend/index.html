@@ -614,6 +614,13 @@
                                 <option value="telecomchatbot">Telecom Support</option>
                                 <option value="retail">Retail Support</option>
                                 <option value="manufacturing">Manufacturing Ops</option>
+                                <!-- PatchBot pages, not themes (docs/patchbot.md): choosing one opens
+                                     the page (chat.js onThemeChange). Shown only when server-info
+                                     says patchbot_enabled (chat.js applyPatchbotPages). -->
+                                <optgroup id="themePages" label="PatchBot" hidden disabled>
+                                    <option value="page:change-board" data-href="/change-board-ui">Change Board</option>
+                                    <option value="page:patchbot" data-href="/patchbot-ui">Agentic Patch Ops</option>
+                                </optgroup>
                             </select>
                         </h1>
                         <label for="themeSelect" class="text-xs font-semibold uppercase tracking-wide text-gray-400 cursor-pointer">Application Theme</label>
@@ -801,6 +808,6 @@
         </div>
     </div>
 
-    <script src="/static/js/chat.js?v=41"></script>
+    <script src="/static/js/chat.js?v=42"></script>
 </body>
 </html>

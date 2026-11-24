@@ -12,17 +12,24 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
     <script>tailwind.config = { darkMode: 'class', theme: { extend: { fontFamily: { sans: ['Inter','ui-sans-serif','system-ui','-apple-system','Segoe UI','Roboto','Helvetica','Arial','sans-serif'], mono: ['JetBrains Mono','ui-monospace','SFMono-Regular','Menlo','monospace'] } } } };</script>
-    <link rel="stylesheet" href="/static/css/patchbot.css?v=4">
+    <link rel="stylesheet" href="/static/css/patchbot.css?v=5">
 </head>
 <body class="pb">
   <header class="pb-bar">
-    <div class="pb-brand">PseudoCo Assistant · <b>PatchBot</b></div>
-    <nav class="pb-nav">
-      <a href="/change-board-ui">Change Board</a>
-      <a href="/app">Chat</a>
+    <div class="pb-brand">PseudoCo Assistant ·
+      <details class="pb-switch">
+        <summary title="Switch page"><b>PatchBot</b><svg class="pb-chev" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
+        <nav class="pb-menu" aria-label="Pages">
+          <a href="/patchbot-ui" aria-current="page">PatchBot</a>
+          <a href="/change-board-ui">Change Board</a>
+          <a href="/app">Chat</a>
+        </nav>
+      </details>
+    </div>
+    <div class="pb-nav">
       <button type="button" id="schemeToggle" class="pb-link" aria-label="Toggle dark mode">Dark mode</button>
       <button type="button" id="whoChip" class="pb-chip" title="Switch persona" hidden></button>
-    </nav>
+    </div>
   </header>
 
   <!-- Persona picker (Duo off) / sign-in prompt (Duo on) -->
@@ -127,6 +134,7 @@
     </section>
   </main>
 
+  <script src="/static/js/pb-nav.js?v=1"></script>
   <script src="/static/js/patchbot.js?v=8"></script>
 </body>
 </html>

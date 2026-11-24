@@ -441,9 +441,27 @@ function applyTheme(themeKey) {
 
 function onThemeChange() {
     const select = document.getElementById('themeSelect');
-    if (select) {
-        applyTheme(select.value);
+    if (!select) return;
+    // The PatchBot entries (index.html #themePages) are pages, not themes:
+    // open the page and put the picker back on the current theme, so Back
+    // returns to an unchanged chat page.
+    const opt = select.options[select.selectedIndex];
+    const href = opt && opt.dataset.href;
+    if (href) {
+        select.value = currentTheme;
+        window.location.href = href;
+        return;
     }
+    applyTheme(select.value);
+}
+
+// Show the PatchBot page entries in the theme picker only where the server
+// serves them (GET /api/server-info patchbot_enabled).
+function applyPatchbotPages(enabled) {
+    const group = document.getElementById('themePages');
+    if (!group) return;
+    group.hidden = !enabled;
+    group.disabled = !enabled;
 }
 
 // ---- Light / Dark color scheme (separate from the vertical "Application Theme") ----
@@ -651,6 +669,7 @@ async function refreshServerInfo() {
         if (_identityAnswer !== null) _identityAnswer = _hostGate.identity_session ? 'signed_in' : 'signed_out';
         _attachmentConfig = data.attachments || null;
         applyAttachmentGate();
+        applyPatchbotPages(data.patchbot_enabled === true);
         // Every poll, not only when /api/identity/me is asked: once the gate
         // closes nothing asks it any more, and the link must still go.
         renderSigninLink();

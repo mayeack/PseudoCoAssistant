@@ -413,6 +413,10 @@ def _server_info(request: Optional[Request] = None) -> dict:
         # chat page polls GET /api/identity/me only while this is true or
         # gated.duo_signin is open, so Labs 0-4 send no request for it.
         "identity_session": current_identity(request) is not None if request is not None else False,
+        # PatchBot (docs/patchbot.md): the chat header's Application Theme
+        # picker lists its pages (Change Board, Agentic Patch Ops) only when
+        # /patchbot-ui and /change-board-ui actually serve them here.
+        "patchbot_enabled": bool(settings.patchbot_enabled),
     }
 
 

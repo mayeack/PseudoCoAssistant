@@ -10,16 +10,23 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/patchbot.css?v=4">
+    <link rel="stylesheet" href="/static/css/patchbot.css?v=5">
 </head>
 <body class="pb">
   <header class="pb-bar">
-    <div class="pb-brand">PseudoCo Assistant · <b>Change Board</b></div>
-    <nav class="pb-nav">
-      <a href="/patchbot-ui">PatchBot</a>
-      <a href="/app">Chat</a>
+    <div class="pb-brand">PseudoCo Assistant ·
+      <details class="pb-switch">
+        <summary title="Switch page"><b>Change Board</b><svg class="pb-chev" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
+        <nav class="pb-menu" aria-label="Pages">
+          <a href="/patchbot-ui">PatchBot</a>
+          <a href="/change-board-ui" aria-current="page">Change Board</a>
+          <a href="/app">Chat</a>
+        </nav>
+      </details>
+    </div>
+    <div class="pb-nav">
       <button type="button" id="whoChip" class="pb-chip" title="Switch persona" hidden></button>
-    </nav>
+    </div>
   </header>
   <section id="whoPanel" class="pb-who" hidden>
     <h1>Who is reviewing changes?</h1>
@@ -36,6 +43,7 @@
     <ul id="changes" class="pb-rows"></ul>
     <p id="emptyChanges" class="pb-empty" hidden>No changes here.</p>
   </main>
+  <script src="/static/js/pb-nav.js?v=1"></script>
   <script src="/static/js/changeboard.js?v=5"></script>
 </body>
 </html>
