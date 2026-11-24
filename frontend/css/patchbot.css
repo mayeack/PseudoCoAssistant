@@ -21,6 +21,19 @@ body.pb { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 Int
 .pb-bar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between;
   padding: 10px max(16px, env(safe-area-inset-left, 0px)); background: var(--surface); border-bottom: 1px solid var(--line); }
 .pb-brand { font-weight: 600; } .pb-brand b { color: var(--accent); }
+/* Page switcher: the page title in the bar is a <details> dropdown (pb-nav.js closes it). */
+.pb-switch { position: relative; display: inline-block; }
+.pb-switch > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 6px; margin: -2px -6px; border-radius: 6px; color: var(--accent); }
+.pb-switch > summary::-webkit-details-marker { display: none; }
+.pb-switch > summary:hover, .pb-switch[open] > summary, .pb-switch > summary:focus-visible { background: var(--accent-soft); outline: none; }
+.pb-chev { transition: transform .15s; } .pb-switch[open] .pb-chev { transform: rotate(180deg); }
+.pb-menu { position: absolute; left: -6px; top: calc(100% + 6px); z-index: 50; min-width: 180px; display: flex; flex-direction: column;
+  padding: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, .14); font-weight: 500; }
+.pb .pb-menu a { padding: 6px 10px; border-radius: 6px; color: var(--fg); text-decoration: none; }
+.pb .pb-menu a:hover, .pb .pb-menu a:focus-visible { background: var(--surface-2); outline: none; }
+.pb .pb-menu a[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
 .pb-nav { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; font-size: 13px; }
 .pb-link { background: none; border: 0; color: var(--accent); cursor: pointer; font: inherit; padding: 0; }
 .pb-chip { font: 500 12px 'JetBrains Mono', monospace; padding: 3px 10px; border-radius: 999px;

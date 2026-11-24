@@ -518,6 +518,21 @@ for kind in telemetry.KINDS:
 check("tool events carry a decision", all(e.get("decision") for e in events("tool")))
 check("no event goes to gen_ai_log", settings.patchbot_hec_index == "patchbot")
 
+print("Page switcher")
+_front = Path(__file__).resolve().parent.parent / "frontend"
+for _page, _title in (("patchbot.html", "PatchBot"), ("changeboard.html", "Change Board")):
+    _html = (_front / _page).read_text()
+    _bar = _html.split('<header class="pb-bar">', 1)[1].split("</header>", 1)[0]
+    _menu = _bar.split('<nav class="pb-menu"', 1)[1].split("</nav>", 1)[0] if 'class="pb-menu"' in _bar else ""
+    check(f"{_page}: title is the page switcher",
+          '<details class="pb-switch">' in _bar and f"<summary title=\"Switch page\"><b>{_title}</b>" in _bar)
+    check(f"{_page}: switcher lists PatchBot, Change Board and Chat",
+          all(f'href="{h}"' in _menu for h in ("/patchbot-ui", "/change-board-ui", "/app")))
+    check(f"{_page}: current page marked", f'aria-current="page">{_title}</a>' in _menu)
+    check(f"{_page}: no page links on the right",
+          "href=" not in _bar.replace(_menu, ""))
+    check(f"{_page}: loads pb-nav.js", '/static/js/pb-nav.js' in _html)
+
 if _failures:
     print(f"\n{len(_failures)} FAILED: {_failures}")
     sys.exit(1)
