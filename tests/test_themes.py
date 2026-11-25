@@ -199,6 +199,25 @@ check("choosing a page navigates and keeps the current theme selected",
 check("the page group follows server-info patchbot_enabled",
       "applyPatchbotPages(data.patchbot_enabled === true)" in CHAT_JS)
 
+# The themes sit under their own "PseudoCo Assistant" group, ahead of PatchBot's,
+# so both lists start on the same left edge under a heading.
+themes_group = _block(picker, '<optgroup id="themeThemes"', "</optgroup>")
+check("the themes are grouped under PseudoCo Assistant, above the PatchBot pages",
+      'label="PseudoCo Assistant"' in themes_group
+      and re.findall(r'<option value="(\w+)">', themes_group) == KEYS
+      and picker.index('id="themeThemes"') < picker.index('id="themePages"')
+      and "hidden" not in themes_group.split(">", 1)[0])
+# Where the list can be styled (base-select), group names are bold, black and a
+# size up from the items, and the checkmark moves right so every item shares
+# one left edge.
+styled = _block(INDEX, "@supports (appearance: base-select) {", "\n        }")
+check("the styled list: bold black group names a size up, one left edge for the items",
+      "#themeSelect, #themeSelect::picker(select) { appearance: base-select; }" in styled
+      and "#themeSelect optgroup { font-size: 1.25rem; font-weight: 700; color: #000000; }" in styled
+      and "#themeSelect option { font-size: 1.125rem; font-weight: 400;" in styled
+      and "#themeSelect option::checkmark { order: 1; margin-inline-start: auto;" in styled
+      and "html.dark #themeSelect optgroup { color: #ffffff; }" in styled)
+
 print()
 if _fails:
     print(f"FAILED: {_fails} check(s)")

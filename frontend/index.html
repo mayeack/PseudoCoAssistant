@@ -85,6 +85,30 @@
         #themeTitle:has(#themeSelect:focus-visible) { outline: 2px solid var(--primary-ring); outline-offset: 4px; border-radius: 6px; }
         #themeSelect option { color: #1f2937; background-color: #ffffff; }
         html.dark #themeSelect option { color: #e2e8f0; background-color: #1e293b; }
+        /* The option list has two groups, PseudoCo Assistant (the themes) and
+           PatchBot (its pages). Where the browser lets a select's list be styled
+           (appearance: base-select, Chrome/Edge 135+), the group names are bold,
+           black and a size up from the items, every item starts on one left
+           edge, and the checkmark sits on the right. Elsewhere the native list
+           shows the same two groups in its own style. */
+        @supports (appearance: base-select) {
+            #themeSelect, #themeSelect::picker(select) { appearance: base-select; }
+            #themeSelect::picker(select) {
+                min-width: 15rem; padding: 6px; border: 1px solid #e5e7eb; border-radius: 10px;
+                background-color: #ffffff; box-shadow: 0 10px 28px rgba(15, 23, 42, .16);
+            }
+            #themeSelect optgroup { font-size: 1.25rem; font-weight: 700; color: #000000; }
+            #themeSelect optgroup + optgroup { margin-top: 6px; padding-top: 6px; border-top: 1px solid #e5e7eb; }
+            #themeSelect option { font-size: 1.125rem; font-weight: 400; padding: 4px 10px; border-radius: 6px; }
+            #themeSelect option::checkmark { order: 1; margin-inline-start: auto; padding-inline-start: 1rem; }
+            #themeSelect option:hover, #themeSelect option:focus-visible { background-color: #f3f4f6; outline: none; }
+            #themeSelect option:checked { color: var(--primary); font-weight: 600; }
+            html.dark #themeSelect::picker(select) { background-color: #1e293b; border-color: #334155; }
+            html.dark #themeSelect optgroup { color: #ffffff; }
+            html.dark #themeSelect optgroup + optgroup { border-top-color: #334155; }
+            html.dark #themeSelect option:hover, html.dark #themeSelect option:focus-visible { background-color: #334155; }
+            html.dark #themeSelect option:checked { color: var(--primary); }
+        }
 
         /* ---------- Dark mode ---------- */
         /* Scoped under html.dark; remaps the light Tailwind surfaces this page
@@ -606,14 +630,16 @@
                             </svg>
                             <select id="themeSelect" onchange="onThemeChange()" aria-label="Application Theme" title="Switch Application Theme"
                                 class="absolute inset-0 w-full h-full opacity-0 cursor-pointer text-lg font-medium">
-                                <option value="medadvice">MedAdvice</option>
-                                <option value="taxadvice">TaxAdvice</option>
-                                <option value="benefitsadvice">BenefitsAdvice</option>
-                                <option value="legaladvice">LegalAdvice</option>
-                                <option value="financeadvice">FinanceAdvice</option>
-                                <option value="telecomchatbot">Telecom Support</option>
-                                <option value="retail">Retail Support</option>
-                                <option value="manufacturing">Manufacturing Ops</option>
+                                <optgroup id="themeThemes" label="PseudoCo Assistant">
+                                    <option value="medadvice">MedAdvice</option>
+                                    <option value="taxadvice">TaxAdvice</option>
+                                    <option value="benefitsadvice">BenefitsAdvice</option>
+                                    <option value="legaladvice">LegalAdvice</option>
+                                    <option value="financeadvice">FinanceAdvice</option>
+                                    <option value="telecomchatbot">Telecom Support</option>
+                                    <option value="retail">Retail Support</option>
+                                    <option value="manufacturing">Manufacturing Ops</option>
+                                </optgroup>
                                 <!-- PatchBot pages, not themes (docs/patchbot.md): choosing one opens
                                      the page (chat.js onThemeChange). Shown only when server-info
                                      says patchbot_enabled (chat.js applyPatchbotPages). -->
